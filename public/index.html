@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Controle de Leitos - Posto 2</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside id="sidebar" class="sidebar hidden">
+      <div class="sidebar-header">
+        <div class="sidebar-brand">HMA</div>
+        <button id="sidebar-collapse" class="icon-btn" aria-label="Recolher menu">‹</button>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section">
+          <button id="nav-dashboard" class="nav-btn">Dashboard</button>
+        </div>
+        <div class="nav-section">
+          <button id="nav-home" class="nav-btn ghost">Setores</button>
+        </div>
+        <div class="nav-section">
+          <div class="nav-title">Setores</div>
+          <ul id="sidebar-wards" class="nav-list"></ul>
+        </div>
+        <div class="nav-section">
+          <button id="nav-gerenciar" class="nav-btn ghost">Cadastro</button>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="btn-logout-side" class="nav-btn danger">Sair</button>
+      </div>
+    </aside>
+
+    <div class="content">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button id="sidebar-open" class="icon-btn hidden" aria-label="Abrir menu">☰</button>
+          <div class="title" id="header-title">CONTROLE DE LEITOS</div>
+        </div>
+        <div class="topbar-actions">
+          <div class="user-chip" id="topbar-user">-</div>
+          <div class="date" id="date"></div>
+        </div>
+      </header>
+
+      <main class="container">
+    <section id="view-login" class="panel hidden">
+      <h2>Login</h2>
+      <div class="row">
+        <label>Usuário <input id="login-username" autocomplete="username"></label>
+        <label>Senha <input id="login-password" type="password" autocomplete="current-password"></label>
+        <button id="btn-login">Entrar</button>
+      </div>
+      <div class="hint">Padrão: admin / admin</div>
+    </section>
+
+    <section id="view-dashboard" class="panel hidden">
+      <h2>Dashboard Hospitalar</h2>
+      <div class="row">
+        <label>Setor
+          <select id="dashboard-ward">
+            <option value="">Todos os setores</option>
+          </select>
+        </label>
+        <label>Mês
+          <input id="dashboard-month" type="month">
+        </label>
+        <label>Período inicial
+          <input id="dashboard-from" type="date">
+        </label>
+        <label>Período final
+          <input id="dashboard-to" type="date">
+        </label>
+        <button id="btn-dashboard-apply">Aplicar filtro</button>
+        <button id="btn-dashboard-clear" class="ghost">Limpar</button>
+      </div>
+      <div id="dashboard-feedback" class="hint hidden"></div>
+      <div class="dashboard-grid">
+        <div class="dashboard-card"><span>Pacientes internados</span><strong id="dash-pacientes">0</strong></div>
+        <div class="dashboard-card"><span>Leitos totais</span><strong id="dash-leitos">0</strong></div>
+        <div class="dashboard-card"><span>Admissões no período</span><strong id="dash-admissoes">0</strong></div>
+        <div class="dashboard-card"><span>Média permanência</span><strong id="dash-permanencia">0 dias</strong></div>
+        <div class="dashboard-card"><span>Taxa de ocupação</span><strong id="dash-ocupacao">0%</strong></div>
+        <div class="dashboard-card"><span>Taxa de bloqueio</span><strong id="dash-bloqueio">0%</strong></div>
+        <div class="dashboard-card"><span>Altas acumuladas</span><strong id="dash-altas">0</strong></div>
+        <div class="dashboard-card"><span>Óbitos acumulados</span><strong id="dash-obitos">0</strong></div>
+        <div class="dashboard-card"><span>Taxa de rotatividade</span><strong id="dash-rotatividade">0%</strong></div>
+        <div class="dashboard-card"><span>Taxa de evasão</span><strong id="dash-evasao">0%</strong></div>
+      </div>
+      <div class="dashboard-chart-grid">
+        <div class="chart-card">
+          <div class="chart-title">Tipos de patologia</div>
+          <div id="dashboard-pathology" class="chart-bars"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Tempo de permanência</div>
+          <div id="dashboard-stay" class="chart-bars"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Taxa de ocupação por setor</div>
+          <div id="dashboard-sectors" class="chart-bars"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Procedimentos realizados</div>
+          <div id="dashboard-procedures" class="chart-bars"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-home" class="panel hidden">
+      <h2>Setores</h2>
+      <div class="hint">Escolha um setor para abrir a visão detalhada de leitos.</div>
+      <div class="row">
+        <label>Escolha o setor
+          <select id="select-ward"></select>
+        </label>
+        <button id="btn-abrir-setor">Abrir</button>
+        <button id="btn-gerenciar" class="ghost">Gerenciar</button>
+      </div>
+    </section>
+
+    <section id="view-admin" class="panel hidden">
+      <h2>Cadastro de Estrutura</h2>
+      <div class="row">
+        <label>1. Novo setor <input id="admin-ward-name" placeholder="Ex: POSTO 1"></label>
+        <button id="btn-criar-ward">Criar setor</button>
+      </div>
+
+      <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+
+      <div class="row">
+        <label>Setor <select id="admin-ward-select-enf"></select></label>
+        <label>2. Nova Enfermaria <input id="admin-enf-name" placeholder="Ex: ENF. 230"></label>
+        <button id="btn-criar-enf">Criar enfermaria</button>
+      </div>
+
+      <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+
+      <div class="row">
+        <label>Setor <select id="admin-ward-select-bed"></select></label>
+        <label>Enfermaria <select id="admin-enf-select-bed"></select></label>
+        <label>3. Leitos (de) <input id="admin-bed-start" type="number" min="1" placeholder="231"></label>
+        <label>(até) <input id="admin-bed-end" type="number" min="1" placeholder="240"></label>
+        <button id="btn-add-beds">Adicionar leitos</button>
+      </div>
+
+      <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+
+      <div class="row">
+        <label>Setor <select id="admin-ward-select-del"></select></label>
+        <label>Enfermaria <select id="admin-enf-select-del"></select></label>
+        <label>Excluir leitos (de) <input id="del-bed-start" type="number" min="1" placeholder="231"></label>
+        <label>(até) <input id="del-bed-end" type="number" min="1" placeholder="240"></label>
+        <button id="btn-del-beds" class="ghost">Excluir leitos</button>
+        <button id="btn-del-enf" class="ghost">Excluir enfermaria</button>
+      </div>
+
+      <div class="row" style="margin-top: 24px; justify-content: flex-end;">
+        <button id="btn-voltar-home" class="ghost">Voltar para o Início</button>
+      </div>
+    </section>
+
+    <section class="plantao">
+      <h2>Plantão</h2>
+      <div class="shift-shell">
+        <div class="shift-card">
+          <div class="shift-title">Responsável logado</div>
+          <div class="shift-user" id="shift-user-name">-</div>
+          <div class="shift-meta" id="shift-user-role">-</div>
+        </div>
+        <div class="shift-card">
+          <div class="shift-title">Status do plantão</div>
+          <div class="shift-status" id="shift-status-label">Fechado</div>
+          <div class="shift-meta" id="shift-status-meta">Nenhum plantão aberto</div>
+        </div>
+      </div>
+      <div class="row">
+        <label>Setor do plantão
+          <select id="shift-ward"></select>
+        </label>
+        <button id="btn-open-shift">Abrir plantão</button>
+        <button id="btn-close-shift" class="ghost">Fechar plantão e imprimir</button>
+        <button id="btn-print-last-shift" class="ghost">Reimprimir última ficha</button>
+      </div>
+      <div id="shift-feedback" class="hint hidden"></div>
+      <div id="plantao-details">
+        <div class="plantao-grid">
+          <label>Médico do plantão <input id="eq-medico"></label>
+          <label>Enfermeiro(a) dia <input id="eq-enf-dia"></label>
+          <label>Técnicos(as) dia <input id="eq-tec-dia"></label>
+          <label>Enfermeiro(a) noite <input id="eq-enf-noite"></label>
+          <label>Técnicos(as) noite <input id="eq-tec-noite"></label>
+          <label>Faltosos <input id="eq-faltosos"></label>
+        </div>
+        <button id="salvar-equipe">Salvar Plantão</button>
+      </div>
+    </section>
+    <section class="cards">
+      <div class="card ocupado"><div class="label">OCUPADO</div><div class="value" id="count-ocupado">0</div></div>
+      <div class="card livre"><div class="label">DESOCUPADO</div><div class="value" id="count-livre">0</div></div>
+      <div class="card bloqueado"><div class="label">BLOQUEADO</div><div class="value" id="count-bloqueado">0</div></div>
+      <div class="card reservado"><div class="label">RESERVADO</div><div class="value" id="count-reservado">0</div></div>
+      <div class="card extra"><div class="label">EXTRA</div><div class="value" id="count-extra">0</div></div>
+      <div class="card total"><div class="label">TOTAL</div><div class="value" id="count-total">0</div></div>
+    </section>
+
+    <section class="indicadores">
+      <h2>Indicadores</h2>
+      <div class="ind-grid">
+        <div class="ind-item"><span>Nº de Pacientes</span><strong id="ind-pacientes">0</strong></div>
+        <div class="ind-item"><span>Nº de Leitos</span><strong id="ind-leitos">0</strong></div>
+        <div class="ind-item"><span>Nº de Altas</span><strong id="ind-altas">0</strong></div>
+        <div class="ind-item"><span>Nº de Óbitos</span><strong id="ind-obitos">0</strong></div>
+        <div class="ind-item"><span>Nº de Leitos Bloqueados</span><strong id="ind-bloqueados">0</strong></div>
+      </div>
+      <div class="ind-actions">
+        <label>Altas: <input type="number" id="input-altas" min="0" value="0"></label>
+        <label>Óbitos: <input type="number" id="input-obitos" min="0" value="0"></label>
+        <button id="salvar-indicadores">Salvar</button>
+      </div>
+    </section>
+
+    <section class="tabela">
+      <h2>Leitos</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>LEITO</th>
+            <th>SITUAÇÃO</th>
+            <th>TEMPO MÉDIO</th>
+            <th>ADMISSÃO</th>
+            <th>NOME</th>
+            <th>DIAGNÓSTICO</th>
+            <th>PENDÊNCIAS</th>
+            <th>NIR</th>
+          </tr>
+        </thead>
+        <tbody id="tbody-leitos"></tbody>
+      </table>
+    </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="modal-paciente" class="modal">
+    <form method="dialog" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title" id="modal-title">Cadastrar paciente</div>
+        <button class="modal-close" value="cancelar" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-grid">
+          <label>Leito <input id="modal-leito" disabled></label>
+          <label>Situação
+            <select id="modal-status">
+              <option value="OCUPADO">OCUPADO</option>
+              <option value="LIVRE">DESOCUPADO</option>
+              <option value="BLOQUEADO">BLOQUEADO</option>
+              <option value="RESERVADO">RESERVADO</option>
+              <option value="EXTRA">EXTRA</option>
+            </select>
+          </label>
+          <label>Nome do paciente <input id="modal-nome"></label>
+          <label>Desde (admissão) <input id="modal-admissao" type="date"></label>
+          <label>Diagnóstico <input id="modal-diagnostico"></label>
+          <label>NIR <input id="modal-nir"></label>
+        </div>
+        <label>Pendências <textarea id="modal-pendencias" rows="3" placeholder="Digite uma ou mais pendências, uma por linha"></textarea></label>
+        <div class="history-panel">
+          <div class="procedimentos-title">Histórico de pendências</div>
+          <div class="history-hint">Marque a pendência e clique em Registrar para finalizar.</div>
+          <div id="modal-pendencias-historico" class="history-list"></div>
+        </div>
+        <div class="procedimentos">
+          <div class="procedimentos-title">Procedimentos realizados</div>
+          <div class="history-hint">Selecione o procedimento realizado e clique em Registrar para gravar a data e o usuário.</div>
+          <div class="procedimentos-grid">
+            <label class="proc-item"><input type="checkbox" value="SNE" class="proc-check"> SNE</label>
+            <label class="proc-item"><input type="checkbox" value="SNG" class="proc-check"> SNG</label>
+            <label class="proc-item"><input type="checkbox" value="SANGUE" class="proc-check"> SANGUE</label>
+            <label class="proc-item"><input type="checkbox" value="ASPIRAÇÃO" class="proc-check"> ASPIRAÇÃO</label>
+            <label class="proc-item"><input type="checkbox" value="PASSAGEM DE SONDA" class="proc-check"> PASSAGEM DE SONDA</label>
+          </div>
+        </div>
+        <div class="history-panel">
+          <div class="procedimentos-title">Histórico de procedimentos</div>
+          <div id="modal-procedimentos-historico" class="history-list"></div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="modal-salvar" value="default">Registrar</button>
+        <button id="modal-alta" class="ghost" value="default">Dar alta</button>
+        <button id="modal-obito" class="ghost" value="default">Óbito</button>
+        <button id="modal-baixa" class="danger" value="default">Dar baixa</button>
+        <button value="cancelar">Cancelar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>
