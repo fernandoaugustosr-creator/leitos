@@ -27,13 +27,94 @@ let pendingScrollEnf = null;
 let dashboardFilters = { wardId: "", month: "", from: "", to: "" };
 let currentUser = null;
 let lastClosedReport = null;
+let transferWardCache = new Map();
 
 const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "PASSAGEM DE SONDA"];
 const NO_ENFERMARIA_VALUE = "__SEM_ENFERMARIA__";
+const ALL_ENFERMARIA_VALUE = "__TODAS_ENFERMARIAS__";
+const DEFAULT_WHATSAPP_GROUP_LINK = "https://chat.whatsapp.com/IBpckfXiliuKEoxYLXjAE";
 
 function toBRDateTime(iso) {
   if (!iso) return "";
   return new Date(iso).toLocaleString("pt-BR");
+}
+
+function buildWardWhatsAppMessage() {
+  const counts = ward?.counts || {};
+  const activePendings = (ward?.beds || [])
+    .flatMap(bed => (bed.pendenciasHistorico || [])
+      .filter(item => item.status !== "FINALIZADA")
+      .map(item => `Leito ${bed.id} - ${item.texto}`))
+    .slice(0, 10);
+
+  const lines = [
+    `Resumo do setor ${ward?.nome || "-"}`,
+    `Data: ${ward?.data || new Date().toLocaleDateString("pt-BR")}`,
+    `Responsável: ${currentUser?.nome || currentUser?.username || "-"}`,
+    `Plantão: ${currentUser?.activeShift ? "Aberto" : "Fechado"}`,
+    `Pacientes ocupados: ${counts.OCUPADO ?? 0}`,
+    `Leitos livres: ${counts.LIVRE ?? 0}`,
+    `Leitos bloqueados: ${counts.BLOQUEADO ?? 0}`,
+    `Leitos reservados: ${counts.RESERVADO ?? 0}`,
+    `Leitos extras: ${counts.EXTRA ?? 0}`,
+    `Total de leitos: ${counts.TOTAL ?? 0}`,
+    `Pendências ativas: ${activePendings.length}`
+  ];
+
+  if (activePendings.length) {
+    lines.push("", "Pendências:");
+    lines.push(...activePendings);
+  }
+
+  return lines.join("\n");
+}
+
+function buildReportWhatsAppMessage(report) {
+  const activePendings = (report.pending?.active || [])
+    .slice(0, 10)
+    .map(item => `Leito ${item.leito} - ${item.texto}`);
+  const solvedPendings = (report.pending?.solved || [])
+    .slice(0, 10)
+    .map(item => `Leito ${item.leito} - ${item.texto}`);
+
+  const lines = [
+    `Fechamento de plantão - ${report.shift?.wardNome || "-"}`,
+    `Responsável: ${report.shift?.nome || report.shift?.username || "-"}`,
+    `Abertura: ${toBRDateTime(report.shift?.openedAt)}`,
+    `Fechamento: ${toBRDateTime(report.shift?.closedAt)}`,
+    `Pacientes ativos: ${report.summary?.pacientesAtivos ?? 0}`,
+    `Altas: ${report.summary?.altas ?? 0}`,
+    `Óbitos: ${report.summary?.obitos ?? 0}`,
+    `Pendências ativas: ${report.summary?.pendenciasAtivas ?? 0}`,
+    `Pendências solucionadas: ${report.summary?.pendenciasSolucionadas ?? 0}`
+  ];
+
+  if (activePendings.length) {
+    lines.push("", "Pendências ativas:");
+    lines.push(...activePendings);
+  }
+
+  if (solvedPendings.length) {
+    lines.push("", "Pendências solucionadas:");
+    lines.push(...solvedPendings);
+  }
+
+  return lines.join("\n");
+}
+
+function buildWhatsAppMessage() {
+  if (lastClosedReport) return buildReportWhatsAppMessage(lastClosedReport);
+  return buildWardWhatsAppMessage();
+}
+
+async function openWhatsAppSummary() {
+  if (!DEFAULT_WHATSAPP_GROUP_LINK) {
+    setShiftFeedback("Link do grupo do WhatsApp não configurado.", true);
+    return;
+  }
+
+  window.open(DEFAULT_WHATSAPP_GROUP_LINK, "_blank");
+  setShiftFeedback("Abrindo o grupo do WhatsApp.");
 }
 
 function setPatientFieldsEnabled(enabled) {
@@ -475,7 +556,7 @@ function renderBeds(beds) {
   }
 }
 
-function openPatientModal(bedId) {
+async function openPatientModal(bedId) {
   if (!ward) return;
   const bed = ward.beds.find(b => b.id === bedId);
   if (!bed) return;
@@ -494,6 +575,7 @@ function openPatientModal(bedId) {
   }
   renderPendingHistory(Array.isArray(bed.pendenciasHistorico) ? bed.pendenciasHistorico : []);
   renderProcedureHistory(Array.isArray(bed.procedimentosHistorico) ? bed.procedimentosHistorico : []);
+  await updateTransferOptions(bed.id, currentWardId, ALL_ENFERMARIA_VALUE);
   setPatientFieldsEnabled(bed.status === "OCUPADO");
   document.getElementById("modal-paciente").showModal();
 }
@@ -514,6 +596,110 @@ function getPendingStatusPayload() {
   }));
 }
 
+async function getTransferWardData(wardId) {
+  if (!Number.isInteger(wardId)) return null;
+  if (ward?.id === wardId) return ward;
+  if (transferWardCache.has(wardId)) return transferWardCache.get(wardId);
+  const data = await api(`/api/wards/${wardId}`);
+  transferWardCache.set(wardId, data);
+  return data;
+}
+
+function setTransferControlsDisabled(disabled, title = "") {
+  const ids = ["modal-transfer-ward", "modal-transfer-enfermaria", "modal-transfer-bed", "modal-transferir"];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.disabled = disabled;
+    el.title = title;
+  }
+}
+
+function fillTransferWardOptions(selectedWardId) {
+  const wardSelect = document.getElementById("modal-transfer-ward");
+  if (!wardSelect) return;
+  wardSelect.innerHTML = "";
+  for (const item of wards) {
+    wardSelect.appendChild(new Option(item.nome, String(item.id)));
+  }
+  const targetValue = selectedWardId ?? currentWardId;
+  if (targetValue && Array.from(wardSelect.options).some(option => option.value === String(targetValue))) {
+    wardSelect.value = String(targetValue);
+  }
+}
+
+function fillTransferEnfermariaOptions(targetWard, selectedEnfermaria = ALL_ENFERMARIA_VALUE) {
+  const enfermariaSelect = document.getElementById("modal-transfer-enfermaria");
+  if (!enfermariaSelect) return;
+  enfermariaSelect.innerHTML = "";
+  enfermariaSelect.appendChild(new Option("Todas as enfermarias", ALL_ENFERMARIA_VALUE));
+
+  const names = new Set(targetWard?.enfermarias || []);
+  if ((targetWard?.beds || []).some(item => !item.enfermaria)) {
+    names.add(NO_ENFERMARIA_VALUE);
+  }
+
+  for (const name of Array.from(names).sort((a, b) => String(a).localeCompare(String(b), "pt-BR"))) {
+    enfermariaSelect.appendChild(new Option(name === NO_ENFERMARIA_VALUE ? "Sem enfermaria" : name, name));
+  }
+
+  if (Array.from(enfermariaSelect.options).some(option => option.value === selectedEnfermaria)) {
+    enfermariaSelect.value = selectedEnfermaria;
+  } else {
+    enfermariaSelect.value = ALL_ENFERMARIA_VALUE;
+  }
+}
+
+function fillTransferBedOptions(targetWard, selectedEnfermaria, sourceBedId) {
+  const bedSelect = document.getElementById("modal-transfer-bed");
+  const transferButton = document.getElementById("modal-transferir");
+  if (!bedSelect || !transferButton) return;
+
+  bedSelect.innerHTML = "";
+  bedSelect.appendChild(new Option("Selecione o leito de destino", ""));
+
+  const destinationBeds = (targetWard?.beds || []).filter(item => {
+    if (targetWard.id === currentWardId && item.id === sourceBedId) return false;
+    if (item.status !== "LIVRE" && item.status !== "EXTRA") return false;
+    if (selectedEnfermaria === ALL_ENFERMARIA_VALUE) return true;
+    if (selectedEnfermaria === NO_ENFERMARIA_VALUE) return !item.enfermaria;
+    return item.enfermaria === selectedEnfermaria;
+  });
+
+  for (const item of destinationBeds) {
+    const enfermaria = item.enfermaria || "SEM ENFERMARIA";
+    bedSelect.appendChild(new Option(`LEITO ${item.id} - ${enfermaria}`, String(item.id)));
+  }
+
+  bedSelect.disabled = destinationBeds.length === 0;
+  transferButton.disabled = destinationBeds.length === 0;
+  bedSelect.title = destinationBeds.length ? "" : "Não há leitos disponíveis para o destino selecionado.";
+}
+
+async function updateTransferOptions(selectedBedId, selectedWardId = currentWardId, selectedEnfermaria = ALL_ENFERMARIA_VALUE) {
+  fillTransferWardOptions(selectedWardId);
+  const sourceBed = ward?.beds?.find(item => item.id === selectedBedId);
+  const isTransferAllowed = sourceBed?.status === "OCUPADO" && Boolean(sourceBed?.nome);
+
+  if (!isTransferAllowed) {
+    setTransferControlsDisabled(true, "A transferência só está disponível para paciente ocupado.");
+    fillTransferEnfermariaOptions({ enfermarias: [], beds: [] }, ALL_ENFERMARIA_VALUE);
+    fillTransferBedOptions({ id: currentWardId, beds: [] }, ALL_ENFERMARIA_VALUE, selectedBedId);
+    return;
+  }
+
+  setTransferControlsDisabled(false, "");
+  try {
+    const targetWard = await getTransferWardData(Number.parseInt(String(selectedWardId), 10));
+    fillTransferEnfermariaOptions(targetWard, selectedEnfermaria);
+    const enfermariaValue = document.getElementById("modal-transfer-enfermaria")?.value || ALL_ENFERMARIA_VALUE;
+    fillTransferBedOptions(targetWard, enfermariaValue, selectedBedId);
+  } catch (error) {
+    setTransferControlsDisabled(true, "Não foi possível carregar os destinos.");
+    setShiftFeedback(error.message || "Não foi possível carregar os destinos de transferência.", true);
+  }
+}
+
 async function salvarPaciente() {
   if (currentBedId == null) return;
   const status = document.getElementById("modal-status").value;
@@ -524,6 +710,7 @@ async function salvarPaciente() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status })
     });
+    transferWardCache.clear();
     await load();
     document.getElementById("modal-paciente").close();
     return;
@@ -546,6 +733,37 @@ async function salvarPaciente() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
+  transferWardCache.clear();
+  await load();
+  document.getElementById("modal-paciente").close();
+}
+
+async function transferirPaciente() {
+  if (currentBedId == null) return;
+  const destinationWardId = parseInt(document.getElementById("modal-transfer-ward").value, 10);
+  const destinationBedId = parseInt(document.getElementById("modal-transfer-bed").value, 10);
+  if (!Number.isInteger(destinationWardId) || !Number.isInteger(destinationBedId)) {
+    alert("Selecione o leito de destino.");
+    return;
+  }
+
+  const sourceBed = ward?.beds?.find(item => item.id === currentBedId);
+  const destinationWard = await getTransferWardData(destinationWardId);
+  const destinationBed = destinationWard?.beds?.find(item => item.id === destinationBedId);
+  if (!sourceBed || !destinationWard || !destinationBed) {
+    alert("Não foi possível localizar os leitos da transferência.");
+    return;
+  }
+
+  const destinationLabel = `${destinationWard.nome} - ${destinationBed.enfermaria || "SEM ENFERMARIA"} - LEITO ${destinationBed.id}`;
+  if (!confirm(`Transferir ${sourceBed.nome || "o paciente"} para ${destinationLabel}?`)) return;
+
+  await api(`/api/wards/${currentWardId}/beds/${currentBedId}/transfer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targetWardId: destinationWardId, targetBedId: destinationBedId })
+  });
+  transferWardCache.clear();
   await load();
   document.getElementById("modal-paciente").close();
 }
@@ -557,6 +775,7 @@ async function darBaixa() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status: "LIVRE" })
   });
+  transferWardCache.clear();
   await load();
   document.getElementById("modal-paciente").close();
 }
@@ -568,6 +787,7 @@ async function registrarOutcome(type) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ type })
   });
+  transferWardCache.clear();
   await load();
   document.getElementById("modal-paciente").close();
 }
@@ -575,6 +795,7 @@ async function registrarOutcome(type) {
 async function load() {
   if (!currentWardId) return;
   ward = await api(`/api/wards/${currentWardId}`);
+  transferWardCache.set(currentWardId, ward);
   document.getElementById("header-title").textContent = ward.nome;
   document.getElementById("date").textContent = ward.data;
   renderCounts(ward.counts);
@@ -629,6 +850,11 @@ document.getElementById("modal-salvar").addEventListener("click", async (e) => {
   await salvarPaciente();
 });
 
+document.getElementById("modal-transferir")?.addEventListener("click", async (e) => {
+  e.preventDefault();
+  await transferirPaciente();
+});
+
 document.getElementById("modal-baixa").addEventListener("click", async (e) => {
   e.preventDefault();
   await darBaixa();
@@ -650,7 +876,28 @@ document.getElementById("modal-status").addEventListener("change", () => {
   const status = document.getElementById("modal-status").value;
   const isOcupado = status === "OCUPADO";
   setPatientFieldsEnabled(isOcupado);
+  updateTransferOptions(
+    currentBedId,
+    parseInt(document.getElementById("modal-transfer-ward").value || String(currentWardId), 10),
+    document.getElementById("modal-transfer-enfermaria").value || ALL_ENFERMARIA_VALUE
+  );
   if (!isOcupado) clearPatientFields();
+});
+
+document.getElementById("modal-transfer-ward")?.addEventListener("change", async () => {
+  await updateTransferOptions(
+    currentBedId,
+    parseInt(document.getElementById("modal-transfer-ward").value || String(currentWardId), 10),
+    ALL_ENFERMARIA_VALUE
+  );
+});
+
+document.getElementById("modal-transfer-enfermaria")?.addEventListener("change", async () => {
+  await updateTransferOptions(
+    currentBedId,
+    parseInt(document.getElementById("modal-transfer-ward").value || String(currentWardId), 10),
+    document.getElementById("modal-transfer-enfermaria").value || ALL_ENFERMARIA_VALUE
+  );
 });
 
 document.getElementById("btn-dashboard-apply")?.addEventListener("click", async () => {
@@ -709,7 +956,7 @@ async function refreshWards() {
     dashboardFilters.wardId = "";
   }
   updateDashboardFilterInputs();
-  renderSidebar();
+  updateTopbarWardSelectors();
   renderCurrentUser();
 }
 
@@ -749,75 +996,66 @@ function updateDeleteEnfDropdown() {
 
 document.getElementById("admin-ward-select-del")?.addEventListener("change", updateDeleteEnfDropdown);
 
-function renderSidebar() {
-  const ul = document.getElementById("sidebar-wards");
-  if (!ul) return;
-  ul.innerHTML = "";
+function updateTopbarWardSelectors() {
+  const wardSelect = document.getElementById("topbar-ward-select");
+  const enfSelect = document.getElementById("topbar-enf-select");
+  if (!wardSelect || !enfSelect) return;
+
+  wardSelect.innerHTML = "";
   for (const w of wards) {
-    const li = document.createElement("li");
-    li.className = "nav-item";
+    wardSelect.appendChild(new Option(w.nome, w.id));
+  }
 
-    const row = document.createElement("div");
-    row.className = "nav-item-row";
-    if (w.id === currentWardId) row.classList.add("active");
+  if (currentWardId) wardSelect.value = String(currentWardId);
+  else if (wards.length) wardSelect.value = String(wards[0].id);
 
-    const name = document.createElement("div");
-    name.className = "nav-item-name";
-    name.textContent = w.nome;
+  updateTopbarEnfSelect();
+}
 
-    const meta = document.createElement("div");
-    meta.className = "nav-item-meta";
-    meta.textContent = `${(w.enfermarias || []).length}`;
+function updateTopbarEnfSelect() {
+  const wardSelect = document.getElementById("topbar-ward-select");
+  const enfSelect = document.getElementById("topbar-enf-select");
+  if (!wardSelect || !enfSelect) return;
 
-    row.append(name, meta);
-    row.addEventListener("click", async () => {
-      currentWardId = w.id;
-      setAppEnabled(true);
-      showOnly(null);
-      await load();
-      renderSidebar();
-      closeSidebarOnMobile();
-    });
-    li.appendChild(row);
+  const wardId = parseInt(wardSelect.value, 10);
+  const selectedWard = wards.find(item => item.id === wardId);
+  enfSelect.innerHTML = "";
+  enfSelect.appendChild(new Option("Todas", ""));
 
-    const enfermarias = w.enfermarias || [];
-    if (enfermarias.length) {
-      const sub = document.createElement("ul");
-      sub.className = "nav-sub";
-      for (const enf of enfermarias) {
-        const a = document.createElement("a");
-        a.href = "#";
-        a.textContent = enf;
-        a.addEventListener("click", async (e) => {
-          e.preventDefault();
-          currentWardId = w.id;
-          pendingScrollEnf = `enf-${enf.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-          setAppEnabled(true);
-          showOnly(null);
-          await load();
-          renderSidebar();
-          closeSidebarOnMobile();
-        });
-        const subLi = document.createElement("li");
-        subLi.appendChild(a);
-        sub.appendChild(subLi);
-      }
-      li.appendChild(sub);
-    }
-
-    ul.appendChild(li);
+  for (const enf of selectedWard?.enfermarias || []) {
+    enfSelect.appendChild(new Option(enf, enf));
   }
 }
 
 function closeSidebarOnMobile() {
-  const sidebar = document.getElementById("sidebar");
-  if (!sidebar) return;
-  if (window.matchMedia("(max-width: 900px)").matches) sidebar.classList.remove("open");
+}
+
+async function openTopbarWard() {
+  const wardId = parseInt(document.getElementById("topbar-ward-select")?.value, 10);
+  if (!wardId) return;
+  currentWardId = wardId;
+  setAppEnabled(true);
+  showOnly(null);
+  await load();
+  updateTopbarWardSelectors();
+}
+
+async function openTopbarEnfermaria() {
+  const wardId = parseInt(document.getElementById("topbar-ward-select")?.value, 10);
+  const enfermaria = document.getElementById("topbar-enf-select")?.value;
+  if (!wardId) return;
+
+  currentWardId = wardId;
+  if (enfermaria) {
+    pendingScrollEnf = `enf-${enfermaria.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  }
+  setAppEnabled(true);
+  showOnly(null);
+  await load();
+  updateTopbarWardSelectors();
 }
 
 async function startApp() {
-  document.getElementById("sidebar")?.classList.remove("hidden");
-  document.getElementById("sidebar-open")?.classList.remove("hidden");
   setAppEnabled(false);
   showOnly("view-dashboard");
   await refreshCurrentUser();
@@ -834,8 +1072,6 @@ async function checkAuth() {
     await startApp();
   } catch {
     currentUser = null;
-    document.getElementById("sidebar")?.classList.add("hidden");
-    document.getElementById("sidebar-open")?.classList.add("hidden");
     setAppEnabled(false);
     showOnly("view-login");
   }
@@ -874,13 +1110,17 @@ async function doLogout() {
 }
 
 document.getElementById("btn-logout-side")?.addEventListener("click", doLogout);
+document.getElementById("btn-logout-top")?.addEventListener("click", doLogout);
+document.getElementById("topbar-ward-select")?.addEventListener("change", updateTopbarEnfSelect);
+document.getElementById("btn-topbar-open")?.addEventListener("click", openTopbarWard);
+document.getElementById("btn-topbar-open-enf")?.addEventListener("click", openTopbarEnfermaria);
 
 document.getElementById("btn-abrir-setor").addEventListener("click", async () => {
   currentWardId = parseInt(document.getElementById("select-ward").value, 10);
   setAppEnabled(true);
   showOnly(null);
   await load();
-  renderSidebar();
+  updateTopbarWardSelectors();
 });
 
 document.getElementById("btn-gerenciar").addEventListener("click", async () => {
@@ -957,6 +1197,8 @@ document.getElementById("btn-print-last-shift")?.addEventListener("click", () =>
   setShiftFeedback("Reabrindo a última ficha de plantão.");
   printShiftReport(lastClosedReport);
 });
+
+document.getElementById("btn-whatsapp-shift")?.addEventListener("click", openWhatsAppSummary);
 
 document.getElementById("btn-criar-ward").addEventListener("click", async () => {
   const nome = document.getElementById("admin-ward-name").value.trim();
@@ -1063,18 +1305,6 @@ document.getElementById("btn-del-enf")?.addEventListener("click", async () => {
   } catch (e) {
     alert(e.message);
   }
-});
-
-document.getElementById("sidebar-collapse")?.addEventListener("click", () => {
-  document.getElementById("sidebar")?.classList.toggle("hidden");
-  document.getElementById("sidebar-open")?.classList.remove("hidden");
-});
-
-document.getElementById("sidebar-open")?.addEventListener("click", () => {
-  const sidebar = document.getElementById("sidebar");
-  if (!sidebar) return;
-  sidebar.classList.remove("hidden");
-  sidebar.classList.add("open");
 });
 
 checkAuth();

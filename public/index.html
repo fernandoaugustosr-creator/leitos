@@ -8,40 +8,36 @@
 </head>
 <body>
   <div class="app-shell">
-    <aside id="sidebar" class="sidebar hidden">
-      <div class="sidebar-header">
-        <div class="sidebar-brand">HMA</div>
-        <button id="sidebar-collapse" class="icon-btn" aria-label="Recolher menu">‹</button>
-      </div>
-      <nav class="sidebar-nav">
-        <div class="nav-section">
-          <button id="nav-dashboard" class="nav-btn">Dashboard</button>
-        </div>
-        <div class="nav-section">
-          <button id="nav-home" class="nav-btn ghost">Setores</button>
-        </div>
-        <div class="nav-section">
-          <div class="nav-title">Setores</div>
-          <ul id="sidebar-wards" class="nav-list"></ul>
-        </div>
-        <div class="nav-section">
-          <button id="nav-gerenciar" class="nav-btn ghost">Cadastro</button>
-        </div>
-      </nav>
-      <div class="sidebar-footer">
-        <button id="btn-logout-side" class="nav-btn danger">Sair</button>
-      </div>
-    </aside>
-
     <div class="content">
       <header class="topbar">
-        <div class="topbar-left">
-          <button id="sidebar-open" class="icon-btn hidden" aria-label="Abrir menu">☰</button>
-          <div class="title" id="header-title">CONTROLE DE LEITOS</div>
+        <div class="topbar-main">
+          <div class="topbar-left">
+            <div class="title" id="header-title">CONTROLE DE LEITOS</div>
+          </div>
+          <div class="topbar-actions">
+            <div class="user-chip" id="topbar-user">-</div>
+            <div class="date" id="date"></div>
+          </div>
         </div>
-        <div class="topbar-actions">
-          <div class="user-chip" id="topbar-user">-</div>
-          <div class="date" id="date"></div>
+        <div class="topbar-menu">
+          <div class="topbar-nav-buttons">
+            <button id="nav-dashboard" class="nav-btn">Dashboard</button>
+            <button id="nav-home" class="nav-btn ghost">Setores</button>
+            <button id="nav-gerenciar" class="nav-btn ghost">Cadastro</button>
+          </div>
+          <div class="topbar-selectors">
+            <label>Setor
+              <select id="topbar-ward-select"></select>
+            </label>
+            <label>Enfermaria
+              <select id="topbar-enf-select">
+                <option value="">Todas</option>
+              </select>
+            </label>
+            <button id="btn-topbar-open" class="ghost">Abrir</button>
+            <button id="btn-topbar-open-enf" class="ghost">Ir para enfermaria</button>
+          </div>
+          <button id="btn-logout-top" class="nav-btn danger topbar-logout">Sair</button>
         </div>
       </header>
 
@@ -183,6 +179,7 @@
         <button id="btn-open-shift">Abrir plantão</button>
         <button id="btn-close-shift" class="ghost">Fechar plantão e imprimir</button>
         <button id="btn-print-last-shift" class="ghost">Reimprimir última ficha</button>
+        <button id="btn-whatsapp-shift" class="ghost">Enviar no WhatsApp</button>
       </div>
       <div id="shift-feedback" class="hint hidden"></div>
       <div id="plantao-details">
@@ -288,9 +285,25 @@
           <div class="procedimentos-title">Histórico de procedimentos</div>
           <div id="modal-procedimentos-historico" class="history-list"></div>
         </div>
+        <div class="history-panel">
+          <div class="procedimentos-title">Transferência de paciente</div>
+          <div class="history-hint">Selecione o setor, a enfermaria e o leito de destino para transferir o paciente com todos os dados cadastrados.</div>
+          <div class="modal-grid">
+            <label>Setor
+              <select id="modal-transfer-ward"></select>
+            </label>
+            <label>Enfermaria
+              <select id="modal-transfer-enfermaria"></select>
+            </label>
+            <label>Destino
+              <select id="modal-transfer-bed"></select>
+            </label>
+          </div>
+        </div>
       </div>
       <div class="modal-actions">
         <button id="modal-salvar" value="default">Registrar</button>
+        <button id="modal-transferir" class="ghost" value="default">Transferir</button>
         <button id="modal-alta" class="ghost" value="default">Dar alta</button>
         <button id="modal-obito" class="ghost" value="default">Óbito</button>
         <button id="modal-baixa" class="danger" value="default">Dar baixa</button>
