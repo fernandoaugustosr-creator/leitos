@@ -141,6 +141,13 @@ function applyStatePayload(payload) {
   return true;
 }
 
+function isMissingSupabaseColumn(errorText, column) {
+  const text = String(errorText || "");
+  return text.includes(`column ${supabaseTable}.${column} does not exist`)
+    || text.includes(`Could not find the '${column}' column`)
+    || text.includes(`Could not find the "${column}" column`);
+}
+
 async function saveStateToSupabase() {
   if (!hasSupabaseConfig()) return false;
   const state = buildStatePayload();
@@ -168,7 +175,7 @@ async function saveStateToSupabase() {
 
     const errorText = await response.text();
     lastError = new Error(errorText || "Falha ao salvar no Supabase");
-    if (!errorText.includes(`column ${supabaseTable}.${column} does not exist`)) break;
+    if (!isMissingSupabaseColumn(errorText, column)) break;
   }
 
   throw lastError || new Error("Falha ao salvar no Supabase");
@@ -190,7 +197,7 @@ async function loadStateFromSupabase() {
     if (!response.ok) {
       const errorText = await response.text();
       lastError = new Error(errorText || "Falha ao carregar do Supabase");
-      if (errorText.includes(`column ${supabaseTable}.${column} does not exist`)) continue;
+      if (isMissingSupabaseColumn(errorText, column)) continue;
       throw lastError;
     }
 
@@ -281,6 +288,23 @@ function addUserAction(user, type, description, meta = {}) {
   return entry;
 }
 
+function addShiftSolvedPendings(user, wardId, items) {
+  if (!user?.activeShift || user.activeShift.wardId !== wardId || !Array.isArray(items) || !items.length) return;
+  if (!Array.isArray(user.activeShift.pendenciasFinalizadas)) {
+    user.activeShift.pendenciasFinalizadas = [];
+  }
+
+  for (const item of items) {
+    const key = `${item.leito}:${item.id || item.texto}:${item.finishedAt || ""}`;
+    const exists = user.activeShift.pendenciasFinalizadas.some(existing =>
+      `${existing.leito}:${existing.id || existing.texto}:${existing.finishedAt || ""}` === key
+    );
+    if (!exists) {
+      user.activeShift.pendenciasFinalizadas.push({ ...item });
+    }
+  }
+}
+
 function buildShiftReport(user, shift) {
   const ward = wards.find(item => item.id === shift.wardId);
   const beds = ward ? ward.beds.map(bed => normalizeBedData({ ...bed })) : [];
@@ -368,6 +392,22 @@ function buildShiftReport(user, shift) {
         finishedBy: item.finishedBy || action.username || ""
       });
     }
+  }
+
+  for (const item of shift.pendenciasFinalizadas || []) {
+    const solvedKey = `${item.leito}:${item.id || item.texto}:${item.finishedAt || ""}`;
+    if (solvedKeys.has(solvedKey)) continue;
+    solvedKeys.add(solvedKey);
+    solvedPendencias.push({
+      leito: item.leito,
+      enfermaria: item.enfermaria || "",
+      paciente: item.paciente || "",
+      texto: item.texto || "",
+      createdAt: item.createdAt || "",
+      createdBy: item.createdBy || "",
+      finishedAt: item.finishedAt || "",
+      finishedBy: item.finishedBy || ""
+    });
   }
 
   activePendencias.sort((a, b) => String(a.enfermaria).localeCompare(String(b.enfermaria), "pt-BR") || a.leito - b.leito);
@@ -571,7 +611,8 @@ app.post("/api/shifts/open", requireAuth, (req, res) => {
     closedAt: null,
     wardId: ward.id,
     wardNome: ward.nome,
-    actions: []
+    actions: [],
+    pendenciasFinalizadas: []
   };
   addUserAction(req.user, "SHIFT_OPEN", `Abriu plantão no setor ${ward.nome}`, { wardId: ward.id, wardNome: ward.nome });
   persistState();
@@ -999,6 +1040,7 @@ app.patch("/api/wards/:wardId/beds/:bedId", requireAuth, (req, res) => {
     pendenciasRegistradas,
     pendenciasFinalizadas
   });
+  addShiftSolvedPendings(req.user, ward.id, pendenciasFinalizadas);
   persistState();
   res.json({ bed: bedForClient(bed), counts: computeCounts(ward.beds) });
 });
