@@ -244,6 +244,23 @@ async function initializeStorage() {
   }
 }
 
+async function refreshStateFromSupabase() {
+  if (!hasSupabaseConfig()) return false;
+  try {
+    return await loadStateFromSupabase();
+  } catch (error) {
+    storageStatus.provider = "memory";
+    storageStatus.synced = false;
+    storageStatus.lastError = error.message;
+    return false;
+  }
+}
+
+app.use("/api", async (req, res, next) => {
+  await refreshStateFromSupabase();
+  next();
+});
+
 function getWardOr404(req, res) {
   const id = parseInt(req.params.wardId, 10);
   const ward = wards.find(w => w.id === id);
