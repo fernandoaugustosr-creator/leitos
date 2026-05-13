@@ -16,19 +16,23 @@ const supabaseStateId = process.env.SUPABASE_STATE_ID || "main";
 const supabaseStateColumns = ["payload", "data"];
 
 let nextShiftId = 2;
+let nextPatientId = 1;
 const users = [{
   id: 1,
   username: "admin",
   password: "admin",
   nome: "Administrador",
+  cpf: "",
+  birthDate: "",
   role: "admin",
   activeShift: null,
   shifts: [],
   actions: []
 }];
+const patientRegistry = [];
 const sessions = new Map();
 const storageStatus = {
-  provider: "memory",
+  provider: "supabase",
   configured: Boolean(supabaseUrl && supabaseKey),
   synced: false,
   lastSyncAt: null,
@@ -70,6 +74,13 @@ function requireAuth(req, res, next) {
   next();
 }
 
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({ error: "Apenas administradores podem acessar esta área" });
+  }
+  next();
+}
+
 let nextWardId = 2;
 
 const wards = [
@@ -88,15 +99,15 @@ const wards = [
     },
     beds: [
       { id: 231, enfermaria: "ENF. 230", status: "OCUPADO", admissao: "2026-03-20", nome: "MARIA JOANA DA SILVA", diagnostico: "FISIO/UMIDIFICAR TRAQUEOSTOMIA", pendencias: "NEURO", nir: "NEURO" },
-      { id: 232, enfermaria: "ENF. 230", status: "LIVRE", admissao: "", nome: "", diagnostico: "", pendencias: "", nir: "" },
+      { id: 232, enfermaria: "ENF. 230", status: "LIVRE", admissao: "", nome: "", cpf: "", birthDate: "", diagnostico: "", pendencias: "", nir: "" },
       { id: 233, enfermaria: "ENF. 230", status: "OCUPADO", admissao: "2026-04-08", nome: "MARIA RAIMUNDA DOS SANTOS", diagnostico: "PNM", pendencias: "", nir: "" },
-      { id: 234, enfermaria: "ENF. 230", status: "LIVRE", admissao: "", nome: "", diagnostico: "", pendencias: "", nir: "" },
-      { id: 235, enfermaria: "ENF. 230", status: "OCUPADO", admissao: "2026-04-01", nome: "MARIA SILVA COSTA", diagnostico: "", pendencias: "", nir: "" },
-      { id: 236, enfermaria: "ENF. 240", status: "BLOQUEADO", admissao: "", nome: "", diagnostico: "", pendencias: "Manutenção", nir: "" },
-      { id: 237, enfermaria: "ENF. 240", status: "RESERVADO", admissao: "", nome: "", diagnostico: "", pendencias: "Pré-cirurgia", nir: "" },
-      { id: 238, enfermaria: "ENF. 240", status: "EXTRA", admissao: "", nome: "", diagnostico: "", pendencias: "", nir: "" },
-      { id: 239, enfermaria: "ENF. 240", status: "OCUPADO", admissao: "2026-04-05", nome: "JOÃO PEREIRA", diagnostico: "Pneumonia", pendencias: "", nir: "" },
-      { id: 240, enfermaria: "ENF. 240", status: "OCUPADO", admissao: "2026-04-07", nome: "ANTONIO SOUZA", diagnostico: "AVC", pendencias: "Tomografia", nir: "NEURO" }
+      { id: 234, enfermaria: "ENF. 230", status: "LIVRE", admissao: "", nome: "", cpf: "", birthDate: "", diagnostico: "", pendencias: "", nir: "" },
+      { id: 235, enfermaria: "ENF. 230", status: "OCUPADO", admissao: "2026-04-01", nome: "MARIA SILVA COSTA", cpf: "", birthDate: "", diagnostico: "", pendencias: "", nir: "" },
+      { id: 236, enfermaria: "ENF. 240", status: "BLOQUEADO", admissao: "", nome: "", cpf: "", birthDate: "", diagnostico: "", pendencias: "Manutenção", nir: "" },
+      { id: 237, enfermaria: "ENF. 240", status: "RESERVADO", admissao: "", nome: "", cpf: "", birthDate: "", diagnostico: "", pendencias: "Pré-cirurgia", nir: "" },
+      { id: 238, enfermaria: "ENF. 240", status: "EXTRA", admissao: "", nome: "", cpf: "", birthDate: "", diagnostico: "", pendencias: "", nir: "" },
+      { id: 239, enfermaria: "ENF. 240", status: "OCUPADO", admissao: "2026-04-05", nome: "JOÃO PEREIRA", cpf: "", birthDate: "", diagnostico: "Pneumonia", pendencias: "", nir: "" },
+      { id: 240, enfermaria: "ENF. 240", status: "OCUPADO", admissao: "2026-04-07", nome: "ANTONIO SOUZA", cpf: "", birthDate: "", diagnostico: "AVC", pendencias: "Tomografia", nir: "NEURO" }
     ]
   }
 ];
@@ -105,12 +116,28 @@ function hasSupabaseConfig() {
   return Boolean(supabaseUrl && supabaseKey);
 }
 
+function ensureSupabaseConfigured() {
+  if (!hasSupabaseConfig()) {
+    const error = new Error("Supabase não configurado");
+    storageStatus.provider = "supabase";
+    storageStatus.configured = false;
+    storageStatus.synced = false;
+    storageStatus.lastError = error.message;
+    throw error;
+  }
+
+  storageStatus.provider = "supabase";
+  storageStatus.configured = true;
+}
+
 function buildStatePayload() {
   return {
     schemaVersion: 1,
     nextWardId,
     nextShiftId,
+    nextPatientId,
     users,
+    patientRegistry,
     wards
   };
 }
@@ -125,10 +152,30 @@ function applyStatePayload(payload) {
         username: user.username,
         password: user.password,
         nome: user.nome || user.username,
+        cpf: String(user.cpf || "").replace(/\D/g, ""),
+        birthDate: user.birthDate || "",
         role: user.role || "user",
         activeShift: user.activeShift || null,
         shifts: Array.isArray(user.shifts) ? user.shifts : [],
         actions: Array.isArray(user.actions) ? user.actions : []
+      });
+    }
+  }
+  patientRegistry.length = 0;
+  if (Array.isArray(payload.patientRegistry)) {
+    for (const patient of payload.patientRegistry) {
+      patientRegistry.push({
+        id: patient.id,
+        nome: patient.nome || "",
+        cpf: normalizeCpf(patient.cpf),
+        birthDate: patient.birthDate || "",
+        diagnostico: patient.diagnostico || "",
+        nir: patient.nir || "",
+        createdAt: patient.createdAt || new Date().toISOString(),
+        updatedAt: patient.updatedAt || new Date().toISOString(),
+        deletedAt: patient.deletedAt || null,
+        currentAdmission: patient.currentAdmission || null,
+        admissionHistory: Array.isArray(patient.admissionHistory) ? patient.admissionHistory : []
       });
     }
   }
@@ -138,6 +185,10 @@ function applyStatePayload(payload) {
   }
   nextWardId = Number.isInteger(payload.nextWardId) ? payload.nextWardId : wards.reduce((max, ward) => Math.max(max, ward.id), 0) + 1;
   nextShiftId = Number.isInteger(payload.nextShiftId) ? payload.nextShiftId : users.reduce((max, user) => Math.max(max, ...(user.shifts || []).map(shift => shift.id || 0)), 0) + 1;
+  nextPatientId = Number.isInteger(payload.nextPatientId) ? payload.nextPatientId : patientRegistry.reduce((max, patient) => Math.max(max, Number(patient.id) || 0), 0) + 1;
+  if (!patientRegistry.length) {
+    rebuildPatientRegistryFromWards();
+  }
   return true;
 }
 
@@ -222,43 +273,55 @@ async function loadStateFromSupabase() {
 }
 
 async function persistState() {
-  if (!hasSupabaseConfig()) return false;
+  ensureSupabaseConfigured();
   try {
     return await saveStateToSupabase();
   } catch (error) {
-    storageStatus.provider = "memory";
+    storageStatus.provider = "supabase";
     storageStatus.synced = false;
     storageStatus.lastError = error.message;
-    return false;
+    throw error;
   }
 }
 
 async function initializeStorage() {
-  if (!hasSupabaseConfig()) return;
+  ensureSupabaseConfigured();
   try {
-    await loadStateFromSupabase();
+    const loaded = await loadStateFromSupabase();
+    if (!loaded) {
+      await saveStateToSupabase();
+    }
   } catch (error) {
-    storageStatus.provider = "memory";
+    storageStatus.provider = "supabase";
     storageStatus.synced = false;
     storageStatus.lastError = error.message;
+    throw error;
   }
 }
 
 async function refreshStateFromSupabase() {
-  if (!hasSupabaseConfig()) return false;
+  ensureSupabaseConfigured();
   try {
-    return await loadStateFromSupabase();
+    const loaded = await loadStateFromSupabase();
+    if (!loaded) {
+      await saveStateToSupabase();
+    }
+    return loaded;
   } catch (error) {
-    storageStatus.provider = "memory";
+    storageStatus.provider = "supabase";
     storageStatus.synced = false;
     storageStatus.lastError = error.message;
-    return false;
+    throw error;
   }
 }
 
 app.use("/api", async (req, res, next) => {
-  await refreshStateFromSupabase();
-  next();
+  try {
+    await refreshStateFromSupabase();
+    next();
+  } catch (error) {
+    res.status(503).json({ error: "Falha na sincronização com o Supabase", detail: error.message });
+  }
 });
 
 function getWardOr404(req, res) {
@@ -275,11 +338,243 @@ function getWardName(wardId) {
   return wards.find(ward => ward.id === wardId)?.nome || "";
 }
 
+function normalizeCpf(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function normalizePersonName(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function getCurrentIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function isBedOccupiedByPatient(bed) {
+  return String(bed?.status || "").toUpperCase() === "OCUPADO" && Boolean(String(bed?.nome || "").trim());
+}
+
+function isSamePatientIdentity(a, b) {
+  const cpfA = normalizeCpf(a?.cpf);
+  const cpfB = normalizeCpf(b?.cpf);
+  if (cpfA && cpfB) return cpfA === cpfB;
+  return normalizePersonName(a?.nome) === normalizePersonName(b?.nome)
+    && String(a?.birthDate || "") === String(b?.birthDate || "");
+}
+
+function findPatientByCurrentLocation(wardId, bedId) {
+  return patientRegistry.find(patient =>
+    !patient.deletedAt
+    && patient.currentAdmission
+    && Number(patient.currentAdmission.wardId) === Number(wardId)
+    && Number(patient.currentAdmission.bedId) === Number(bedId)
+  ) || null;
+}
+
+function findPatientRegistryEntry(identity = {}) {
+  const cpf = normalizeCpf(identity.cpf);
+  const nome = normalizePersonName(identity.nome);
+  const birthDate = String(identity.birthDate || "");
+
+  if (cpf) {
+    return patientRegistry.find(patient => !patient.deletedAt && normalizeCpf(patient.cpf) === cpf) || null;
+  }
+
+  if (!nome) return null;
+
+  return patientRegistry.find(patient =>
+    !patient.deletedAt
+    && normalizePersonName(patient.nome) === nome
+    && String(patient.birthDate || "") === birthDate
+  ) || null;
+}
+
+function createPatientRecordFromBed(bed) {
+  const now = new Date().toISOString();
+  return {
+    id: nextPatientId++,
+    nome: bed.nome || "",
+    cpf: normalizeCpf(bed.cpf),
+    birthDate: bed.birthDate || "",
+    diagnostico: bed.diagnostico || "",
+    nir: bed.nir || "",
+    createdAt: now,
+    updatedAt: now,
+    deletedAt: null,
+    currentAdmission: null,
+    admissionHistory: []
+  };
+}
+
+function ensurePatientRecordFromBed(bed) {
+  let patient = findPatientRegistryEntry(bed);
+  if (!patient) {
+    patient = createPatientRecordFromBed(bed);
+    patientRegistry.push(patient);
+  }
+  patient.nome = bed.nome || patient.nome || "";
+  patient.cpf = normalizeCpf(bed.cpf) || patient.cpf || "";
+  patient.birthDate = bed.birthDate || patient.birthDate || "";
+  patient.diagnostico = bed.diagnostico || "";
+  patient.nir = bed.nir || "";
+  patient.deletedAt = null;
+  patient.updatedAt = new Date().toISOString();
+  return patient;
+}
+
+function createAdmissionRecord(ward, bed, actor) {
+  return {
+    id: createRecordId(),
+    wardId: ward.id,
+    wardNome: ward.nome || "",
+    bedId: bed.id,
+    enfermaria: bed.enfermaria || "",
+    admittedAt: bed.admissao || getCurrentIsoDate(),
+    dischargedAt: null,
+    outcome: null,
+    updatedAt: new Date().toISOString(),
+    updatedBy: actor,
+    transferHistory: []
+  };
+}
+
+function ensurePatientAdmissionRecord(patient, ward, bed, actor) {
+  if (!patient.currentAdmission) {
+    const admission = createAdmissionRecord(ward, bed, actor);
+    patient.currentAdmission = admission;
+    if (!Array.isArray(patient.admissionHistory)) patient.admissionHistory = [];
+    patient.admissionHistory.unshift(admission);
+  } else {
+    const admission = patient.currentAdmission;
+    if (!Array.isArray(admission.transferHistory)) admission.transferHistory = [];
+    admission.wardId = ward.id;
+    admission.wardNome = ward.nome || "";
+    admission.bedId = bed.id;
+    admission.enfermaria = bed.enfermaria || "";
+    admission.admittedAt = admission.admittedAt || bed.admissao || getCurrentIsoDate();
+    admission.updatedAt = new Date().toISOString();
+    admission.updatedBy = actor;
+  }
+  patient.updatedAt = new Date().toISOString();
+  return patient.currentAdmission;
+}
+
+function closePatientAdmissionByBedSnapshot(bed, ward, outcome, actor, reason = "") {
+  const patient = findPatientByCurrentLocation(ward.id, bed.id) || findPatientRegistryEntry(bed);
+  if (!patient || !patient.currentAdmission) return null;
+  patient.currentAdmission.dischargedAt = new Date().toISOString();
+  patient.currentAdmission.outcome = outcome || "ENCERRADA";
+  patient.currentAdmission.updatedAt = new Date().toISOString();
+  patient.currentAdmission.updatedBy = actor;
+  if (reason) patient.currentAdmission.closeReason = reason;
+  patient.currentAdmission = null;
+  patient.updatedAt = new Date().toISOString();
+  return patient;
+}
+
+function syncPatientRegistryWithBed(previousBed, currentBed, ward, actor) {
+  const previousOccupied = isBedOccupiedByPatient(previousBed);
+  const currentOccupied = isBedOccupiedByPatient(currentBed);
+
+  if (previousOccupied && (!currentOccupied || !isSamePatientIdentity(previousBed, currentBed))) {
+    closePatientAdmissionByBedSnapshot(previousBed, ward, currentBed.status || "ENCERRADA", actor, "Atualização do leito");
+  }
+
+  if (!currentOccupied) return null;
+
+  const patient = ensurePatientRecordFromBed(currentBed);
+  ensurePatientAdmissionRecord(patient, ward, currentBed, actor);
+  return patient;
+}
+
+function registerPatientTransfer(sourceWard, sourceBed, targetWard, targetBed, actor) {
+  const patient = findPatientByCurrentLocation(sourceWard.id, sourceBed.id) || ensurePatientRecordFromBed(targetBed);
+  const admission = ensurePatientAdmissionRecord(patient, sourceWard, sourceBed, actor);
+  if (!Array.isArray(admission.transferHistory)) admission.transferHistory = [];
+  admission.transferHistory.push({
+    id: createRecordId(),
+    at: new Date().toISOString(),
+    fromWardId: sourceWard.id,
+    fromWardNome: sourceWard.nome || "",
+    fromBedId: sourceBed.id,
+    fromEnfermaria: sourceBed.enfermaria || "",
+    toWardId: targetWard.id,
+    toWardNome: targetWard.nome || "",
+    toBedId: targetBed.id,
+    toEnfermaria: targetBed.enfermaria || "",
+    changedBy: actor
+  });
+  admission.wardId = targetWard.id;
+  admission.wardNome = targetWard.nome || "";
+  admission.bedId = targetBed.id;
+  admission.enfermaria = targetBed.enfermaria || "";
+  admission.updatedAt = new Date().toISOString();
+  admission.updatedBy = actor;
+  patient.nome = targetBed.nome || patient.nome || "";
+  patient.cpf = normalizeCpf(targetBed.cpf) || patient.cpf || "";
+  patient.birthDate = targetBed.birthDate || patient.birthDate || "";
+  patient.diagnostico = targetBed.diagnostico || "";
+  patient.nir = targetBed.nir || "";
+  patient.updatedAt = new Date().toISOString();
+  return patient;
+}
+
+function rebuildPatientRegistryFromWards() {
+  patientRegistry.length = 0;
+  nextPatientId = 1;
+  for (const ward of wards) {
+    for (const bed of ward.beds || []) {
+      normalizeBedData(bed);
+      if (!isBedOccupiedByPatient(bed)) continue;
+      const patient = ensurePatientRecordFromBed(bed);
+      ensurePatientAdmissionRecord(patient, ward, bed, "Sistema");
+    }
+  }
+}
+
+function findPatientOr404(req, res) {
+  const patientId = parseInt(req.params.patientId, 10);
+  const patient = patientRegistry.find(item => Number(item.id) === patientId && !item.deletedAt);
+  if (!patient) {
+    res.status(404).json({ error: "Paciente não encontrado" });
+    return null;
+  }
+  return patient;
+}
+
+function patientForClient(patient) {
+  const currentAdmission = patient.currentAdmission ? {
+    ...patient.currentAdmission,
+    active: true
+  } : null;
+  const lastAdmission = patient.currentAdmission || (Array.isArray(patient.admissionHistory) ? patient.admissionHistory[0] : null) || null;
+  return {
+    id: patient.id,
+    nome: patient.nome || "",
+    cpf: patient.cpf || "",
+    birthDate: patient.birthDate || "",
+    diagnostico: patient.diagnostico || "",
+    nir: patient.nir || "",
+    createdAt: patient.createdAt || "",
+    updatedAt: patient.updatedAt || "",
+    active: Boolean(patient.currentAdmission),
+    currentAdmission,
+    admissionCount: Array.isArray(patient.admissionHistory) ? patient.admissionHistory.length : 0,
+    lastAdmission
+  };
+}
+
+function getNextUserId() {
+  return users.reduce((max, user) => Math.max(max, Number(user.id) || 0), 0) + 1;
+}
+
 function sanitizeUser(user) {
   return {
     id: user.id,
     username: user.username,
     nome: user.nome,
+    cpf: user.cpf || "",
+    birthDate: user.birthDate || "",
     role: user.role,
     activeShift: user.activeShift,
     recentActions: (user.actions || []).slice(0, 20)
@@ -459,6 +754,8 @@ function buildShiftReport(user, shift) {
 }
 
 function normalizeBedData(bed) {
+  bed.cpf = String(bed.cpf || "").replace(/\D/g, "");
+  bed.birthDate = bed.birthDate || "";
   if (!Array.isArray(bed.pendenciasHistorico)) {
     const text = String(bed.pendencias || "").trim();
     bed.pendenciasHistorico = text ? [{
@@ -494,6 +791,8 @@ function clearBedPatientData(bed, nextStatus = "LIVRE") {
   bed.status = nextStatus;
   bed.admissao = "";
   bed.nome = "";
+  bed.cpf = "";
+  bed.birthDate = "";
   bed.diagnostico = "";
   bed.pendencias = "";
   bed.nir = "";
@@ -509,6 +808,8 @@ function clonePatientPayload(bed) {
     status: "OCUPADO",
     admissao: bed.admissao || "",
     nome: bed.nome || "",
+    cpf: bed.cpf || "",
+    birthDate: bed.birthDate || "",
     diagnostico: bed.diagnostico || "",
     pendencias: bed.pendencias || "",
     nir: bed.nir || "",
@@ -616,7 +917,167 @@ app.get("/api/me", (req, res) => {
   res.json({ user: sanitizeUser(user) });
 });
 
-app.post("/api/shifts/open", requireAuth, (req, res) => {
+app.get("/api/users", requireAuth, requireAdmin, (req, res) => {
+  const orderedUsers = [...users].sort((a, b) =>
+    String(a.nome || a.username || "").localeCompare(String(b.nome || b.username || ""), "pt-BR")
+  );
+  res.json({ users: orderedUsers.map(sanitizeUser) });
+});
+
+app.post("/api/users", requireAuth, requireAdmin, async (req, res) => {
+  const username = String(req.body?.username || "").trim();
+  const password = String(req.body?.password || "").trim();
+  const nome = String(req.body?.nome || "").trim();
+  const cpf = normalizeCpf(req.body?.cpf);
+  const birthDate = String(req.body?.birthDate || "").trim();
+  const role = String(req.body?.role || "user").trim().toLowerCase() === "admin" ? "admin" : "user";
+
+  if (!nome) return res.status(400).json({ error: "Nome é obrigatório" });
+  if (!username) return res.status(400).json({ error: "Usuário é obrigatório" });
+  if (!password) return res.status(400).json({ error: "Senha é obrigatória" });
+  if (!cpf) return res.status(400).json({ error: "CPF é obrigatório" });
+  if (cpf.length !== 11) return res.status(400).json({ error: "CPF deve ter 11 dígitos" });
+  if (!birthDate) return res.status(400).json({ error: "Data de nascimento é obrigatória" });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) {
+    return res.status(400).json({ error: "Data de nascimento inválida" });
+  }
+  if (users.some(user => user.username.toLowerCase() === username.toLowerCase())) {
+    return res.status(400).json({ error: "Já existe um usuário com esse login" });
+  }
+  if (users.some(user => normalizeCpf(user.cpf) === cpf)) {
+    return res.status(400).json({ error: "Já existe um usuário com esse CPF" });
+  }
+
+  const user = {
+    id: getNextUserId(),
+    username,
+    password,
+    nome,
+    cpf,
+    birthDate,
+    role,
+    activeShift: null,
+    shifts: [],
+    actions: []
+  };
+  users.push(user);
+
+  addUserAction(req.user, "USER_CREATE", `Cadastrou o usuário ${nome}`, {
+    userId: user.id,
+    username: user.username,
+    role: user.role
+  });
+
+  await persistState();
+  res.json({ ok: true, user: sanitizeUser(user) });
+});
+
+app.get("/api/patients", requireAuth, (req, res) => {
+  const search = normalizePersonName(req.query?.search);
+  const activeFilter = String(req.query?.active || "").trim().toLowerCase();
+  let items = patientRegistry.filter(patient => !patient.deletedAt);
+
+  if (search) {
+    items = items.filter(patient =>
+      normalizePersonName(patient.nome).includes(search)
+      || normalizeCpf(patient.cpf).includes(search.replace(/\D/g, ""))
+    );
+  }
+
+  if (activeFilter === "true") items = items.filter(patient => Boolean(patient.currentAdmission));
+  if (activeFilter === "false") items = items.filter(patient => !patient.currentAdmission);
+
+  items = items
+    .slice()
+    .sort((a, b) =>
+      Number(Boolean(b.currentAdmission)) - Number(Boolean(a.currentAdmission))
+      || String(a.nome || "").localeCompare(String(b.nome || ""), "pt-BR")
+    );
+
+  res.json({ patients: items.map(patientForClient) });
+});
+
+app.get("/api/patients/:patientId", requireAuth, (req, res) => {
+  const patient = findPatientOr404(req, res);
+  if (!patient) return;
+  res.json({
+    patient: {
+      ...patientForClient(patient),
+      admissionHistory: Array.isArray(patient.admissionHistory) ? patient.admissionHistory : []
+    }
+  });
+});
+
+app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
+  const patient = findPatientOr404(req, res);
+  if (!patient) return;
+
+  const nome = String(req.body?.nome || "").trim();
+  const cpf = normalizeCpf(req.body?.cpf);
+  const birthDate = String(req.body?.birthDate || "").trim();
+  const diagnostico = String(req.body?.diagnostico || "").trim();
+  const nir = String(req.body?.nir || "").trim();
+
+  if (!nome) return res.status(400).json({ error: "Nome é obrigatório" });
+  if (!cpf || cpf.length !== 11) return res.status(400).json({ error: "CPF deve ter 11 dígitos" });
+  if (!birthDate) return res.status(400).json({ error: "Data de nascimento é obrigatória" });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) {
+    return res.status(400).json({ error: "Data de nascimento inválida" });
+  }
+  if (patientRegistry.some(item => item.id !== patient.id && !item.deletedAt && normalizeCpf(item.cpf) === cpf)) {
+    return res.status(400).json({ error: "Já existe outro paciente com esse CPF" });
+  }
+
+  patient.nome = nome;
+  patient.cpf = cpf;
+  patient.birthDate = birthDate;
+  patient.diagnostico = diagnostico;
+  patient.nir = nir;
+  patient.updatedAt = new Date().toISOString();
+
+  if (patient.currentAdmission) {
+    const ward = wards.find(item => item.id === patient.currentAdmission.wardId);
+    const bed = ward?.beds?.find(item => item.id === patient.currentAdmission.bedId);
+    if (bed) {
+      bed.nome = nome;
+      bed.cpf = cpf;
+      bed.birthDate = birthDate;
+      bed.diagnostico = diagnostico;
+      bed.nir = nir;
+      normalizeBedData(bed);
+    }
+  }
+
+  addUserAction(req.user, "PATIENT_UPDATE", `Atualizou o cadastro do paciente ${patient.nome}`, {
+    patientId: patient.id,
+    patientName: patient.nome,
+    active: Boolean(patient.currentAdmission)
+  });
+
+  await persistState();
+  res.json({ ok: true, patient: patientForClient(patient) });
+});
+
+app.delete("/api/patients/:patientId", requireAuth, async (req, res) => {
+  const patient = findPatientOr404(req, res);
+  if (!patient) return;
+  if (patient.currentAdmission) {
+    return res.status(400).json({ error: "Não é possível excluir paciente com internação ativa" });
+  }
+
+  patient.deletedAt = new Date().toISOString();
+  patient.updatedAt = patient.deletedAt;
+
+  addUserAction(req.user, "PATIENT_DELETE", `Excluiu o cadastro do paciente ${patient.nome}`, {
+    patientId: patient.id,
+    patientName: patient.nome
+  });
+
+  await persistState();
+  res.json({ ok: true });
+});
+
+app.post("/api/shifts/open", requireAuth, async (req, res) => {
   if (req.user.activeShift) return res.status(400).json({ error: "Já existe um plantão aberto para este usuário" });
   const wardId = parseInt(req.body?.wardId, 10);
   const ward = wards.find(item => item.id === wardId);
@@ -632,11 +1093,11 @@ app.post("/api/shifts/open", requireAuth, (req, res) => {
     pendenciasFinalizadas: []
   };
   addUserAction(req.user, "SHIFT_OPEN", `Abriu plantão no setor ${ward.nome}`, { wardId: ward.id, wardNome: ward.nome });
-  persistState();
+  await persistState();
   res.json({ ok: true, user: sanitizeUser(req.user) });
 });
 
-app.post("/api/shifts/close", requireAuth, (req, res) => {
+app.post("/api/shifts/close", requireAuth, async (req, res) => {
   if (!req.user.activeShift) return res.status(400).json({ error: "Não há plantão aberto para este usuário" });
   req.user.activeShift.closedAt = new Date().toISOString();
   const closingShift = req.user.activeShift;
@@ -649,7 +1110,7 @@ app.post("/api/shifts/close", requireAuth, (req, res) => {
   req.user.shifts.unshift(closingShift);
   req.user.shifts = req.user.shifts.slice(0, 100);
   req.user.activeShift = null;
-  persistState();
+  await persistState();
   res.json({ ok: true, user: sanitizeUser(req.user), report });
 });
 
@@ -732,7 +1193,7 @@ app.get("/api/dashboard", requireAuth, (req, res) => {
   });
 });
 
-app.post("/api/wards", requireAuth, (req, res) => {
+app.post("/api/wards", requireAuth, async (req, res) => {
   const nome = String(req.body?.nome || "").trim();
   if (!nome) return res.status(400).json({ error: "Nome obrigatório" });
   const id = nextWardId++;
@@ -746,11 +1207,11 @@ app.post("/api/wards", requireAuth, (req, res) => {
   };
   wards.push(ward);
   addUserAction(req.user, "WARD_CREATE", `Criou o setor ${ward.nome}`, { wardId: ward.id, wardNome: ward.nome });
-  persistState();
+  await persistState();
   res.json({ ward: { id: ward.id, nome: ward.nome, enfermarias: ward.enfermarias } });
 });
 
-app.post("/api/wards/:wardId/enfermarias", requireAuth, (req, res) => {
+app.post("/api/wards/:wardId/enfermarias", requireAuth, async (req, res) => {
   const ward = getWardOr404(req, res);
   if (!ward) return;
   const nome = String(req.body?.nome || "").trim();
@@ -764,11 +1225,11 @@ app.post("/api/wards/:wardId/enfermarias", requireAuth, (req, res) => {
     wardNome: ward.nome,
     enfermaria: nome
   });
-  persistState();
+  await persistState();
   res.json({ ward: { id: ward.id, nome: ward.nome, enfermarias: ward.enfermarias } });
 });
 
-app.post("/api/wards/:wardId/enfermarias/delete", requireAuth, (req, res) => {
+app.post("/api/wards/:wardId/enfermarias/delete", requireAuth, async (req, res) => {
   const ward = getWardOr404(req, res);
   if (!ward) return;
   const enfermaria = String(req.body?.enfermaria || "").trim();
@@ -783,11 +1244,11 @@ app.post("/api/wards/:wardId/enfermarias/delete", requireAuth, (req, res) => {
     enfermaria,
     removedBeds
   });
-  persistState();
+  await persistState();
   res.json({ ok: true, removedBeds });
 });
 
-app.post("/api/wards/:wardId/beds", requireAuth, (req, res) => {
+app.post("/api/wards/:wardId/beds", requireAuth, async (req, res) => {
   const ward = getWardOr404(req, res);
   if (!ward) return;
   const enfermaria = String(req.body?.enfermaria || "").trim();
@@ -807,6 +1268,8 @@ app.post("/api/wards/:wardId/beds", requireAuth, (req, res) => {
       status: "LIVRE",
       admissao: "",
       nome: "",
+      cpf: "",
+      birthDate: "",
       diagnostico: "",
       pendencias: "",
       nir: "",
@@ -823,11 +1286,11 @@ app.post("/api/wards/:wardId/beds", requireAuth, (req, res) => {
     enfermaria: enfermaria || "SEM ENFERMARIA",
     leitos: added
   });
-  persistState();
+  await persistState();
   res.json({ added });
 });
 
-app.post("/api/wards/:wardId/beds/delete", requireAuth, (req, res) => {
+app.post("/api/wards/:wardId/beds/delete", requireAuth, async (req, res) => {
   const ward = getWardOr404(req, res);
   if (!ward) return;
   const enfermaria = String(req.body?.enfermaria || "").trim();
@@ -856,7 +1319,7 @@ app.post("/api/wards/:wardId/beds/delete", requireAuth, (req, res) => {
     end,
     removedBeds
   });
-  persistState();
+  await persistState();
   res.json({ ok: true, removedBeds });
 });
 
@@ -881,7 +1344,7 @@ app.get("/api/wards/:wardId", requireAuth, (req, res) => {
   });
 });
 
-app.post("/api/wards/:wardId/beds/:bedId/transfer", requireAuth, (req, res) => {
+app.post("/api/wards/:wardId/beds/:bedId/transfer", requireAuth, async (req, res) => {
   const sourceWard = getWardOr404(req, res);
   if (!sourceWard) return;
   const sourceBedId = parseInt(req.params.bedId, 10);
@@ -911,6 +1374,7 @@ app.post("/api/wards/:wardId/beds/:bedId/transfer", requireAuth, (req, res) => {
     return res.status(400).json({ error: "O leito de destino precisa estar desocupado" });
   }
 
+  const sourceSnapshot = JSON.parse(JSON.stringify(sourceBed));
   const patientSnapshot = clonePatientPayload(sourceBed);
   const patientName = patientSnapshot.nome;
   const fromWardName = sourceWard.nome || "";
@@ -920,6 +1384,7 @@ app.post("/api/wards/:wardId/beds/:bedId/transfer", requireAuth, (req, res) => {
 
   Object.assign(targetBed, patientSnapshot);
   normalizeBedData(targetBed);
+  registerPatientTransfer(sourceWard, sourceSnapshot, targetWard, targetBed, req.user.nome || req.user.username);
   clearBedPatientData(sourceBed, "LIVRE");
 
   addUserAction(req.user, "BED_TRANSFER", `Transferiu ${patientName} do leito ${sourceBed.id} para o leito ${targetBed.id}`, {
@@ -941,7 +1406,7 @@ app.post("/api/wards/:wardId/beds/:bedId/transfer", requireAuth, (req, res) => {
     pendenciasAtivas: patientSnapshot.pendenciasHistorico.filter(item => item.status !== "FINALIZADA").map(item => item.texto)
   });
 
-  persistState();
+  await persistState();
   res.json({
     ok: true,
     sourceCounts: computeCounts(sourceWard.beds),
@@ -951,7 +1416,7 @@ app.post("/api/wards/:wardId/beds/:bedId/transfer", requireAuth, (req, res) => {
   });
 });
 
-app.patch("/api/wards/:wardId/beds/:bedId", requireAuth, (req, res) => {
+app.patch("/api/wards/:wardId/beds/:bedId", requireAuth, async (req, res) => {
   const ward = getWardOr404(req, res);
   if (!ward) return;
   const bedId = parseInt(req.params.bedId, 10);
@@ -965,6 +1430,7 @@ app.patch("/api/wards/:wardId/beds/:bedId", requireAuth, (req, res) => {
   if (payload.status && !statuses.includes(payload.status)) return res.status(400).json({ error: "Status inválido" });
   if (payload.procedimentos && !Array.isArray(payload.procedimentos)) return res.status(400).json({ error: "Procedimentos inválidos" });
   if (payload.pendenciasStatus && !Array.isArray(payload.pendenciasStatus)) return res.status(400).json({ error: "Pendências inválidas" });
+  if (payload.cpf !== undefined) payload.cpf = String(payload.cpf || "").replace(/\D/g, "");
 
   if (Array.isArray(payload.procedimentos)) {
     const createdBy = req.user.nome || req.user.username;
@@ -1045,6 +1511,7 @@ app.patch("/api/wards/:wardId/beds/:bedId", requireAuth, (req, res) => {
   if (payload.status && payload.status !== "OCUPADO") {
     clearBedPatientData(bed, payload.status);
   }
+  syncPatientRegistryWithBed(previous, bed, ward, req.user.nome || req.user.username);
   addUserAction(req.user, "BED_UPDATE", `Atualizou o leito ${bed.id} no setor ${ward.nome}`, {
     wardId: ward.id,
     wardNome: ward.nome,
@@ -1058,11 +1525,11 @@ app.patch("/api/wards/:wardId/beds/:bedId", requireAuth, (req, res) => {
     pendenciasFinalizadas
   });
   addShiftSolvedPendings(req.user, ward.id, pendenciasFinalizadas);
-  persistState();
+  await persistState();
   res.json({ bed: bedForClient(bed), counts: computeCounts(ward.beds) });
 });
 
-app.post("/api/wards/:wardId/beds/:bedId/outcome", requireAuth, (req, res) => {
+app.post("/api/wards/:wardId/beds/:bedId/outcome", requireAuth, async (req, res) => {
   const ward = getWardOr404(req, res);
   if (!ward) return;
   const bedId = parseInt(req.params.bedId, 10);
@@ -1073,6 +1540,7 @@ app.post("/api/wards/:wardId/beds/:bedId/outcome", requireAuth, (req, res) => {
   if (type === "ALTA") ward.indicadores.altas = Math.max(0, (ward.indicadores.altas || 0) + 1);
   if (type === "OBITO") ward.indicadores.obitos = Math.max(0, (ward.indicadores.obitos || 0) + 1);
   const patientName = bed.nome || "";
+  closePatientAdmissionByBedSnapshot(bed, ward, type, req.user.nome || req.user.username, "Desfecho da internação");
   clearBedPatientData(bed, "LIVRE");
   addUserAction(req.user, type, `${type === "ALTA" ? "Registrou alta" : "Registrou óbito"} no leito ${bed.id}`, {
     wardId: ward.id,
@@ -1080,11 +1548,11 @@ app.post("/api/wards/:wardId/beds/:bedId/outcome", requireAuth, (req, res) => {
     bedId: bed.id,
     patient: patientName
   });
-  persistState();
+  await persistState();
   res.json({ ok: true, indicadores: ward.indicadores, counts: computeCounts(ward.beds), bed: bedForClient(bed) });
 });
 
-app.post("/api/wards/:wardId/indicadores", requireAuth, (req, res) => {
+app.post("/api/wards/:wardId/indicadores", requireAuth, async (req, res) => {
   const ward = getWardOr404(req, res);
   if (!ward) return;
   const { altas, obitos } = req.body || {};
@@ -1096,11 +1564,11 @@ app.post("/api/wards/:wardId/indicadores", requireAuth, (req, res) => {
     altas: ward.indicadores.altas,
     obitos: ward.indicadores.obitos
   });
-  persistState();
+  await persistState();
   res.json({ indicadores: ward.indicadores, counts: computeCounts(ward.beds) });
 });
 
-app.patch("/api/wards/:wardId/equipe", requireAuth, (req, res) => {
+app.patch("/api/wards/:wardId/equipe", requireAuth, async (req, res) => {
   const ward = getWardOr404(req, res);
   if (!ward) return;
   Object.assign(ward.equipe, req.body || {});
@@ -1108,7 +1576,7 @@ app.patch("/api/wards/:wardId/equipe", requireAuth, (req, res) => {
     wardId: ward.id,
     wardNome: ward.nome
   });
-  persistState();
+  await persistState();
   res.json({ equipe: ward.equipe });
 });
 
@@ -1124,8 +1592,13 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-initializeStorage().finally(() => {
-  app.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}`);
+initializeStorage()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`Server running at http://localhost:${port}`);
+    });
+  })
+  .catch(error => {
+    console.error(`Falha ao iniciar com Supabase: ${error.message}`);
+    process.exit(1);
   });
-});

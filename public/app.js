@@ -28,11 +28,26 @@ let dashboardFilters = { wardId: "", month: "", from: "", to: "" };
 let currentUser = null;
 let lastClosedReport = null;
 let transferWardCache = new Map();
+let sidebarPatients = [];
+let registeredPatients = [];
+let currentPatientRecord = null;
 
 const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "PASSAGEM DE SONDA"];
 const NO_ENFERMARIA_VALUE = "__SEM_ENFERMARIA__";
 const ALL_ENFERMARIA_VALUE = "__TODAS_ENFERMARIAS__";
-const DEFAULT_WHATSAPP_GROUP_LINK = "https://chat.whatsapp.com/IBpckfXiliuKEoxYLXjAE";
+const DEFAULT_WHATSAPP_GROUP_LINK = "https://chat.whatsapp.com/Dyxbb0R8w8PJY2k9U1a9jG";
+
+function normalizeCpf(value) {
+  return String(value || "").replace(/\D/g, "").slice(0, 11);
+}
+
+function formatCpf(value) {
+  const digits = normalizeCpf(value);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 3)}.${digits.slice(3)}`;
+  if (digits.length <= 9) return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6)}`;
+  return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}-${digits.slice(9)}`;
+}
 
 function toBRDateTime(iso) {
   if (!iso) return "";
@@ -107,14 +122,72 @@ function buildWhatsAppMessage() {
   return buildWardWhatsAppMessage();
 }
 
+function isMaintenancePending(text) {
+  const value = String(text || "").toLowerCase();
+  return value.includes("manuten");
+}
+
+function buildMaintenanceWhatsAppMessage() {
+  const items = (ward?.beds || [])
+    .flatMap(bed => {
+      const historico = Array.isArray(bed.pendenciasHistorico) ? bed.pendenciasHistorico : [];
+      const ativas = historico
+        .filter(item => item.status !== "FINALIZADA" && isMaintenancePending(item.texto))
+        .map(item => ({
+          leito: bed.id,
+          enfermaria: bed.enfermaria || "",
+          texto: item.texto
+        }));
+
+      if (ativas.length) return ativas;
+
+      if (bed.status === "BLOQUEADO" && isMaintenancePending(bed.pendencias)) {
+        return [{
+          leito: bed.id,
+          enfermaria: bed.enfermaria || "",
+          texto: bed.pendencias
+        }];
+      }
+
+      return [];
+    });
+
+  const lines = [
+    `Solicitacao de manutencao - ${ward?.nome || "-"}`,
+    `Data: ${ward?.data || new Date().toLocaleDateString("pt-BR")}`,
+    `Responsavel: ${currentUser?.nome || currentUser?.username || "-"}`,
+    ""
+  ];
+
+  if (!items.length) {
+    lines.push("Nenhuma pendencia de manutencao ativa encontrada neste setor.");
+    return lines.join("\n");
+  }
+
+  lines.push("Pendencias de manutencao:");
+  for (const item of items) {
+    const local = item.enfermaria ? ` / ${item.enfermaria}` : "";
+    lines.push(`- Leito ${item.leito}${local}: ${item.texto}`);
+  }
+
+  return lines.join("\n");
+}
+
 async function openWhatsAppSummary() {
   if (!DEFAULT_WHATSAPP_GROUP_LINK) {
     setShiftFeedback("Link do grupo do WhatsApp não configurado.", true);
     return;
   }
 
+  const message = buildMaintenanceWhatsAppMessage();
+  try {
+    await navigator.clipboard.writeText(message);
+    setShiftFeedback("Solicitação de manutenção copiada. Abra o grupo e cole a mensagem.");
+  } catch {
+    setShiftFeedback("Abrindo o grupo da manutenção. Copie e envie a solicitação manualmente.");
+  }
+
   window.open(DEFAULT_WHATSAPP_GROUP_LINK, "_blank");
-  setShiftFeedback("Abrindo o grupo do WhatsApp.");
 }
 
 function setPatientFieldsEnabled(enabled) {
@@ -136,11 +209,20 @@ function clearPatientFields() {
 }
 
 function showOnly(viewId) {
-  const ids = ["view-login", "view-dashboard", "view-home", "view-admin"];
+  const ids = ["view-login", "view-dashboard", "view-home", "view-patients", "view-admin"];
   for (const id of ids) {
     const el = document.getElementById(id);
     if (!el) continue;
     el.classList.toggle("hidden", id !== viewId);
+  }
+  const navMap = {
+    "view-dashboard": "nav-dashboard",
+    "view-home": "nav-home",
+    "view-patients": "nav-patients",
+    "view-admin": "nav-gerenciar"
+  };
+  for (const id of ["nav-dashboard", "nav-home", "nav-patients", "nav-gerenciar"]) {
+    document.getElementById(id)?.classList.toggle("ghost", navMap[viewId] !== id);
   }
 }
 
@@ -265,6 +347,316 @@ function setShiftFeedback(message = "", isError = false) {
   feedback.classList.toggle("error-text", Boolean(message && isError));
 }
 
+function setSidebarPatientFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("sidebar-patient-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function clearSidebarPatientForm() {
+  document.getElementById("sidebar-patient-name").value = "";
+  document.getElementById("sidebar-patient-cpf").value = "";
+  document.getElementById("sidebar-patient-birthdate").value = "";
+  document.getElementById("sidebar-patient-admission").value = "";
+}
+
+function getSidebarWardId() {
+  const selectedWardId = parseInt(document.getElementById("topbar-ward-select")?.value || String(currentWardId || ""), 10);
+  return Number.isInteger(selectedWardId) ? selectedWardId : null;
+}
+
+function renderSidebarPatientBedOptions(targetWard) {
+  const bedSelect = document.getElementById("sidebar-patient-bed");
+  if (!bedSelect) return;
+  bedSelect.innerHTML = "";
+  bedSelect.appendChild(new Option("Selecione o leito", ""));
+
+  const availableBeds = (targetWard?.beds || [])
+    .filter(item => item.status === "LIVRE" || item.status === "EXTRA")
+    .sort((a, b) => a.id - b.id);
+
+  for (const bed of availableBeds) {
+    const enfermaria = bed.enfermaria || "SEM ENFERMARIA";
+    bedSelect.appendChild(new Option(`LEITO ${bed.id} - ${enfermaria}`, String(bed.id)));
+  }
+
+  bedSelect.disabled = availableBeds.length === 0;
+}
+
+function renderSidebarPatientsList(items) {
+  sidebarPatients = Array.isArray(items) ? items : [];
+  const table = document.getElementById("sidebar-patient-list");
+  const empty = document.getElementById("sidebar-patient-list-empty");
+  if (!table || !empty) return;
+
+  table.innerHTML = "";
+  empty.classList.toggle("hidden", sidebarPatients.length > 0);
+
+  for (const patient of sidebarPatients) {
+    const row = document.createElement("div");
+    row.className = "sidebar-patient-item";
+    row.innerHTML = `
+      <div>
+        <strong>${patient.nome || "-"}</strong>
+        <span>Leito ${patient.id} • ${patient.enfermaria || "Sem enfermaria"}</span>
+      </div>
+      <div>
+        <strong>${formatCpf(patient.cpf || "") || "-"}</strong>
+        <span>CPF</span>
+      </div>
+      <div>
+        <strong>${patient.birthDate ? toBRDate(patient.birthDate) : "-"}</strong>
+        <span>Data de nascimento</span>
+      </div>
+      <div>
+        <span class="admin-user-role-badge">Leito ${patient.id}</span>
+      </div>
+    `;
+    table.appendChild(row);
+  }
+}
+
+async function refreshSidebarPatients() {
+  const wardId = getSidebarWardId();
+  if (!wardId) {
+    renderSidebarPatientBedOptions({ beds: [] });
+    renderSidebarPatientsList([]);
+    return [];
+  }
+  try {
+    const targetWard = await api(`/api/wards/${wardId}`);
+    renderSidebarPatientBedOptions(targetWard);
+    const patients = (targetWard.beds || [])
+      .filter(item => String(item.nome || "").trim())
+      .sort((a, b) => String(a.nome || "").localeCompare(String(b.nome || ""), "pt-BR"));
+    renderSidebarPatientsList(patients);
+    return sidebarPatients;
+  } catch (error) {
+    renderSidebarPatientBedOptions({ beds: [] });
+    renderSidebarPatientsList([]);
+    setSidebarPatientFeedback(error.message || "Não foi possível carregar os pacientes.", true);
+    return [];
+  }
+}
+
+function setPatientsFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("patients-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function renderPatientCurrentAdmission(admission) {
+  const container = document.getElementById("patient-registry-current");
+  if (!container) return;
+  if (!admission) {
+    container.textContent = "Paciente sem internação ativa no momento.";
+    return;
+  }
+  container.innerHTML = `
+    <strong>${admission.wardNome || "-"} • Leito ${admission.bedId || "-"}</strong>
+    <div>Enfermaria: ${admission.enfermaria || "Sem enfermaria"}</div>
+    <div>Admissão: ${admission.admittedAt ? toBRDate(admission.admittedAt) : "-"}</div>
+  `;
+}
+
+function renderPatientAdmissionHistory(items) {
+  const container = document.getElementById("patient-registry-history");
+  if (!container) return;
+  container.innerHTML = "";
+
+  if (!items?.length) {
+    const empty = document.createElement("div");
+    empty.className = "chart-empty";
+    empty.textContent = "Nenhuma internação registrada.";
+    container.appendChild(empty);
+    return;
+  }
+
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "history-item";
+    const content = document.createElement("div");
+    content.className = "patient-history-card";
+    const title = document.createElement("strong");
+    title.textContent = `${item.wardNome || "-"} • Leito ${item.bedId || "-"} • ${item.enfermaria || "Sem enfermaria"}`;
+    const admission = document.createElement("span");
+    admission.textContent = `Entrada: ${item.admittedAt ? toBRDate(item.admittedAt) : "-"}`;
+    const discharge = document.createElement("span");
+    discharge.textContent = `Saída: ${item.dischargedAt ? toBRDateTime(item.dischargedAt) : "Internação ativa"}`;
+    const outcome = document.createElement("span");
+    outcome.textContent = `Desfecho: ${item.outcome || "Em andamento"}`;
+    content.append(title, admission, discharge, outcome);
+
+    const transfers = Array.isArray(item.transferHistory) ? item.transferHistory : [];
+    for (const transfer of transfers) {
+      const move = document.createElement("span");
+      move.textContent = `Transferência: ${transfer.fromWardNome || "-"} / Leito ${transfer.fromBedId || "-"} -> ${transfer.toWardNome || "-"} / Leito ${transfer.toBedId || "-"} em ${toBRDateTime(transfer.at)}`;
+      content.appendChild(move);
+    }
+
+    row.appendChild(content);
+    container.appendChild(row);
+  }
+}
+
+function fillPatientRegistryModal(patient) {
+  currentPatientRecord = patient;
+  document.getElementById("patient-registry-title").textContent = patient.nome || "Cadastro do paciente";
+  document.getElementById("patient-registry-name").value = patient.nome || "";
+  document.getElementById("patient-registry-cpf").value = formatCpf(patient.cpf || "");
+  document.getElementById("patient-registry-birthdate").value = patient.birthDate || "";
+  document.getElementById("patient-registry-diagnostico").value = patient.diagnostico || "";
+  document.getElementById("patient-registry-nir").value = patient.nir || "";
+  renderPatientCurrentAdmission(patient.currentAdmission || null);
+  renderPatientAdmissionHistory(patient.admissionHistory || []);
+  document.getElementById("patient-registry-delete").disabled = Boolean(patient.currentAdmission);
+}
+
+function renderRegisteredPatients(items) {
+  registeredPatients = Array.isArray(items) ? items : [];
+  const container = document.getElementById("patients-list");
+  const empty = document.getElementById("patients-list-empty");
+  if (!container || !empty) return;
+
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", registeredPatients.length > 0);
+
+  for (const patient of registeredPatients) {
+    const row = document.createElement("div");
+    row.className = "patient-row";
+    const current = patient.currentAdmission;
+    row.innerHTML = `
+      <div>
+        <strong>${patient.nome || "-"}</strong>
+        <span>CPF ${formatCpf(patient.cpf || "") || "-"}</span>
+      </div>
+      <div>
+        <strong>${patient.birthDate ? toBRDate(patient.birthDate) : "-"}</strong>
+        <span>Data de nascimento</span>
+      </div>
+      <div>
+        <strong>${current ? "Internado" : "Sem internação ativa"}</strong>
+        <span>${current ? `${current.wardNome || "-"} • Leito ${current.bedId || "-"}` : "Cadastro disponível"}</span>
+      </div>
+      <div>
+        <strong>${patient.admissionCount || 0}</strong>
+        <span>Internações registradas</span>
+      </div>
+      <div class="patient-actions">
+        <button type="button" class="ghost btn-patient-open" data-id="${patient.id}">Alterar / Histórico</button>
+        <button type="button" class="ghost btn-patient-delete" data-id="${patient.id}" ${current ? "disabled" : ""}>Excluir</button>
+      </div>
+    `;
+    container.appendChild(row);
+  }
+}
+
+async function buildPatientsFallbackList() {
+  const wardsData = await api("/api/wards");
+  const wardItems = wardsData.wards || [];
+  const patients = [];
+
+  for (const wardItem of wardItems) {
+    const wardData = await api(`/api/wards/${wardItem.id}`);
+    for (const bed of wardData.beds || []) {
+      if (!String(bed.nome || "").trim()) continue;
+      patients.push({
+        id: `bed-${wardItem.id}-${bed.id}`,
+        nome: bed.nome || "",
+        cpf: bed.cpf || "",
+        birthDate: bed.birthDate || "",
+        diagnostico: bed.diagnostico || "",
+        nir: bed.nir || "",
+        createdAt: "",
+        updatedAt: "",
+        admissionCount: 1,
+        currentAdmission: {
+          wardId: wardItem.id,
+          wardNome: wardData.nome || wardItem.nome || "",
+          bedId: bed.id,
+          enfermaria: bed.enfermaria || "",
+          admittedAt: bed.admissao || "",
+          active: true
+        },
+        admissionHistory: [{
+          wardId: wardItem.id,
+          wardNome: wardData.nome || wardItem.nome || "",
+          bedId: bed.id,
+          enfermaria: bed.enfermaria || "",
+          admittedAt: bed.admissao || "",
+          dischargedAt: null,
+          outcome: null,
+          transferHistory: []
+        }],
+        fallbackWardId: wardItem.id,
+        fallbackBedId: bed.id
+      });
+    }
+  }
+
+  return patients;
+}
+
+async function loadPatientsRegistry() {
+  const search = document.getElementById("patients-search")?.value?.trim() || "";
+  const active = document.getElementById("patients-active-filter")?.value || "";
+  const params = new URLSearchParams();
+  if (search) params.set("search", search);
+  if (active) params.set("active", active);
+  const query = params.toString() ? `?${params.toString()}` : "";
+
+  try {
+    const data = await api(`/api/patients${query}`);
+    renderRegisteredPatients(data.patients || []);
+    setPatientsFeedback(`${(data.patients || []).length} paciente(s) carregado(s).`);
+    return data.patients || [];
+  } catch (error) {
+    try {
+      let fallbackPatients = await buildPatientsFallbackList();
+      const searchDigits = normalizeCpf(search);
+      const searchUpper = String(search || "").trim().toUpperCase();
+
+      if (searchUpper) {
+        fallbackPatients = fallbackPatients.filter(patient =>
+          String(patient.nome || "").toUpperCase().includes(searchUpper)
+          || (searchDigits && normalizeCpf(patient.cpf).includes(searchDigits))
+        );
+      }
+
+      if (active === "true") fallbackPatients = fallbackPatients.filter(patient => Boolean(patient.currentAdmission));
+      if (active === "false") fallbackPatients = fallbackPatients.filter(patient => !patient.currentAdmission);
+
+      renderRegisteredPatients(fallbackPatients);
+      setPatientsFeedback("Lista carregada pelos leitos atuais enquanto a API completa de pacientes não responde.");
+      return fallbackPatients;
+    } catch (fallbackError) {
+      renderRegisteredPatients([]);
+      setPatientsFeedback(fallbackError.message || error.message || "Não foi possível carregar os pacientes.", true);
+      return [];
+    }
+  }
+}
+
+async function openPatientRegistry(patientId) {
+  const fallbackPatient = registeredPatients.find(item => String(item.id) === String(patientId));
+  if (String(patientId).startsWith("bed-") && fallbackPatient) {
+    fillPatientRegistryModal(fallbackPatient);
+    document.getElementById("patient-registry-save").disabled = true;
+    document.getElementById("patient-registry-delete").disabled = true;
+    document.getElementById("modal-patient-registry").showModal();
+    return;
+  }
+
+  const data = await api(`/api/patients/${patientId}`);
+  fillPatientRegistryModal(data.patient);
+  document.getElementById("patient-registry-save").disabled = false;
+  document.getElementById("modal-patient-registry").showModal();
+}
+
 function renderPendingHistory(items) {
   const container = document.getElementById("modal-pendencias-historico");
   if (!container) return;
@@ -334,6 +726,14 @@ function renderCurrentUser() {
   const role = currentUser?.role || "-";
   const activeShift = currentUser?.activeShift || null;
   document.getElementById("topbar-user").textContent = userName;
+  const avatar = document.getElementById("profile-avatar");
+  if (avatar) avatar.textContent = userName.charAt(0).toUpperCase() || "U";
+  const roleSummary = document.getElementById("profile-role-summary");
+  if (roleSummary) roleSummary.textContent = `Perfil ${role}`;
+  const shiftSummary = document.getElementById("profile-shift-status");
+  if (shiftSummary) shiftSummary.textContent = activeShift ? "Aberto" : "Fechado";
+  const currentWardLabel = document.getElementById("profile-current-ward");
+  if (currentWardLabel) currentWardLabel.textContent = activeShift?.wardNome || ward?.nome || "-";
   document.getElementById("shift-user-name").textContent = userName;
   document.getElementById("shift-user-role").textContent = `Login: ${currentUser?.username || "-"} • Perfil: ${role}`;
   document.getElementById("shift-status-label").textContent = activeShift ? "Aberto" : "Fechado";
@@ -808,6 +1208,8 @@ async function load() {
   document.getElementById("eq-tec-noite").value = ward.equipe.tecnicosNoite || "";
   document.getElementById("eq-faltosos").value = ward.equipe.faltosos || "";
   await refreshCurrentUser();
+  await refreshSidebarPatients();
+  document.getElementById("profile-current-ward").textContent = ward.nome;
 
   if (pendingScrollEnf) {
     const target = document.getElementById(pendingScrollEnf);
@@ -958,6 +1360,7 @@ async function refreshWards() {
   updateDashboardFilterInputs();
   updateTopbarWardSelectors();
   renderCurrentUser();
+  await refreshSidebarPatients();
 }
 
 function updateAdminEnfDropdown() {
@@ -1036,6 +1439,10 @@ async function openTopbarWard() {
   currentWardId = wardId;
   setAppEnabled(true);
   showOnly(null);
+  document.getElementById("nav-home")?.classList.remove("ghost");
+  document.getElementById("nav-dashboard")?.classList.add("ghost");
+  document.getElementById("nav-patients")?.classList.add("ghost");
+  document.getElementById("nav-gerenciar")?.classList.add("ghost");
   await load();
   updateTopbarWardSelectors();
 }
@@ -1051,8 +1458,59 @@ async function openTopbarEnfermaria() {
   }
   setAppEnabled(true);
   showOnly(null);
+  document.getElementById("nav-home")?.classList.remove("ghost");
+  document.getElementById("nav-dashboard")?.classList.add("ghost");
+  document.getElementById("nav-patients")?.classList.add("ghost");
+  document.getElementById("nav-gerenciar")?.classList.add("ghost");
   await load();
   updateTopbarWardSelectors();
+}
+
+async function openPatientsView() {
+  await refreshWards();
+  setAppEnabled(false);
+  showOnly("view-patients");
+  await loadPatientsRegistry();
+  closeSidebarOnMobile();
+}
+
+async function savePatientRegistry() {
+  if (!currentPatientRecord?.id) return;
+  const payload = {
+    nome: document.getElementById("patient-registry-name").value.trim(),
+    cpf: normalizeCpf(document.getElementById("patient-registry-cpf").value),
+    birthDate: document.getElementById("patient-registry-birthdate").value,
+    diagnostico: document.getElementById("patient-registry-diagnostico").value.trim(),
+    nir: document.getElementById("patient-registry-nir").value.trim()
+  };
+
+  await api(`/api/patients/${currentPatientRecord.id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  setPatientsFeedback("Cadastro do paciente atualizado com sucesso.");
+  await loadPatientsRegistry();
+  if (currentWardId && currentPatientRecord.currentAdmission?.wardId === currentWardId) {
+    await load();
+  }
+  const refreshed = await api(`/api/patients/${currentPatientRecord.id}`);
+  fillPatientRegistryModal(refreshed.patient);
+}
+
+async function deletePatientRegistry() {
+  if (!currentPatientRecord?.id) return;
+  if (!confirm(`Excluir o cadastro de ${currentPatientRecord.nome || "este paciente"}?`)) return;
+
+  await api(`/api/patients/${currentPatientRecord.id}`, {
+    method: "DELETE"
+  });
+
+  document.getElementById("modal-patient-registry").close();
+  currentPatientRecord = null;
+  setPatientsFeedback("Cadastro do paciente excluído com sucesso.");
+  await loadPatientsRegistry();
 }
 
 async function startApp() {
@@ -1111,14 +1569,22 @@ async function doLogout() {
 
 document.getElementById("btn-logout-side")?.addEventListener("click", doLogout);
 document.getElementById("btn-logout-top")?.addEventListener("click", doLogout);
-document.getElementById("topbar-ward-select")?.addEventListener("change", updateTopbarEnfSelect);
+document.getElementById("topbar-ward-select")?.addEventListener("change", async () => {
+  updateTopbarEnfSelect();
+  await refreshSidebarPatients();
+});
 document.getElementById("btn-topbar-open")?.addEventListener("click", openTopbarWard);
 document.getElementById("btn-topbar-open-enf")?.addEventListener("click", openTopbarEnfermaria);
+document.getElementById("btn-open-patients")?.addEventListener("click", openPatientsView);
 
 document.getElementById("btn-abrir-setor").addEventListener("click", async () => {
   currentWardId = parseInt(document.getElementById("select-ward").value, 10);
   setAppEnabled(true);
   showOnly(null);
+  document.getElementById("nav-home")?.classList.remove("ghost");
+  document.getElementById("nav-dashboard")?.classList.add("ghost");
+  document.getElementById("nav-patients")?.classList.add("ghost");
+  document.getElementById("nav-gerenciar")?.classList.add("ghost");
   await load();
   updateTopbarWardSelectors();
 });
@@ -1149,6 +1615,48 @@ document.getElementById("nav-home")?.addEventListener("click", async () => {
   setAppEnabled(false);
   showOnly("view-home");
   closeSidebarOnMobile();
+});
+
+document.getElementById("nav-patients")?.addEventListener("click", openPatientsView);
+
+document.getElementById("btn-patients-search")?.addEventListener("click", loadPatientsRegistry);
+
+document.getElementById("patients-list")?.addEventListener("click", async event => {
+  const openButton = event.target.closest(".btn-patient-open");
+  if (openButton) {
+    await openPatientRegistry(openButton.dataset.id);
+    return;
+  }
+
+  const deleteButton = event.target.closest(".btn-patient-delete");
+  if (deleteButton) {
+    const patientId = deleteButton.dataset.id;
+    const patient = registeredPatients.find(item => String(item.id) === String(patientId));
+    if (!patient) return;
+    currentPatientRecord = patient;
+    await deletePatientRegistry();
+  }
+});
+
+document.getElementById("patients-search")?.addEventListener("keydown", async event => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    await loadPatientsRegistry();
+  }
+});
+
+document.getElementById("patient-registry-cpf")?.addEventListener("input", event => {
+  event.target.value = formatCpf(event.target.value);
+});
+
+document.getElementById("patient-registry-save")?.addEventListener("click", async event => {
+  event.preventDefault();
+  await savePatientRegistry();
+});
+
+document.getElementById("patient-registry-delete")?.addEventListener("click", async event => {
+  event.preventDefault();
+  await deletePatientRegistry();
 });
 
 document.getElementById("btn-voltar-home").addEventListener("click", async () => {
@@ -1304,6 +1812,55 @@ document.getElementById("btn-del-enf")?.addEventListener("click", async () => {
     if (currentWardId === wardId) await load();
   } catch (e) {
     alert(e.message);
+  }
+});
+
+document.getElementById("sidebar-patient-cpf")?.addEventListener("input", event => {
+  event.target.value = formatCpf(event.target.value);
+});
+
+document.getElementById("btn-sidebar-save-patient")?.addEventListener("click", async () => {
+  const wardId = getSidebarWardId();
+  const bedId = parseInt(document.getElementById("sidebar-patient-bed").value, 10);
+  const nome = document.getElementById("sidebar-patient-name").value.trim();
+  const cpf = normalizeCpf(document.getElementById("sidebar-patient-cpf").value);
+  const birthDate = document.getElementById("sidebar-patient-birthdate").value;
+  const admissao = document.getElementById("sidebar-patient-admission").value;
+
+  if (!wardId) {
+    setSidebarPatientFeedback("Selecione um setor para cadastrar o paciente.", true);
+    return;
+  }
+  if (!Number.isInteger(bedId)) {
+    setSidebarPatientFeedback("Selecione um leito disponível.", true);
+    return;
+  }
+  if (!nome) {
+    setSidebarPatientFeedback("Informe o nome do paciente.", true);
+    return;
+  }
+  if (!cpf || cpf.length !== 11) {
+    setSidebarPatientFeedback("Informe um CPF válido com 11 dígitos.", true);
+    return;
+  }
+  if (!birthDate) {
+    setSidebarPatientFeedback("Informe a data de nascimento.", true);
+    return;
+  }
+
+  try {
+    await api(`/api/wards/${wardId}/beds/${bedId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "OCUPADO", nome, cpf, birthDate, admissao })
+    });
+    clearSidebarPatientForm();
+    setSidebarPatientFeedback("Paciente cadastrado com sucesso.");
+    if (currentWardId !== wardId) currentWardId = wardId;
+    await refreshSidebarPatients();
+    await load();
+  } catch (error) {
+    setSidebarPatientFeedback(error.message || "Não foi possível cadastrar o paciente.", true);
   }
 });
 

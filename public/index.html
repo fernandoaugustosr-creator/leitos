@@ -8,40 +8,64 @@
 </head>
 <body>
   <div class="app-shell">
-    <div class="content">
-      <header class="topbar">
-        <div class="topbar-main">
-          <div class="topbar-left">
-            <div class="title" id="header-title">CONTROLE DE LEITOS</div>
-          </div>
-          <div class="topbar-actions">
-            <div class="user-chip" id="topbar-user">-</div>
-            <div class="date" id="date"></div>
-          </div>
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-kicker">CONTROLE DE LEITOS</div>
+        <div class="brand-title">Hospital Municipal</div>
+        <div class="brand-subtitle">Gestão assistencial integrada</div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button id="nav-dashboard" class="nav-btn sidebar-btn">Dashboard</button>
+        <button id="nav-home" class="nav-btn ghost sidebar-btn">Setores</button>
+        <button id="nav-patients" class="nav-btn ghost sidebar-btn">Pacientes</button>
+        <button id="nav-gerenciar" class="nav-btn ghost sidebar-btn">Cadastro</button>
+      </nav>
+
+      <section class="sidebar-card">
+        <div class="sidebar-card-title">Acesso rápido</div>
+        <label>Setor
+          <select id="topbar-ward-select"></select>
+        </label>
+        <label>Enfermaria
+          <select id="topbar-enf-select">
+            <option value="">Todas</option>
+          </select>
+        </label>
+        <button id="btn-topbar-open" class="ghost">Abrir setor</button>
+        <button id="btn-topbar-open-enf" class="ghost">Ir para enfermaria</button>
+      </section>
+
+      <section class="sidebar-card sidebar-info-card">
+        <div class="sidebar-card-title">Cadastro de pacientes</div>
+        <div class="sidebar-info-text">A lista de pacientes, alteração de cadastro, exclusão e histórico de internação agora ficam no menu `Pacientes`.</div>
+        <button id="btn-open-patients" class="ghost">Abrir menu Pacientes</button>
+      </section>
+
+      <button id="btn-logout-top" class="nav-btn danger sidebar-logout">Sair</button>
+    </aside>
+
+    <div class="content-shell">
+      <header class="hero-header">
+        <div>
+          <div class="hero-title" id="header-title">Dashboard Hospitalar</div>
+          <div class="hero-subtitle">Visão geral do setor, indicadores e plantão em um único painel.</div>
         </div>
-        <div class="topbar-menu">
-          <div class="topbar-nav-buttons">
-            <button id="nav-dashboard" class="nav-btn">Dashboard</button>
-            <button id="nav-home" class="nav-btn ghost">Setores</button>
-            <button id="nav-gerenciar" class="nav-btn ghost">Cadastro</button>
-          </div>
-          <div class="topbar-selectors">
-            <label>Setor
-              <select id="topbar-ward-select"></select>
-            </label>
-            <label>Enfermaria
-              <select id="topbar-enf-select">
-                <option value="">Todas</option>
-              </select>
-            </label>
-            <button id="btn-topbar-open" class="ghost">Abrir</button>
-            <button id="btn-topbar-open-enf" class="ghost">Ir para enfermaria</button>
-          </div>
-          <button id="btn-logout-top" class="nav-btn danger topbar-logout">Sair</button>
+        <div class="hero-meta">
+          <div class="date" id="date"></div>
         </div>
       </header>
 
-      <main class="container">
+      <section class="welcome-banner">
+        <div>
+          <div class="welcome-kicker">Bem-vindo ao painel assistencial</div>
+          <div class="welcome-text">Acompanhe setores, leitos, pacientes, pendências e indicadores em tempo real.</div>
+        </div>
+        <div class="welcome-icon">+</div>
+      </section>
+
+      <div class="layout-grid">
+        <main class="container">
     <section id="view-login" class="panel hidden">
       <h2>Login</h2>
       <div class="row">
@@ -117,6 +141,26 @@
       </div>
     </section>
 
+    <section id="view-patients" class="panel hidden">
+      <h2>Cadastro de Pacientes</h2>
+      <div class="row">
+        <label>Buscar paciente
+          <input id="patients-search" placeholder="Nome ou CPF">
+        </label>
+        <label>Status
+          <select id="patients-active-filter">
+            <option value="">Todos</option>
+            <option value="true">Internação ativa</option>
+            <option value="false">Sem internação ativa</option>
+          </select>
+        </label>
+        <button id="btn-patients-search">Atualizar lista</button>
+      </div>
+      <div id="patients-feedback" class="hint hidden"></div>
+      <div id="patients-list-empty" class="hint hidden">Nenhum paciente cadastrado.</div>
+      <div id="patients-list" class="patients-list"></div>
+    </section>
+
     <section id="view-admin" class="panel hidden">
       <h2>Cadastro de Estrutura</h2>
       <div class="row">
@@ -152,6 +196,8 @@
         <button id="btn-del-beds" class="ghost">Excluir leitos</button>
         <button id="btn-del-enf" class="ghost">Excluir enfermaria</button>
       </div>
+
+      <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
 
       <div class="row" style="margin-top: 24px; justify-content: flex-end;">
         <button id="btn-voltar-home" class="ghost">Voltar para o Início</button>
@@ -237,7 +283,42 @@
         <tbody id="tbody-leitos"></tbody>
       </table>
     </section>
-      </main>
+        </main>
+
+        <aside class="profile-rail">
+          <section class="profile-card">
+            <div class="profile-avatar" id="profile-avatar">A</div>
+            <div class="user-chip" id="topbar-user">-</div>
+            <div class="profile-role" id="profile-role-summary">Perfil -</div>
+            <div class="profile-metric-grid">
+              <div class="profile-metric">
+                <strong id="profile-shift-status">Fechado</strong>
+                <span>Plantão</span>
+              </div>
+              <div class="profile-metric">
+                <strong id="profile-current-ward">-</strong>
+                <span>Setor</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="quick-card">
+            <div class="quick-card-title">Atalhos</div>
+            <div class="quick-card-item">
+              <strong>Dashboard</strong>
+              <span>Acompanhe indicadores e filtros do hospital.</span>
+            </div>
+            <div class="quick-card-item">
+              <strong>Setores</strong>
+              <span>Abra rapidamente o setor e a enfermaria desejados.</span>
+            </div>
+            <div class="quick-card-item">
+              <strong>Plantão</strong>
+              <span>Gerencie abertura, fechamento e envio de resumo.</span>
+            </div>
+          </section>
+        </aside>
+      </div>
     </div>
   </div>
 
@@ -308,6 +389,37 @@
         <button id="modal-obito" class="ghost" value="default">Óbito</button>
         <button id="modal-baixa" class="danger" value="default">Dar baixa</button>
         <button value="cancelar">Cancelar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="modal-patient-registry" class="modal">
+    <form method="dialog" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title" id="patient-registry-title">Cadastro do paciente</div>
+        <button class="modal-close" value="cancelar" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-grid">
+          <label>Nome completo <input id="patient-registry-name"></label>
+          <label>CPF <input id="patient-registry-cpf" inputmode="numeric" maxlength="14" placeholder="000.000.000-00"></label>
+          <label>Data de nascimento <input id="patient-registry-birthdate" type="date"></label>
+          <label>NIR <input id="patient-registry-nir"></label>
+          <label style="grid-column: 1 / -1;">Diagnóstico <input id="patient-registry-diagnostico"></label>
+        </div>
+        <div class="history-panel">
+          <div class="procedimentos-title">Internação atual</div>
+          <div id="patient-registry-current" class="patient-current-card"></div>
+        </div>
+        <div class="history-panel">
+          <div class="procedimentos-title">Histórico de internação</div>
+          <div id="patient-registry-history" class="history-list"></div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="patient-registry-save" value="default">Salvar alterações</button>
+        <button id="patient-registry-delete" class="danger" value="default">Excluir cadastro</button>
+        <button value="cancelar">Fechar</button>
       </div>
     </form>
   </dialog>
