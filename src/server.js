@@ -3,6 +3,7 @@ const path = require("path");
 const crypto = require("crypto");
 const app = express();
 const port = process.env.PORT || 3000;
+const isServerlessRuntime = Boolean(process.env.VERCEL);
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "public")));
@@ -38,6 +39,25 @@ const storageStatus = {
   lastSyncAt: null,
   lastError: null
 };
+let storageInitializationPromise = null;
+
+function trackStorageError(error) {
+  storageStatus.provider = "supabase";
+  storageStatus.synced = false;
+  storageStatus.lastError = error.message;
+}
+
+async function ensureStorageInitialized() {
+  if (!storageInitializationPromise) {
+    storageInitializationPromise = initializeStorage().catch(error => {
+      trackStorageError(error);
+      storageInitializationPromise = null;
+      throw error;
+    });
+  }
+
+  return storageInitializationPromise;
+}
 
 function parseCookies(header) {
   const out = {};
@@ -317,6 +337,7 @@ async function refreshStateFromSupabase() {
 
 app.use("/api", async (req, res, next) => {
   try {
+    await ensureStorageInitialized();
     await refreshStateFromSupabase();
     next();
   } catch (error) {
@@ -1592,13 +1613,22 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-initializeStorage()
-  .then(() => {
-    app.listen(port, () => {
-      console.log(`Server running at http://localhost:${port}`);
+if (require.main === module) {
+  ensureStorageInitialized()
+    .then(() => {
+      app.listen(port, () => {
+        console.log(`Server running at http://localhost:${port}`);
+      });
+    })
+    .catch(error => {
+      console.error(`Falha ao iniciar com Supabase: ${error.message}`);
+      process.exit(1);
     });
-  })
-  .catch(error => {
-    console.error(`Falha ao iniciar com Supabase: ${error.message}`);
-    process.exit(1);
+} else if (isServerlessRuntime) {
+  ensureStorageInitialized().catch(error => {
+    console.error(`Falha ao iniciar com Supabase na Vercel: ${error.message}`);
   });
+}
+
+module.exports = app;
+module.exports.default = app;
