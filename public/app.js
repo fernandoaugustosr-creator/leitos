@@ -1573,9 +1573,6 @@ document.getElementById("topbar-ward-select")?.addEventListener("change", async 
   updateTopbarEnfSelect();
   await refreshSidebarPatients();
 });
-document.getElementById("btn-topbar-open")?.addEventListener("click", openTopbarWard);
-document.getElementById("btn-topbar-open-enf")?.addEventListener("click", openTopbarEnfermaria);
-document.getElementById("btn-open-patients")?.addEventListener("click", openPatientsView);
 
 document.getElementById("btn-abrir-setor").addEventListener("click", async () => {
   currentWardId = parseInt(document.getElementById("select-ward").value, 10);
