@@ -4,7 +4,8 @@
   "private": true,
   "main": "src/server.js",
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/server.js"
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "vercel-build": "node -e \"console.log('No build step required for Express app')\""
   },
   "dependencies": {
     "express": "^4.19.2"
