@@ -31,11 +31,12 @@ let transferWardCache = new Map();
 let sidebarPatients = [];
 let registeredPatients = [];
 let currentPatientRecord = null;
+let pendingWhatsAppMessage = "";
 
 const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "PASSAGEM DE SONDA"];
 const NO_ENFERMARIA_VALUE = "__SEM_ENFERMARIA__";
 const ALL_ENFERMARIA_VALUE = "__TODAS_ENFERMARIAS__";
-const DEFAULT_WHATSAPP_GROUP_LINK = "https://chat.whatsapp.com/Dyxbb0R8w8PJY2k9U1a9jG";
+const DEFAULT_WHATSAPP_GROUP_LINK = "https://chat.whatsapp.com/GgzUGlmImdX1CAl0vAZ6J9";
 
 function normalizeCpf(value) {
   return String(value || "").replace(/\D/g, "").slice(0, 11);
@@ -127,50 +128,27 @@ function isMaintenancePending(text) {
   return value.includes("manuten");
 }
 
-function buildMaintenanceWhatsAppMessage() {
-  const items = (ward?.beds || [])
-    .flatMap(bed => {
-      const historico = Array.isArray(bed.pendenciasHistorico) ? bed.pendenciasHistorico : [];
-      const ativas = historico
-        .filter(item => item.status !== "FINALIZADA" && isMaintenancePending(item.texto))
-        .map(item => ({
-          leito: bed.id,
-          enfermaria: bed.enfermaria || "",
-          texto: item.texto
-        }));
+function getMaintenanceWardName() {
+  return currentUser?.activeShift?.wardNome || ward?.nome || "-";
+}
 
-      if (ativas.length) return ativas;
-
-      if (bed.status === "BLOQUEADO" && isMaintenancePending(bed.pendencias)) {
-        return [{
-          leito: bed.id,
-          enfermaria: bed.enfermaria || "",
-          texto: bed.pendencias
-        }];
-      }
-
-      return [];
-    });
-
+function buildMaintenanceWhatsAppMessage(centralNumber) {
+  const sectorName = getMaintenanceWardName();
   const lines = [
-    `Solicitacao de manutencao - ${ward?.nome || "-"}`,
-    `Data: ${ward?.data || new Date().toLocaleDateString("pt-BR")}`,
+    `Solicito Manutencao de Central de Ar no setor ${sectorName}.`,
+    `Central: ${centralNumber}`,
     `Responsavel: ${currentUser?.nome || currentUser?.username || "-"}`,
-    ""
+    `Data: ${ward?.data || new Date().toLocaleDateString("pt-BR")}`
   ];
 
-  if (!items.length) {
-    lines.push("Nenhuma pendencia de manutencao ativa encontrada neste setor.");
-    return lines.join("\n");
-  }
-
-  lines.push("Pendencias de manutencao:");
-  for (const item of items) {
-    const local = item.enfermaria ? ` / ${item.enfermaria}` : "";
-    lines.push(`- Leito ${item.leito}${local}: ${item.texto}`);
-  }
-
   return lines.join("\n");
+}
+
+function openWhatsAppPreview(message) {
+  pendingWhatsAppMessage = message;
+  const textarea = document.getElementById("whatsapp-message-preview");
+  if (textarea) textarea.value = message;
+  document.getElementById("modal-whatsapp-preview")?.showModal();
 }
 
 async function openWhatsAppSummary() {
@@ -179,15 +157,17 @@ async function openWhatsAppSummary() {
     return;
   }
 
-  const message = buildMaintenanceWhatsAppMessage();
-  try {
-    await navigator.clipboard.writeText(message);
-    setShiftFeedback("Solicitação de manutenção copiada. Abra o grupo e cole a mensagem.");
-  } catch {
-    setShiftFeedback("Abrindo o grupo da manutenção. Copie e envie a solicitação manualmente.");
+  const centralNumber = window.prompt("Informe o numero da central de ar:");
+  if (centralNumber === null) return;
+
+  const normalizedCentralNumber = String(centralNumber).trim();
+  if (!normalizedCentralNumber) {
+    setShiftFeedback("Informe o numero da central para enviar a solicitacao.", true);
+    return;
   }
 
-  window.open(DEFAULT_WHATSAPP_GROUP_LINK, "_blank");
+  const message = buildMaintenanceWhatsAppMessage(normalizedCentralNumber);
+  openWhatsAppPreview(message);
 }
 
 function setPatientFieldsEnabled(enabled) {
@@ -1704,6 +1684,23 @@ document.getElementById("btn-print-last-shift")?.addEventListener("click", () =>
 });
 
 document.getElementById("btn-whatsapp-shift")?.addEventListener("click", openWhatsAppSummary);
+document.getElementById("btn-whatsapp-open-group")?.addEventListener("click", async event => {
+  event.preventDefault();
+  if (!pendingWhatsAppMessage) {
+    setShiftFeedback("Nenhuma solicitacao foi gerada ainda.", true);
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(pendingWhatsAppMessage);
+    setShiftFeedback("Texto copiado. O grupo foi aberto para voce colar e enviar.");
+  } catch {
+    setShiftFeedback("Grupo aberto. Se necessario, copie o texto manualmente antes de enviar.");
+  }
+
+  window.location.href = DEFAULT_WHATSAPP_GROUP_LINK;
+  document.getElementById("modal-whatsapp-preview")?.close();
+});
 
 document.getElementById("btn-criar-ward").addEventListener("click", async () => {
   const nome = document.getElementById("admin-ward-name").value.trim();

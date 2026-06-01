@@ -416,6 +416,25 @@
     </form>
   </dialog>
 
+  <dialog id="modal-whatsapp-preview" class="modal">
+    <form method="dialog" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">Solicitação para o WhatsApp</div>
+        <button class="modal-close" value="cancelar" aria-label="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label style="grid-column: 1 / -1;">
+          Texto da mensagem
+          <textarea id="whatsapp-message-preview" rows="8" readonly></textarea>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-whatsapp-open-group" value="default">Copiar e abrir grupo</button>
+        <button value="cancelar">Fechar</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/app.js"></script>
 </body>
 </html>
