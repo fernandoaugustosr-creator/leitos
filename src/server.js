@@ -10,8 +10,8 @@ app.use(express.static(path.join(__dirname, "..", "public")));
 
 const statuses = ["OCUPADO", "LIVRE", "BLOQUEADO", "RESERVADO", "EXTRA"];
 const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "PASSAGEM DE SONDA"];
-const supabaseUrl = process.env.SUPABASE_URL || "https://bbnndbnotfpjvqonfzac.supabase.co";
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
+const supabaseUrl = String(process.env.SUPABASE_URL || "").trim();
+const supabaseKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "").trim();
 const supabaseTable = process.env.SUPABASE_TABLE || "app_state";
 const supabaseStateId = process.env.SUPABASE_STATE_ID || "main";
 const supabaseStateColumns = ["payload", "data"];
@@ -138,7 +138,10 @@ function hasSupabaseConfig() {
 
 function ensureSupabaseConfigured() {
   if (!hasSupabaseConfig()) {
-    const error = new Error("Supabase não configurado");
+    const missing = [];
+    if (!supabaseUrl) missing.push("SUPABASE_URL");
+    if (!supabaseKey) missing.push("SUPABASE_SERVICE_ROLE_KEY ou SUPABASE_ANON_KEY");
+    const error = new Error(`Supabase não configurado: ${missing.join(", ")}`);
     storageStatus.provider = "supabase";
     storageStatus.configured = false;
     storageStatus.synced = false;
@@ -160,6 +163,25 @@ function buildStatePayload() {
     patientRegistry,
     wards
   };
+}
+
+function createEmptyTeam() {
+  return {
+    medicoPlantao: "",
+    enfermeiroDia: "",
+    tecnicosDia: "",
+    enfermeiroNoite: "",
+    tecnicosNoite: "",
+    faltosos: ""
+  };
+}
+
+function ensureWardTeam(ward) {
+  if (!ward) return createEmptyTeam();
+  if (!ward.equipe || typeof ward.equipe !== "object") {
+    ward.equipe = createEmptyTeam();
+  }
+  return ward.equipe;
 }
 
 function applyStatePayload(payload) {
@@ -201,6 +223,7 @@ function applyStatePayload(payload) {
   }
   wards.length = 0;
   for (const ward of payload.wards) {
+    ensureWardTeam(ward);
     wards.push(ward);
   }
   nextWardId = Number.isInteger(payload.nextWardId) ? payload.nextWardId : wards.reduce((max, ward) => Math.max(max, ward.id), 0) + 1;
@@ -345,11 +368,32 @@ app.use("/api", async (req, res, next) => {
   }
 });
 
-function getWardOr404(req, res) {
+function isWardArchived(ward) {
+  return Boolean(ward?.archivedAt);
+}
+
+function wardSummaryForClient(ward) {
+  return {
+    id: ward.id,
+    nome: ward.nome,
+    enfermarias: ward.enfermarias || [],
+    archived: isWardArchived(ward),
+    archivedAt: ward.archivedAt || null,
+    bedsCount: Array.isArray(ward.beds) ? ward.beds.length : 0,
+    enfermariasCount: Array.isArray(ward.enfermarias) ? ward.enfermarias.length : 0
+  };
+}
+
+function getWardOr404(req, res, options = {}) {
+  const { allowArchived = false } = options;
   const id = parseInt(req.params.wardId, 10);
   const ward = wards.find(w => w.id === id);
   if (!ward) {
     res.status(404).json({ error: "Setor não encontrado" });
+    return null;
+  }
+  if (!allowArchived && isWardArchived(ward)) {
+    res.status(404).json({ error: "Setor arquivado" });
     return null;
   }
   return ward;
@@ -357,6 +401,43 @@ function getWardOr404(req, res) {
 
 function getWardName(wardId) {
   return wards.find(ward => ward.id === wardId)?.nome || "";
+}
+
+function syncWardNameReferences(wardId, nextWardName) {
+  for (const patient of patientRegistry) {
+    if (patient.currentAdmission && Number(patient.currentAdmission.wardId) === Number(wardId)) {
+      patient.currentAdmission.wardNome = nextWardName;
+    }
+
+    if (Array.isArray(patient.admissionHistory)) {
+      for (const admission of patient.admissionHistory) {
+        if (Number(admission.wardId) === Number(wardId)) {
+          admission.wardNome = nextWardName;
+        }
+
+        if (Array.isArray(admission.transferHistory)) {
+          for (const transfer of admission.transferHistory) {
+            if (Number(transfer.fromWardId) === Number(wardId)) transfer.fromWardNome = nextWardName;
+            if (Number(transfer.toWardId) === Number(wardId)) transfer.toWardNome = nextWardName;
+          }
+        }
+      }
+    }
+  }
+
+  for (const user of users) {
+    if (user.activeShift && Number(user.activeShift.wardId) === Number(wardId)) {
+      user.activeShift.wardNome = nextWardName;
+    }
+
+    if (Array.isArray(user.shifts)) {
+      for (const shift of user.shifts) {
+        if (Number(shift.wardId) === Number(wardId)) {
+          shift.wardNome = nextWardName;
+        }
+      }
+    }
+  }
 }
 
 function normalizeCpf(value) {
@@ -419,6 +500,23 @@ function createPatientRecordFromBed(bed) {
     birthDate: bed.birthDate || "",
     diagnostico: bed.diagnostico || "",
     nir: bed.nir || "",
+    createdAt: now,
+    updatedAt: now,
+    deletedAt: null,
+    currentAdmission: null,
+    admissionHistory: []
+  };
+}
+
+function createEmptyPatientRecord(payload = {}) {
+  const now = new Date().toISOString();
+  return {
+    id: nextPatientId++,
+    nome: String(payload.nome || "").trim(),
+    cpf: normalizeCpf(payload.cpf),
+    birthDate: String(payload.birthDate || "").trim(),
+    diagnostico: String(payload.diagnostico || "").trim(),
+    nir: String(payload.nir || "").trim(),
     createdAt: now,
     updatedAt: now,
     deletedAt: null,
@@ -598,7 +696,27 @@ function sanitizeUser(user) {
     birthDate: user.birthDate || "",
     role: user.role,
     activeShift: user.activeShift,
+    recentShifts: (user.shifts || []).slice(0, 20).map(shift => ({
+      id: shift.id,
+      shiftDate: shift.shiftDate || (shift.openedAt ? String(shift.openedAt).slice(0, 10) : ""),
+      wardId: shift.wardId,
+      wardNome: shift.wardNome || "",
+      shiftLength: shift.shiftLength || "12H",
+      shiftPeriod: shift.shiftPeriod || "DIA",
+      openedAt: shift.openedAt || null,
+      closedAt: shift.closedAt || null,
+      team: shift.team || null
+    })),
     recentActions: (user.actions || []).slice(0, 20)
+  };
+}
+
+function sanitizeStaffUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    nome: user.nome || user.username || "",
+    role: user.role
   };
 }
 
@@ -672,15 +790,27 @@ function buildShiftReport(user, shift) {
     }
   }
 
-  const activePendencias = [];
+  const activePendingMap = new Map();
   const solvedPendencias = [];
   const solvedKeys = new Set();
   const openedAtMs = shift.openedAt ? new Date(shift.openedAt).getTime() : 0;
   const closedAtMs = shift.closedAt ? new Date(shift.closedAt).getTime() : Date.now();
+  const pendingKey = item => `${item.leito}:${item.id || item.texto || ""}`;
+  const addActivePending = item => {
+    activePendingMap.set(pendingKey(item), { ...item });
+  };
+  const addSolvedPending = item => {
+    const solvedKey = `${pendingKey(item)}:${item.finishedAt || ""}`;
+    if (solvedKeys.has(solvedKey)) return;
+    solvedKeys.add(solvedKey);
+    activePendingMap.delete(pendingKey(item));
+    solvedPendencias.push({ ...item });
+  };
 
   for (const bed of beds) {
     for (const pendencia of bed.pendenciasHistorico || []) {
       const baseItem = {
+        id: pendencia.id || "",
         leito: bed.id,
         enfermaria: bed.enfermaria || "",
         paciente: bed.nome || "",
@@ -692,29 +822,38 @@ function buildShiftReport(user, shift) {
       };
 
       if (pendencia.status !== "FINALIZADA") {
-        activePendencias.push(baseItem);
+        addActivePending(baseItem);
       }
 
       if (pendencia.finishedAt) {
         const finishedAtMs = new Date(pendencia.finishedAt).getTime();
         if (finishedAtMs >= openedAtMs && finishedAtMs <= closedAtMs) {
-          const solvedKey = `${bed.id}:${pendencia.id || pendencia.texto}:${pendencia.finishedAt || ""}`;
-          if (!solvedKeys.has(solvedKey)) {
-            solvedKeys.add(solvedKey);
-            solvedPendencias.push(baseItem);
-          }
+          addSolvedPending(baseItem);
         }
       }
     }
   }
 
   for (const action of shift.actions || []) {
+    const openedItems = Array.isArray(action.meta?.pendenciasRegistradas) ? action.meta.pendenciasRegistradas : [];
+    for (const item of openedItems) {
+      addActivePending({
+        id: item.id || "",
+        leito: item.leito,
+        enfermaria: item.enfermaria || "",
+        paciente: item.paciente || "",
+        texto: item.texto || "",
+        createdAt: item.createdAt || action.at || "",
+        createdBy: item.createdBy || action.username || "",
+        finishedAt: null,
+        finishedBy: null
+      });
+    }
+
     const finalizedItems = Array.isArray(action.meta?.pendenciasFinalizadas) ? action.meta.pendenciasFinalizadas : [];
     for (const item of finalizedItems) {
-      const solvedKey = `${item.leito}:${item.id || item.texto}:${item.finishedAt || action.at || ""}`;
-      if (solvedKeys.has(solvedKey)) continue;
-      solvedKeys.add(solvedKey);
-      solvedPendencias.push({
+      addSolvedPending({
+        id: item.id || "",
         leito: item.leito,
         enfermaria: item.enfermaria || "",
         paciente: item.paciente || "",
@@ -728,10 +867,8 @@ function buildShiftReport(user, shift) {
   }
 
   for (const item of shift.pendenciasFinalizadas || []) {
-    const solvedKey = `${item.leito}:${item.id || item.texto}:${item.finishedAt || ""}`;
-    if (solvedKeys.has(solvedKey)) continue;
-    solvedKeys.add(solvedKey);
-    solvedPendencias.push({
+    addSolvedPending({
+      id: item.id || "",
       leito: item.leito,
       enfermaria: item.enfermaria || "",
       paciente: item.paciente || "",
@@ -743,6 +880,7 @@ function buildShiftReport(user, shift) {
     });
   }
 
+  const activePendencias = Array.from(activePendingMap.values());
   activePendencias.sort((a, b) => String(a.enfermaria).localeCompare(String(b.enfermaria), "pt-BR") || a.leito - b.leito);
   solvedPendencias.sort((a, b) => new Date(b.finishedAt).getTime() - new Date(a.finishedAt).getTime());
 
@@ -753,6 +891,9 @@ function buildShiftReport(user, shift) {
       closedAt: shift.closedAt,
       wardId: shift.wardId,
       wardNome: shift.wardNome,
+      shiftLength: shift.shiftLength || "12H",
+      shiftPeriod: shift.shiftPeriod || "DIA",
+      team: shift.team || null,
       username: user.username,
       nome: user.nome
     },
@@ -938,6 +1079,15 @@ app.get("/api/me", (req, res) => {
   res.json({ user: sanitizeUser(user) });
 });
 
+app.get("/api/staff", requireAuth, (req, res) => {
+  const orderedUsers = [...users]
+    .filter(user => String(user.nome || user.username || "").trim())
+    .sort((a, b) =>
+      String(a.nome || a.username || "").localeCompare(String(b.nome || b.username || ""), "pt-BR")
+    );
+  res.json({ users: orderedUsers.map(sanitizeStaffUser) });
+});
+
 app.get("/api/users", requireAuth, requireAdmin, (req, res) => {
   const orderedUsers = [...users].sort((a, b) =>
     String(a.nome || a.username || "").localeCompare(String(b.nome || b.username || ""), "pt-BR")
@@ -993,6 +1143,56 @@ app.post("/api/users", requireAuth, requireAdmin, async (req, res) => {
   res.json({ ok: true, user: sanitizeUser(user) });
 });
 
+app.patch("/api/users/:userId", requireAuth, requireAdmin, async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  const user = users.find(item => Number(item.id) === userId);
+  if (!user) return res.status(404).json({ error: "Usuário não encontrado" });
+
+  const nome = String(req.body?.nome || "").trim();
+  const username = String(req.body?.username || "").trim();
+  const password = String(req.body?.password || "").trim();
+  const cpf = normalizeCpf(req.body?.cpf);
+  const birthDate = String(req.body?.birthDate || "").trim();
+  const role = String(req.body?.role || "user").trim().toLowerCase() === "admin" ? "admin" : "user";
+
+  if (!nome) return res.status(400).json({ error: "Nome é obrigatório" });
+  if (!username) return res.status(400).json({ error: "Usuário é obrigatório" });
+  if (!cpf) return res.status(400).json({ error: "CPF é obrigatório" });
+  if (cpf.length !== 11) return res.status(400).json({ error: "CPF deve ter 11 dígitos" });
+  if (!birthDate) return res.status(400).json({ error: "Data de nascimento é obrigatória" });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) {
+    return res.status(400).json({ error: "Data de nascimento inválida" });
+  }
+  if (users.some(item => item.id !== user.id && item.username.toLowerCase() === username.toLowerCase())) {
+    return res.status(400).json({ error: "Já existe um usuário com esse login" });
+  }
+  if (users.some(item => item.id !== user.id && normalizeCpf(item.cpf) === cpf)) {
+    return res.status(400).json({ error: "Já existe um usuário com esse CPF" });
+  }
+
+  const oldUsername = user.username;
+  user.nome = nome;
+  user.username = username;
+  user.cpf = cpf;
+  user.birthDate = birthDate;
+  user.role = role;
+  if (password) user.password = password;
+
+  if (req.user.id === user.id && req.session) {
+    req.session.username = user.username;
+  }
+
+  addUserAction(req.user, "USER_UPDATE", `Alterou o usuário ${user.nome}`, {
+    userId: user.id,
+    username: user.username,
+    previousUsername: oldUsername,
+    role: user.role
+  });
+
+  await persistState();
+  res.json({ ok: true, user: sanitizeUser(user) });
+});
+
 app.get("/api/patients", requireAuth, (req, res) => {
   const search = normalizePersonName(req.query?.search);
   const activeFilter = String(req.query?.active || "").trim().toLowerCase();
@@ -1029,6 +1229,34 @@ app.get("/api/patients/:patientId", requireAuth, (req, res) => {
   });
 });
 
+app.post("/api/patients", requireAuth, async (req, res) => {
+  const nome = String(req.body?.nome || "").trim();
+  const cpf = normalizeCpf(req.body?.cpf);
+  const birthDate = String(req.body?.birthDate || "").trim();
+  const nir = String(req.body?.nir || "").trim();
+
+  if (!nome) return res.status(400).json({ error: "Nome é obrigatório" });
+  if (!cpf || cpf.length !== 11) return res.status(400).json({ error: "CPF deve ter 11 dígitos" });
+  if (!birthDate) return res.status(400).json({ error: "Data de nascimento é obrigatória" });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) {
+    return res.status(400).json({ error: "Data de nascimento inválida" });
+  }
+  if (patientRegistry.some(item => !item.deletedAt && normalizeCpf(item.cpf) === cpf)) {
+    return res.status(400).json({ error: "Já existe paciente com esse CPF" });
+  }
+
+  const patient = createEmptyPatientRecord({ nome, cpf, birthDate, nir });
+  patientRegistry.push(patient);
+
+  addUserAction(req.user, "PATIENT_CREATE", `Cadastrou o paciente ${patient.nome}`, {
+    patientId: patient.id,
+    patientName: patient.nome
+  });
+
+  await persistState();
+  res.json({ ok: true, patient: patientForClient(patient) });
+});
+
 app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
   const patient = findPatientOr404(req, res);
   if (!patient) return;
@@ -1036,7 +1264,9 @@ app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
   const nome = String(req.body?.nome || "").trim();
   const cpf = normalizeCpf(req.body?.cpf);
   const birthDate = String(req.body?.birthDate || "").trim();
-  const diagnostico = String(req.body?.diagnostico || "").trim();
+  const diagnostico = req.body?.diagnostico === undefined
+    ? String(patient.diagnostico || "").trim()
+    : String(req.body?.diagnostico || "").trim();
   const nir = String(req.body?.nir || "").trim();
 
   if (!nome) return res.status(400).json({ error: "Nome é obrigatório" });
@@ -1103,19 +1333,68 @@ app.post("/api/shifts/open", requireAuth, async (req, res) => {
   const wardId = parseInt(req.body?.wardId, 10);
   const ward = wards.find(item => item.id === wardId);
   if (!ward) return res.status(400).json({ error: "Selecione um setor válido para abrir o plantão" });
+  const wardTeam = ensureWardTeam(ward);
+  const shiftLength = String(req.body?.shiftLength || "").trim().toUpperCase() === "24H" ? "24H" : "12H";
+  let shiftPeriod = String(req.body?.shiftPeriod || "").trim().toUpperCase();
+  if (shiftLength === "24H") shiftPeriod = "COMPLETO";
+  if (!["DIA", "NOITE", "COMPLETO"].includes(shiftPeriod)) shiftPeriod = "DIA";
 
   req.user.activeShift = {
     id: nextShiftId++,
+    shiftDate: getCurrentIsoDate(),
     openedAt: new Date().toISOString(),
     closedAt: null,
     wardId: ward.id,
     wardNome: ward.nome,
+    shiftLength,
+    shiftPeriod,
+    team: {
+      medicoPlantao: wardTeam.medicoPlantao || "",
+      enfermeiroDia: wardTeam.enfermeiroDia || "",
+      tecnicosDia: wardTeam.tecnicosDia || "",
+      enfermeiroNoite: wardTeam.enfermeiroNoite || "",
+      tecnicosNoite: wardTeam.tecnicosNoite || "",
+      faltosos: wardTeam.faltosos || ""
+    },
     actions: [],
     pendenciasFinalizadas: []
   };
-  addUserAction(req.user, "SHIFT_OPEN", `Abriu plantão no setor ${ward.nome}`, { wardId: ward.id, wardNome: ward.nome });
+  addUserAction(req.user, "SHIFT_OPEN", `Abriu plantão no setor ${ward.nome}`, {
+    wardId: ward.id,
+    wardNome: ward.nome,
+    shiftLength,
+    shiftPeriod
+  });
   await persistState();
   res.json({ ok: true, user: sanitizeUser(req.user) });
+});
+
+app.patch("/api/shifts/team", requireAuth, async (req, res) => {
+  if (!req.user.activeShift) return res.status(400).json({ error: "Nao ha plantao aberto para este usuario" });
+  if (!req.user.activeShift.team) {
+    req.user.activeShift.team = {
+      medicoPlantao: "",
+      enfermeiroDia: "",
+      tecnicosDia: "",
+      enfermeiroNoite: "",
+      tecnicosNoite: "",
+      faltosos: ""
+    };
+  }
+  Object.assign(req.user.activeShift.team, req.body || {});
+  const ward = wards.find(item => item.id === req.user.activeShift.wardId);
+  if (ward) {
+    Object.assign(ensureWardTeam(ward), req.user.activeShift.team);
+  }
+  req.user.activeShift.teamUpdatedAt = new Date().toISOString();
+  req.user.activeShift.teamUpdatedBy = req.user.nome || req.user.username;
+  addUserAction(req.user, "SHIFT_TEAM_UPDATE", `Atualizou a equipe do plantao no setor ${req.user.activeShift.wardNome}`, {
+    wardId: req.user.activeShift.wardId,
+    wardNome: req.user.activeShift.wardNome,
+    shiftId: req.user.activeShift.id
+  });
+  await persistState();
+  res.json({ ok: true, team: req.user.activeShift.team, user: sanitizeUser(req.user) });
 });
 
 app.post("/api/shifts/close", requireAuth, async (req, res) => {
@@ -1136,14 +1415,17 @@ app.post("/api/shifts/close", requireAuth, async (req, res) => {
 });
 
 app.get("/api/wards", requireAuth, (req, res) => {
-  res.json({ wards: wards.map(w => ({ id: w.id, nome: w.nome, enfermarias: w.enfermarias || [] })) });
+  const includeArchived = String(req.query?.includeArchived || "").trim().toLowerCase() === "true";
+  const items = includeArchived ? wards : wards.filter(ward => !isWardArchived(ward));
+  res.json({ wards: items.map(wardSummaryForClient) });
 });
 
 app.get("/api/dashboard", requireAuth, (req, res) => {
   const period = parseDashboardPeriod(req.query || {});
   const wardId = parseInt(req.query?.wardId, 10);
-  const selectedWard = Number.isInteger(wardId) ? wards.find(ward => ward.id === wardId) : null;
-  const sourceWards = selectedWard ? [selectedWard] : wards;
+  const activeWards = wards.filter(ward => !isWardArchived(ward));
+  const selectedWard = Number.isInteger(wardId) ? activeWards.find(ward => ward.id === wardId) : null;
+  const sourceWards = selectedWard ? [selectedWard] : activeWards;
   const allBeds = sourceWards.flatMap(ward => ward.beds.map(bed => ({ ...bed, setor: ward.nome, tempoMedio: computeTempoMedio(bed.admissao) })));
   const currentCounts = computeCounts(allBeds);
   const totalBeds = currentCounts.TOTAL || 0;
@@ -1217,6 +1499,9 @@ app.get("/api/dashboard", requireAuth, (req, res) => {
 app.post("/api/wards", requireAuth, async (req, res) => {
   const nome = String(req.body?.nome || "").trim();
   if (!nome) return res.status(400).json({ error: "Nome obrigatório" });
+  if (wards.some(item => normalizePersonName(item.nome) === normalizePersonName(nome))) {
+    return res.status(400).json({ error: "Já existe um setor com esse nome" });
+  }
   const id = nextWardId++;
   const ward = {
     id,
@@ -1224,12 +1509,100 @@ app.post("/api/wards", requireAuth, async (req, res) => {
     enfermarias: [],
     indicadores: { altas: 0, obitos: 0 },
     equipe: { medicoPlantao: "", enfermeiroDia: "", tecnicosDia: "", enfermeiroNoite: "", tecnicosNoite: "", faltosos: "" },
-    beds: []
+    beds: [],
+    archivedAt: null,
+    archivedBy: null
   };
   wards.push(ward);
   addUserAction(req.user, "WARD_CREATE", `Criou o setor ${ward.nome}`, { wardId: ward.id, wardNome: ward.nome });
   await persistState();
-  res.json({ ward: { id: ward.id, nome: ward.nome, enfermarias: ward.enfermarias } });
+  res.json({ ward: wardSummaryForClient(ward) });
+});
+
+app.patch("/api/wards/:wardId", requireAuth, async (req, res) => {
+  const ward = getWardOr404(req, res, { allowArchived: true });
+  if (!ward) return;
+
+  const nome = String(req.body?.nome || "").trim();
+  if (!nome) return res.status(400).json({ error: "Nome obrigatório" });
+  if (wards.some(item => item.id !== ward.id && normalizePersonName(item.nome) === normalizePersonName(nome))) {
+    return res.status(400).json({ error: "Já existe um setor com esse nome" });
+  }
+
+  const previousName = ward.nome;
+  ward.nome = nome;
+  syncWardNameReferences(ward.id, ward.nome);
+
+  addUserAction(req.user, "WARD_UPDATE", `Alterou o setor ${previousName} para ${ward.nome}`, {
+    wardId: ward.id,
+    previousName,
+    wardNome: ward.nome
+  });
+
+  await persistState();
+  res.json({ ward: wardSummaryForClient(ward) });
+});
+
+app.post("/api/wards/:wardId/archive", requireAuth, async (req, res) => {
+  const ward = getWardOr404(req, res, { allowArchived: true });
+  if (!ward) return;
+
+  const archived = req.body?.archived !== false;
+  const occupiedBeds = (ward.beds || []).filter(isBedOccupiedByPatient);
+  const activeShiftUser = users.find(user => user.activeShift && Number(user.activeShift.wardId) === Number(ward.id));
+
+  if (archived) {
+    if (occupiedBeds.length) {
+      return res.status(400).json({ error: "Não é possível arquivar setor com pacientes internados" });
+    }
+    if (activeShiftUser) {
+      return res.status(400).json({ error: "Não é possível arquivar setor com plantão aberto" });
+    }
+    ward.archivedAt = new Date().toISOString();
+    ward.archivedBy = req.user.nome || req.user.username;
+  } else {
+    ward.archivedAt = null;
+    ward.archivedBy = null;
+  }
+
+  addUserAction(
+    req.user,
+    archived ? "WARD_ARCHIVE" : "WARD_UNARCHIVE",
+    `${archived ? "Arquivou" : "Reativou"} o setor ${ward.nome}`,
+    { wardId: ward.id, wardNome: ward.nome, archived }
+  );
+
+  await persistState();
+  res.json({ ward: wardSummaryForClient(ward) });
+});
+
+app.delete("/api/wards/:wardId", requireAuth, async (req, res) => {
+  const ward = getWardOr404(req, res, { allowArchived: true });
+  if (!ward) return;
+
+  const occupiedBeds = (ward.beds || []).filter(isBedOccupiedByPatient);
+  if (occupiedBeds.length) {
+    return res.status(400).json({ error: "Não é possível excluir setor com pacientes internados" });
+  }
+
+  const activeShiftUser = users.find(user => user.activeShift && Number(user.activeShift.wardId) === Number(ward.id));
+  if (activeShiftUser) {
+    return res.status(400).json({ error: "Não é possível excluir setor com plantão aberto" });
+  }
+
+  const wardIndex = wards.findIndex(item => item.id === ward.id);
+  if (wardIndex === -1) return res.status(404).json({ error: "Setor não encontrado" });
+
+  const removedWard = wards.splice(wardIndex, 1)[0];
+  addUserAction(req.user, "WARD_DELETE", `Excluiu o setor ${removedWard.nome}`, {
+    wardId: removedWard.id,
+    wardNome: removedWard.nome,
+    removedBeds: Array.isArray(removedWard.beds) ? removedWard.beds.length : 0,
+    removedEnfermarias: Array.isArray(removedWard.enfermarias) ? removedWard.enfermarias.length : 0
+  });
+
+  await persistState();
+  res.json({ ok: true });
 });
 
 app.post("/api/wards/:wardId/enfermarias", requireAuth, async (req, res) => {
@@ -1342,6 +1715,52 @@ app.post("/api/wards/:wardId/beds/delete", requireAuth, async (req, res) => {
   });
   await persistState();
   res.json({ ok: true, removedBeds });
+});
+
+app.patch("/api/wards/:wardId/beds/:bedId/meta", requireAuth, async (req, res) => {
+  const ward = getWardOr404(req, res);
+  if (!ward) return;
+  const bedId = parseInt(req.params.bedId, 10);
+  const bed = ward.beds.find(item => item.id === bedId);
+  if (!bed) return res.status(404).json({ error: "Leito não encontrado" });
+
+  normalizeBedData(bed);
+  const nextBedId = parseInt(req.body?.nextBedId, 10);
+  const nextEnfermaria = String(req.body?.enfermaria || "").trim();
+  if (!Number.isInteger(nextBedId) || nextBedId <= 0) {
+    return res.status(400).json({ error: "Número do leito inválido" });
+  }
+  if (!nextEnfermaria) {
+    return res.status(400).json({ error: "Selecione a enfermaria do leito" });
+  }
+  if (!ward.enfermarias?.includes(nextEnfermaria)) {
+    return res.status(400).json({ error: "Enfermaria inválida" });
+  }
+  if ((bed.status === "OCUPADO" || String(bed.nome || "").trim()) && (nextBedId !== bed.id || nextEnfermaria !== bed.enfermaria)) {
+    return res.status(400).json({ error: "Não é possível alterar número ou enfermaria de leito ocupado" });
+  }
+  const duplicate = ward.beds.find(item => item !== bed && item.id === nextBedId);
+  if (duplicate) {
+    return res.status(400).json({ error: "Já existe um leito com esse número no setor" });
+  }
+
+  const previousId = bed.id;
+  const previousEnfermaria = bed.enfermaria || "";
+  bed.id = nextBedId;
+  bed.enfermaria = nextEnfermaria;
+  ward.beds.sort((a, b) => a.id - b.id);
+
+  addUserAction(req.user, "BED_META_UPDATE", `Alterou o leito ${previousId} do setor ${ward.nome}`, {
+    wardId: ward.id,
+    wardNome: ward.nome,
+    previousBedId: previousId,
+    currentBedId: bed.id,
+    previousEnfermaria,
+    currentEnfermaria: bed.enfermaria || ""
+  });
+
+  await persistState();
+  res.json({ ok: true, bed: bedForClient(bed), counts: computeCounts(ward.beds) });
 });
 
 app.get("/api/wards/:wardId", requireAuth, (req, res) => {
@@ -1592,7 +2011,7 @@ app.post("/api/wards/:wardId/indicadores", requireAuth, async (req, res) => {
 app.patch("/api/wards/:wardId/equipe", requireAuth, async (req, res) => {
   const ward = getWardOr404(req, res);
   if (!ward) return;
-  Object.assign(ward.equipe, req.body || {});
+  Object.assign(ensureWardTeam(ward), req.body || {});
   addUserAction(req.user, "EQUIPE_UPDATE", `Atualizou equipe do setor ${ward.nome}`, {
     wardId: ward.id,
     wardNome: ward.nome

@@ -21,6 +21,9 @@ function statusLabel(status) {
 let ward = null;
 let currentBedId = null;
 let wards = [];
+let allWards = [];
+let currentAdminWardDetails = null;
+let currentAdminBedEdit = null;
 let currentWardId = null;
 let sessionId = sessionStorage.getItem("sid") || null;
 let pendingScrollEnf = null;
@@ -30,13 +33,25 @@ let lastClosedReport = null;
 let transferWardCache = new Map();
 let sidebarPatients = [];
 let registeredPatients = [];
+let adminUsers = [];
+let currentAdminUserEditId = null;
 let currentPatientRecord = null;
 let pendingWhatsAppMessage = "";
+let staffDirectory = [];
 
 const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "PASSAGEM DE SONDA"];
 const NO_ENFERMARIA_VALUE = "__SEM_ENFERMARIA__";
 const ALL_ENFERMARIA_VALUE = "__TODAS_ENFERMARIAS__";
-const DEFAULT_WHATSAPP_GROUP_LINK = "https://chat.whatsapp.com/GgzUGlmImdX1CAl0vAZ6J9";
+const WHATSAPP_CENTRAL_AIR_LINK = "https://chat.whatsapp.com/FbxcYoy45yCD1TW6eZwGKd";
+const WHATSAPP_MAINTENANCE_LINK = "https://chat.whatsapp.com/FbxcYoy45yCD1TW6eZwGKd";
+
+function getWhatsAppBrowserLink(inviteLink) {
+  const match = String(inviteLink || "").match(/chat\.whatsapp\.com\/([A-Za-z0-9]+)/i);
+  if (match?.[1]) {
+    return `https://web.whatsapp.com/accept?code=${match[1]}`;
+  }
+  return "https://web.whatsapp.com/";
+}
 
 function normalizeCpf(value) {
   return String(value || "").replace(/\D/g, "").slice(0, 11);
@@ -53,6 +68,10 @@ function formatCpf(value) {
 function toBRDateTime(iso) {
   if (!iso) return "";
   return new Date(iso).toLocaleString("pt-BR");
+}
+
+function getTodayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 function buildWardWhatsAppMessage() {
@@ -144,6 +163,18 @@ function buildMaintenanceWhatsAppMessage(centralNumber) {
   return lines.join("\n");
 }
 
+function buildGeneralMaintenanceWhatsAppMessage(requestText) {
+  const sectorName = getMaintenanceWardName();
+  const lines = [
+    `Solicito manutencao no setor ${sectorName}.`,
+    `Demanda: ${requestText}`,
+    `Responsavel: ${currentUser?.nome || currentUser?.username || "-"}`,
+    `Data: ${ward?.data || new Date().toLocaleDateString("pt-BR")}`
+  ];
+
+  return lines.join("\n");
+}
+
 function openWhatsAppPreview(message) {
   pendingWhatsAppMessage = message;
   const textarea = document.getElementById("whatsapp-message-preview");
@@ -151,8 +182,21 @@ function openWhatsAppPreview(message) {
   document.getElementById("modal-whatsapp-preview")?.showModal();
 }
 
+async function sendWhatsAppMessageNow(message, inviteLink) {
+  pendingWhatsAppMessage = message;
+
+  try {
+    await navigator.clipboard.writeText(message);
+    setShiftFeedback("Texto copiado. Abrindo o grupo para voce colar e enviar.");
+  } catch {
+    setShiftFeedback("Abrindo o grupo. Se necessario, copie o texto manualmente antes de enviar.");
+  }
+
+  window.location.assign(getWhatsAppBrowserLink(inviteLink));
+}
+
 async function openWhatsAppSummary() {
-  if (!DEFAULT_WHATSAPP_GROUP_LINK) {
+  if (!WHATSAPP_CENTRAL_AIR_LINK) {
     setShiftFeedback("Link do grupo do WhatsApp não configurado.", true);
     return;
   }
@@ -167,7 +211,26 @@ async function openWhatsAppSummary() {
   }
 
   const message = buildMaintenanceWhatsAppMessage(normalizedCentralNumber);
-  openWhatsAppPreview(message);
+  await sendWhatsAppMessageNow(message, WHATSAPP_CENTRAL_AIR_LINK);
+}
+
+async function openGeneralMaintenanceSummary() {
+  if (!WHATSAPP_MAINTENANCE_LINK) {
+    setShiftFeedback("Link do grupo do WhatsApp não configurado.", true);
+    return;
+  }
+
+  const maintenanceText = window.prompt("Informe a solicitacao de manutencao:");
+  if (maintenanceText === null) return;
+
+  const normalizedMaintenanceText = String(maintenanceText).trim();
+  if (!normalizedMaintenanceText) {
+    setShiftFeedback("Informe a solicitacao para enviar a manutencao.", true);
+    return;
+  }
+
+  const message = buildGeneralMaintenanceWhatsAppMessage(normalizedMaintenanceText);
+  await sendWhatsAppMessageNow(message, WHATSAPP_MAINTENANCE_LINK);
 }
 
 function setPatientFieldsEnabled(enabled) {
@@ -204,6 +267,7 @@ function showOnly(viewId) {
   for (const id of ["nav-dashboard", "nav-home", "nav-patients", "nav-gerenciar"]) {
     document.getElementById(id)?.classList.toggle("ghost", navMap[viewId] !== id);
   }
+  document.body.classList.toggle("login-only", viewId === "view-login");
 }
 
 function setAppEnabled(enabled) {
@@ -218,9 +282,17 @@ async function api(path, options) {
   merged.headers = { ...(merged.headers || {}) };
   if (sessionId) merged.headers["X-Session-Id"] = sessionId;
   const res = await fetch(path, merged);
-  const data = await res.json().catch(() => ({}));
+  const rawText = await res.text();
+  let data = {};
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = { error: rawText };
+    }
+  }
   if (!res.ok) {
-    const msg = data?.error || "Erro";
+    const msg = String(data?.error || "Erro").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() || "Erro";
     throw new Error(msg);
   }
   return data;
@@ -327,6 +399,226 @@ function setShiftFeedback(message = "", isError = false) {
   feedback.classList.toggle("error-text", Boolean(message && isError));
 }
 
+function normalizeShiftLength(value) {
+  return String(value || "").trim().toUpperCase() === "24H" ? "24H" : "12H";
+}
+
+function normalizeShiftPeriod(value, shiftLength = "12H") {
+  if (normalizeShiftLength(shiftLength) === "24H") return "COMPLETO";
+  const normalized = String(value || "").trim().toUpperCase();
+  return normalized === "NOITE" ? "NOITE" : "DIA";
+}
+
+function getShiftPeriodLabel(value) {
+  if (value === "NOITE") return "Noite";
+  if (value === "COMPLETO") return "Completo";
+  return "Dia";
+}
+
+function getActiveShiftTeam() {
+  const activeShift = currentUser?.activeShift || null;
+  if (!activeShift || Number(activeShift.wardId) !== Number(currentWardId)) return null;
+  return activeShift.team || null;
+}
+
+function collectStaffSuggestionNames(items = []) {
+  const names = [];
+  const seen = new Set();
+
+  function addName(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return;
+    const parts = raw.split(/\s*,\s*|\s*;\s*|\s+\be\b\s+/i);
+    for (const part of parts) {
+      const name = String(part || "").trim();
+      if (!name) continue;
+      const key = name.toLocaleUpperCase("pt-BR");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      names.push(name);
+    }
+  }
+
+  for (const item of items) {
+    addName(item?.nome || item?.username || item?.displayName || "");
+  }
+
+  return names.sort((a, b) => a.localeCompare(b, "pt-BR"));
+}
+
+function renderStaffDatalist(listId, names) {
+  const datalist = document.getElementById(listId);
+  if (!datalist) return;
+  datalist.innerHTML = "";
+  for (const name of names) {
+    const option = document.createElement("option");
+    option.value = name;
+    datalist.appendChild(option);
+  }
+}
+
+function renderStaffSuggestions(items) {
+  staffDirectory = Array.isArray(items) ? items : [];
+  const names = collectStaffSuggestionNames(staffDirectory);
+  renderStaffDatalist("staff-list-medicos", names);
+  renderStaffDatalist("staff-list-enfermeiros", names);
+  renderStaffDatalist("staff-list-tecnicos", names);
+}
+
+async function refreshStaffSuggestions() {
+  try {
+    const data = await api("/api/staff");
+    renderStaffSuggestions(data.users || []);
+    return staffDirectory;
+  } catch {
+    const fallbackItems = [];
+    if (currentUser) {
+      fallbackItems.push({ nome: currentUser.nome || currentUser.username || "" });
+    }
+    const currentTeam = currentUser?.activeShift?.team || ward?.equipe || {};
+    for (const value of Object.values(currentTeam)) {
+      fallbackItems.push({ nome: value });
+    }
+    renderStaffSuggestions(fallbackItems);
+    return staffDirectory;
+  }
+}
+
+function renderShiftTeamSummary() {
+  const container = document.getElementById("shift-team-summary-list");
+  const panel = document.getElementById("shift-team-summary");
+  const activeShift = currentUser?.activeShift || null;
+  if (!container || !panel) return;
+
+  panel.classList.toggle("hidden", !activeShift);
+  container.innerHTML = "";
+  if (!activeShift) return;
+
+  const team = activeShift.team || {};
+  const shiftLength = activeShift.shiftLength || "12H";
+  const shiftPeriod = activeShift.shiftPeriod || "DIA";
+  const items = [];
+
+  if (team.medicoPlantao) items.push(["Médico do plantão", team.medicoPlantao]);
+
+  if (shiftLength === "24H" || shiftPeriod === "DIA") {
+    if (team.enfermeiroDia) items.push(["Enfermeiro(a) dia", team.enfermeiroDia]);
+    if (team.tecnicosDia) items.push(["Técnicos(as) dia", team.tecnicosDia]);
+  }
+  if (shiftLength === "24H" || shiftPeriod === "NOITE" || shiftPeriod === "COMPLETO") {
+    if (team.enfermeiroNoite) items.push(["Enfermeiro(a) noite", team.enfermeiroNoite]);
+    if (team.tecnicosNoite) items.push(["Técnicos(as) noite", team.tecnicosNoite]);
+  }
+  if (team.faltosos) items.push(["Faltosos", team.faltosos]);
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "shift-team-empty";
+    empty.textContent = "Nenhuma equipe salva neste plantão ainda.";
+    container.appendChild(empty);
+    return;
+  }
+
+  for (const [label, value] of items) {
+    const row = document.createElement("div");
+    row.className = "shift-team-row";
+    row.innerHTML = `<strong>${label}</strong><span>${value}</span>`;
+    container.appendChild(row);
+  }
+}
+
+function buildShiftHistoryTeamLines(shift) {
+  const team = shift?.team || {};
+  const shiftLength = shift?.shiftLength || "12H";
+  const shiftPeriod = shift?.shiftPeriod || "DIA";
+  const items = [];
+
+  if (team.medicoPlantao) items.push(`Médico: ${team.medicoPlantao}`);
+  if (shiftLength === "24H" || shiftPeriod === "DIA") {
+    if (team.enfermeiroDia) items.push(`Enf. dia: ${team.enfermeiroDia}`);
+    if (team.tecnicosDia) items.push(`Tec. dia: ${team.tecnicosDia}`);
+  }
+  if (shiftLength === "24H" || shiftPeriod === "NOITE" || shiftPeriod === "COMPLETO") {
+    if (team.enfermeiroNoite) items.push(`Enf. noite: ${team.enfermeiroNoite}`);
+    if (team.tecnicosNoite) items.push(`Tec. noite: ${team.tecnicosNoite}`);
+  }
+  if (team.faltosos) items.push(`Faltosos: ${team.faltosos}`);
+
+  return items;
+}
+
+function renderShiftHistory() {
+  const container = document.getElementById("shift-history-list");
+  if (!container) return;
+  container.innerHTML = "";
+
+  const activeShift = currentUser?.activeShift || null;
+  if (activeShift) {
+    const currentCard = document.createElement("div");
+    currentCard.className = "shift-history-card current";
+    currentCard.innerHTML = `
+      <strong>Plantão em andamento</strong>
+      <span>Data: ${toBRDate(activeShift.shiftDate || getTodayIsoDate())}</span>
+      <span>Aberto por ${currentUser?.nome || currentUser?.username || "-"} em ${toBRDateTime(activeShift.openedAt)}</span>
+    `;
+    container.appendChild(currentCard);
+  }
+
+  const shifts = Array.isArray(currentUser?.recentShifts) ? currentUser.recentShifts : [];
+  if (!shifts.length && !activeShift) {
+    const empty = document.createElement("div");
+    empty.className = "shift-team-empty";
+    empty.textContent = "Nenhum histórico de plantão registrado.";
+    container.appendChild(empty);
+    return;
+  }
+
+  for (const shift of shifts) {
+    const card = document.createElement("div");
+    card.className = "shift-history-card";
+    const teamLines = buildShiftHistoryTeamLines(shift);
+    const meta = [
+      `Data: ${toBRDate(shift.shiftDate || (shift.openedAt ? String(shift.openedAt).slice(0, 10) : "")) || "-"}`,
+      `Setor: ${shift.wardNome || "-"}`,
+      `Abertura: ${toBRDateTime(shift.openedAt) || "-"}`,
+      `Fechamento: ${toBRDateTime(shift.closedAt) || "-"}`
+    ];
+    card.innerHTML = `
+      <strong>${shift.shiftLength || "12H"} • ${getShiftPeriodLabel(shift.shiftPeriod)}</strong>
+      ${meta.map(item => `<span>${item}</span>`).join("")}
+      ${teamLines.length ? `<div class="shift-history-team">${teamLines.map(item => `<span>${item}</span>`).join("")}</div>` : "<span>Equipe não registrada.</span>"}
+    `;
+    container.appendChild(card);
+  }
+}
+
+function renderShiftTeamForm() {
+  const team = getActiveShiftTeam();
+  const activeShift = currentUser?.activeShift || null;
+  const shiftDate = document.getElementById("shift-date");
+  if (shiftDate) shiftDate.value = activeShift?.shiftDate || getTodayIsoDate();
+  document.getElementById("eq-medico").value = team?.medicoPlantao || "";
+  document.getElementById("eq-enf-dia").value = team?.enfermeiroDia || "";
+  document.getElementById("eq-tec-dia").value = team?.tecnicosDia || "";
+  document.getElementById("eq-enf-noite").value = team?.enfermeiroNoite || "";
+  document.getElementById("eq-tec-noite").value = team?.tecnicosNoite || "";
+  document.getElementById("eq-faltosos").value = team?.faltosos || "";
+}
+
+function syncShiftFormVisibility() {
+  const shiftLength = normalizeShiftLength(document.getElementById("shift-length")?.value);
+  const shiftPeriod = normalizeShiftPeriod(document.getElementById("shift-period")?.value, shiftLength);
+  const periodSelect = document.getElementById("shift-period");
+  if (periodSelect) {
+    periodSelect.value = shiftPeriod;
+    periodSelect.disabled = shiftLength === "24H" || Boolean(currentUser?.activeShift);
+  }
+  document.getElementById("field-eq-enf-dia")?.classList.toggle("hidden", shiftLength === "12H" && shiftPeriod === "NOITE");
+  document.getElementById("field-eq-tec-dia")?.classList.toggle("hidden", shiftLength === "12H" && shiftPeriod === "NOITE");
+  document.getElementById("field-eq-enf-noite")?.classList.toggle("hidden", shiftLength === "12H" && shiftPeriod === "DIA");
+  document.getElementById("field-eq-tec-noite")?.classList.toggle("hidden", shiftLength === "12H" && shiftPeriod === "DIA");
+}
+
 function setSidebarPatientFeedback(message = "", isError = false) {
   const feedback = document.getElementById("sidebar-patient-feedback");
   if (!feedback) return;
@@ -429,6 +721,158 @@ function setPatientsFeedback(message = "", isError = false) {
   feedback.classList.toggle("error-text", Boolean(message && isError));
 }
 
+function setAdminWardFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("admin-ward-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function setAdminBedEditFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("admin-bed-edit-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function isAdminUser() {
+  return currentUser?.role === "admin";
+}
+
+function setAdminUsersFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("admin-users-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function clearAdminUserForm() {
+  currentAdminUserEditId = null;
+  document.getElementById("admin-user-name").value = "";
+  document.getElementById("admin-user-username").value = "";
+  document.getElementById("admin-user-cpf").value = "";
+  document.getElementById("admin-user-birthdate").value = "";
+  document.getElementById("admin-user-role").value = "user";
+  document.getElementById("admin-user-password").value = "";
+  document.getElementById("btn-save-user").textContent = "Salvar usuário";
+  document.getElementById("btn-cancel-user-edit")?.classList.add("hidden");
+}
+
+function fillAdminUserForm(user) {
+  currentAdminUserEditId = user.id;
+  document.getElementById("admin-user-name").value = user.nome || "";
+  document.getElementById("admin-user-username").value = user.username || "";
+  document.getElementById("admin-user-cpf").value = formatCpf(user.cpf || "");
+  document.getElementById("admin-user-birthdate").value = user.birthDate || "";
+  document.getElementById("admin-user-role").value = user.role || "user";
+  document.getElementById("admin-user-password").value = "";
+  document.getElementById("btn-save-user").textContent = "Salvar alterações";
+  document.getElementById("btn-cancel-user-edit")?.classList.remove("hidden");
+}
+
+function renderAdminUsers(items) {
+  adminUsers = Array.isArray(items) ? items : [];
+  const container = document.getElementById("admin-users-list");
+  const empty = document.getElementById("admin-users-list-empty");
+  if (!container || !empty) return;
+
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", adminUsers.length > 0);
+
+  for (const user of adminUsers) {
+    const row = document.createElement("div");
+    row.className = "admin-user-row";
+    row.innerHTML = `
+      <div>
+        <strong>${user.nome || "-"}</strong>
+        <span>Login: ${user.username || "-"}</span>
+      </div>
+      <div>
+        <strong>${formatCpf(user.cpf || "") || "-"}</strong>
+        <span>CPF</span>
+      </div>
+      <div>
+        <strong>${user.birthDate ? toBRDate(user.birthDate) : "-"}</strong>
+        <span>Data de nascimento</span>
+      </div>
+      <div class="admin-user-actions">
+        <span class="admin-user-role-badge">${user.role === "admin" ? "Administrador" : "Usuário"}</span>
+        <button type="button" class="ghost btn-admin-user-edit" data-id="${user.id}">Alterar</button>
+      </div>
+    `;
+    container.appendChild(row);
+  }
+}
+
+async function loadAdminUsers() {
+  if (!isAdminUser()) {
+    renderAdminUsers([]);
+    return [];
+  }
+  const data = await api("/api/users");
+  renderAdminUsers(data.users || []);
+  return adminUsers;
+}
+
+async function saveAdminUser() {
+  if (!isAdminUser()) {
+    setAdminUsersFeedback("Somente administrador pode acessar os usuários.", true);
+    return;
+  }
+
+  const payload = {
+    nome: document.getElementById("admin-user-name").value.trim(),
+    username: document.getElementById("admin-user-username").value.trim(),
+    cpf: normalizeCpf(document.getElementById("admin-user-cpf").value),
+    birthDate: document.getElementById("admin-user-birthdate").value,
+    role: document.getElementById("admin-user-role").value,
+    password: document.getElementById("admin-user-password").value
+  };
+
+  const isEditing = Boolean(currentAdminUserEditId);
+  const endpoint = isEditing ? `/api/users/${currentAdminUserEditId}` : "/api/users";
+  const method = isEditing ? "PATCH" : "POST";
+
+  try {
+    await api(endpoint, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    clearAdminUserForm();
+    await loadAdminUsers();
+    await refreshCurrentUser();
+    setAdminUsersFeedback(isEditing ? "Usuário alterado com sucesso." : "Usuário cadastrado com sucesso.");
+  } catch (error) {
+    setAdminUsersFeedback(error.message || "Não foi possível salvar o usuário.", true);
+  }
+}
+
+function syncAdminAccess() {
+  const isAdmin = isAdminUser();
+  document.getElementById("nav-gerenciar")?.classList.toggle("hidden", !isAdmin);
+  document.getElementById("btn-gerenciar")?.classList.toggle("hidden", !isAdmin);
+  document.getElementById("admin-users-section")?.classList.toggle("hidden", !isAdmin);
+}
+
+function renderHeaderWardTabs() {
+  const container = document.getElementById("header-ward-tabs");
+  if (!container) return;
+  container.innerHTML = "";
+
+  for (const item of wards) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `hero-tab${item.id === currentWardId ? " active" : ""}`;
+    button.dataset.id = String(item.id);
+    button.textContent = item.nome || "-";
+    container.appendChild(button);
+  }
+}
+
 function renderPatientCurrentAdmission(admission) {
   const container = document.getElementById("patient-registry-current");
   if (!container) return;
@@ -485,15 +929,30 @@ function renderPatientAdmissionHistory(items) {
 
 function fillPatientRegistryModal(patient) {
   currentPatientRecord = patient;
-  document.getElementById("patient-registry-title").textContent = patient.nome || "Cadastro do paciente";
+  document.getElementById("patient-registry-title").textContent = patient.nome || "Novo paciente";
   document.getElementById("patient-registry-name").value = patient.nome || "";
   document.getElementById("patient-registry-cpf").value = formatCpf(patient.cpf || "");
   document.getElementById("patient-registry-birthdate").value = patient.birthDate || "";
-  document.getElementById("patient-registry-diagnostico").value = patient.diagnostico || "";
   document.getElementById("patient-registry-nir").value = patient.nir || "";
   renderPatientCurrentAdmission(patient.currentAdmission || null);
   renderPatientAdmissionHistory(patient.admissionHistory || []);
   document.getElementById("patient-registry-delete").disabled = Boolean(patient.currentAdmission);
+}
+
+function openNewPatientRegistry() {
+  fillPatientRegistryModal({
+    id: null,
+    nome: "",
+    cpf: "",
+    birthDate: "",
+    nir: "",
+    currentAdmission: null,
+    admissionHistory: []
+  });
+  document.getElementById("patient-registry-title").textContent = "Novo paciente";
+  document.getElementById("patient-registry-save").disabled = false;
+  document.getElementById("patient-registry-delete").disabled = true;
+  document.getElementById("modal-patient-registry").showModal();
 }
 
 function renderRegisteredPatients(items) {
@@ -705,7 +1164,9 @@ function renderCurrentUser() {
   const userName = currentUser?.nome || currentUser?.username || "-";
   const role = currentUser?.role || "-";
   const activeShift = currentUser?.activeShift || null;
-  document.getElementById("topbar-user").textContent = userName;
+  syncAdminAccess();
+  const topbarUser = document.getElementById("topbar-user");
+  if (topbarUser) topbarUser.textContent = userName;
   const avatar = document.getElementById("profile-avatar");
   if (avatar) avatar.textContent = userName.charAt(0).toUpperCase() || "U";
   const roleSummary = document.getElementById("profile-role-summary");
@@ -718,21 +1179,33 @@ function renderCurrentUser() {
   document.getElementById("shift-user-role").textContent = `Login: ${currentUser?.username || "-"} • Perfil: ${role}`;
   document.getElementById("shift-status-label").textContent = activeShift ? "Aberto" : "Fechado";
   document.getElementById("shift-status-meta").textContent = activeShift
-    ? `${activeShift.wardNome} • início ${toBRDateTime(activeShift.openedAt)}`
+    ? `${activeShift.wardNome} • ${toBRDate(activeShift.shiftDate || getTodayIsoDate())} • ${activeShift.shiftLength || "12H"} • ${getShiftPeriodLabel(activeShift.shiftPeriod)} • início ${toBRDateTime(activeShift.openedAt)}`
     : "Nenhum plantão aberto";
 
   const shiftWard = document.getElementById("shift-ward");
+  const shiftLength = document.getElementById("shift-length");
+  const shiftPeriod = document.getElementById("shift-period");
   if (shiftWard) {
     if (activeShift) shiftWard.value = String(activeShift.wardId);
     else if (currentWardId) shiftWard.value = String(currentWardId);
     shiftWard.disabled = Boolean(activeShift);
+  }
+  if (shiftLength) {
+    shiftLength.value = activeShift?.shiftLength || "12H";
+    shiftLength.disabled = Boolean(activeShift);
+  }
+  if (shiftPeriod) {
+    shiftPeriod.value = activeShift?.shiftPeriod || "DIA";
   }
 
   const openButton = document.getElementById("btn-open-shift");
   const closeButton = document.getElementById("btn-close-shift");
   if (openButton) openButton.disabled = Boolean(activeShift);
   if (closeButton) closeButton.disabled = !activeShift;
-
+  syncShiftFormVisibility();
+  renderShiftTeamForm();
+  renderShiftTeamSummary();
+  renderShiftHistory();
 }
 
 async function refreshCurrentUser() {
@@ -745,6 +1218,15 @@ async function refreshCurrentUser() {
 function printShiftReport(report) {
   if (!report) return;
   const devices = (report.summary?.dispositivos || []).map(item => `<li>${item.label}: ${item.value}</li>`).join("") || "<li>Sem dispositivos registrados</li>";
+  const team = report.shift?.team || {};
+  const teamRows = [
+    ["Medico do plantao", team.medicoPlantao || "-"],
+    ["Enfermeiro(a) dia", team.enfermeiroDia || "-"],
+    ["Tecnicos(as) dia", team.tecnicosDia || "-"],
+    ["Enfermeiro(a) noite", team.enfermeiroNoite || "-"],
+    ["Tecnicos(as) noite", team.tecnicosNoite || "-"],
+    ["Faltosos", team.faltosos || "-"]
+  ].map(([label, value]) => `<tr><th>${label}</th><td>${value}</td></tr>`).join("");
   const patients = (report.patients || []).map(patient => `
     <tr>
       <td>${patient.leito}</td>
@@ -781,15 +1263,40 @@ function printShiftReport(report) {
   win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Ficha de Plantão</title><style>
     body { font-family: Arial, sans-serif; padding: 24px; color: #111; }
     h1,h2 { margin: 0 0 12px; }
-    .meta { margin-bottom: 20px; }
-    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
-    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; }
+    .report-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 2px solid #dbe4f0; }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .brand-logo { width: 64px; height: 64px; border-radius: 18px; background: linear-gradient(135deg, #0f4c81, #16a34a); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 12px; text-align: center; line-height: 1.2; box-shadow: 0 6px 18px rgba(15, 76, 129, 0.18); }
+    .brand-copy strong { display: block; font-size: 18px; margin-bottom: 4px; }
+    .brand-copy span { display: block; font-size: 12px; color: #4b5563; }
+    .report-meta-top { text-align: right; font-size: 12px; color: #374151; }
+    .meta { margin-bottom: 20px; font-size: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+    .card { border: 1px solid #d7deea; border-radius: 12px; padding: 12px; background: #f8fbff; }
+    .card strong { display: block; margin-bottom: 6px; font-size: 13px; }
+    .card div { font-size: 22px; font-weight: 800; color: #0f172a; }
     table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { border: 1px solid #ddd; padding: 8px; font-size: 12px; text-align: left; }
+    th, td { border: 1px solid #d7deea; padding: 8px; font-size: 12px; text-align: left; vertical-align: top; }
+    th { background: #eef4fb; }
     ul { margin: 8px 0 0; padding-left: 18px; }
+    .section { margin-top: 22px; }
+    .section-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+    .section-title span { font-size: 12px; color: #4b5563; }
   </style></head><body>
+    <div class="report-header">
+      <div class="brand">
+        <div class="brand-logo">PREF<br>HMA</div>
+        <div class="brand-copy">
+          <strong>Hospital Municipal</strong>
+          <span>Prefeitura Municipal • Relatorio de fechamento de plantao</span>
+        </div>
+      </div>
+      <div class="report-meta-top">
+        <div>${toBRDateTime(report.shift?.closedAt)}</div>
+        <div>Ficha de Plantao</div>
+      </div>
+    </div>
     <h1>Ficha de Fechamento de Plantão</h1>
-    <div class="meta">Usuário: ${report.shift?.nome || report.shift?.username || "-"} • Setor: ${report.shift?.wardNome || "-"} • Abertura: ${toBRDateTime(report.shift?.openedAt)} • Fechamento: ${toBRDateTime(report.shift?.closedAt)}</div>
+    <div class="meta">Usuário: ${report.shift?.nome || report.shift?.username || "-"} • Setor: ${report.shift?.wardNome || "-"} • Plantão: ${report.shift?.shiftLength || "12H"} / ${getShiftPeriodLabel(report.shift?.shiftPeriod)} • Abertura: ${toBRDateTime(report.shift?.openedAt)} • Fechamento: ${toBRDateTime(report.shift?.closedAt)}</div>
     <div class="grid">
       <div class="card"><strong>Pacientes ativos</strong><div>${report.summary?.pacientesAtivos ?? 0}</div></div>
       <div class="card"><strong>Altas</strong><div>${report.summary?.altas ?? 0}</div></div>
@@ -798,23 +1305,37 @@ function printShiftReport(report) {
       <div class="card"><strong>Pendências ativas</strong><div>${report.summary?.pendenciasAtivas ?? 0}</div></div>
       <div class="card"><strong>Pendências solucionadas</strong><div>${report.summary?.pendenciasSolucionadas ?? 0}</div></div>
     </div>
+    <div class="section">
+    <div class="section-title"><h2>Equipe do plantao</h2><span>${report.shift?.shiftLength || "12H"} / ${getShiftPeriodLabel(report.shift?.shiftPeriod)}</span></div>
+    <table>
+      <tbody>${teamRows}</tbody>
+    </table>
+    </div>
+    <div class="section">
     <h2>Dispositivos e procedimentos</h2>
     <ul>${devices}</ul>
+    </div>
+    <div class="section">
     <h2>Pacientes cadastrados</h2>
     <table>
       <thead><tr><th>Leito</th><th>Enfermaria</th><th>Paciente</th><th>Admissão</th><th>Diagnóstico</th><th>Dispositivos</th><th>Pendências</th></tr></thead>
       <tbody>${patients || '<tr><td colspan="7">Nenhum paciente ativo no fechamento.</td></tr>'}</tbody>
     </table>
-    <h2>Pendências ativas do plantão</h2>
+    </div>
+    <div class="section">
+    <div class="section-title"><h2>Pendências ativas do plantão</h2><span>${report.summary?.pendenciasAtivas ?? 0} registro(s)</span></div>
     <table>
       <thead><tr><th>Leito</th><th>Enfermaria</th><th>Paciente</th><th>Pendência</th><th>Registrado por</th><th>Data</th></tr></thead>
       <tbody>${activePendings || '<tr><td colspan="6">Nenhuma pendência ativa no fechamento.</td></tr>'}</tbody>
     </table>
-    <h2>Pendências solucionadas no plantão</h2>
+    </div>
+    <div class="section">
+    <div class="section-title"><h2>Pendências solucionadas no plantão</h2><span>${report.summary?.pendenciasSolucionadas ?? 0} registro(s)</span></div>
     <table>
       <thead><tr><th>Leito</th><th>Enfermaria</th><th>Paciente</th><th>Pendência</th><th>Finalizado por</th><th>Data</th></tr></thead>
       <tbody>${solvedPendings || '<tr><td colspan="6">Nenhuma pendência solucionada neste plantão.</td></tr>'}</tbody>
     </table>
+    </div>
   </body></html>`);
   win.document.close();
   win.focus();
@@ -1181,15 +1702,11 @@ async function load() {
   renderCounts(ward.counts);
   renderIndicadores(ward.indicadores);
   renderBeds(ward.beds);
-  document.getElementById("eq-medico").value = ward.equipe.medicoPlantao || "";
-  document.getElementById("eq-enf-dia").value = ward.equipe.enfermeiroDia || "";
-  document.getElementById("eq-tec-dia").value = ward.equipe.tecnicosDia || "";
-  document.getElementById("eq-enf-noite").value = ward.equipe.enfermeiroNoite || "";
-  document.getElementById("eq-tec-noite").value = ward.equipe.tecnicosNoite || "";
-  document.getElementById("eq-faltosos").value = ward.equipe.faltosos || "";
   await refreshCurrentUser();
+  await refreshStaffSuggestions();
   await refreshSidebarPatients();
-  document.getElementById("profile-current-ward").textContent = ward.nome;
+  document.getElementById("profile-current-ward")?.replaceChildren(document.createTextNode(ward.nome));
+  renderHeaderWardTabs();
 
   if (pendingScrollEnf) {
     const target = document.getElementById(pendingScrollEnf);
@@ -1211,20 +1728,38 @@ document.getElementById("salvar-indicadores").addEventListener("click", async ()
 });
 
 document.getElementById("salvar-equipe").addEventListener("click", async () => {
+  if (!currentUser?.activeShift) {
+    setShiftFeedback("Abra o plantao antes de cadastrar a equipe.", true);
+    return;
+  }
+  const saveButton = document.getElementById("salvar-equipe");
   const payload = {
-    medicoPlantao: document.getElementById("eq-medico").value,
-    enfermeiroDia: document.getElementById("eq-enf-dia").value,
-    tecnicosDia: document.getElementById("eq-tec-dia").value,
-    enfermeiroNoite: document.getElementById("eq-enf-noite").value,
-    tecnicosNoite: document.getElementById("eq-tec-noite").value,
-    faltosos: document.getElementById("eq-faltosos").value
+    medicoPlantao: document.getElementById("eq-medico").value.trim(),
+    enfermeiroDia: document.getElementById("field-eq-enf-dia")?.classList.contains("hidden") ? "" : document.getElementById("eq-enf-dia").value.trim(),
+    tecnicosDia: document.getElementById("field-eq-tec-dia")?.classList.contains("hidden") ? "" : document.getElementById("eq-tec-dia").value.trim(),
+    enfermeiroNoite: document.getElementById("field-eq-enf-noite")?.classList.contains("hidden") ? "" : document.getElementById("eq-enf-noite").value.trim(),
+    tecnicosNoite: document.getElementById("field-eq-tec-noite")?.classList.contains("hidden") ? "" : document.getElementById("eq-tec-noite").value.trim(),
+    faltosos: document.getElementById("eq-faltosos").value.trim()
   };
-  await api(`/api/wards/${currentWardId}/equipe`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  await refreshCurrentUser();
+  try {
+    if (saveButton) saveButton.disabled = true;
+    const shiftResponse = await api("/api/shifts/team", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    currentUser = shiftResponse?.user || currentUser;
+    if (ward?.id === currentWardId) {
+      ward.equipe = { ...(ward.equipe || {}), ...payload };
+    }
+    renderCurrentUser();
+    await refreshStaffSuggestions();
+    setShiftFeedback("Equipe salva neste plantao com sucesso.");
+  } catch (error) {
+    setShiftFeedback(error.message || "Nao foi possivel salvar a equipe do plantao.", true);
+  } finally {
+    if (saveButton) saveButton.disabled = false;
+  }
 });
 
 document.getElementById("modal-salvar").addEventListener("click", async (e) => {
@@ -1299,39 +1834,67 @@ document.getElementById("btn-dashboard-clear")?.addEventListener("click", async 
 });
 
 async function refreshWards() {
-  const data = await api("/api/wards");
+  const [data, adminData] = await Promise.all([
+    api("/api/wards"),
+    api("/api/wards?includeArchived=true")
+  ]);
   wards = data.wards || [];
+  allWards = adminData.wards || [];
   const select = document.getElementById("select-ward");
+  const modalStartWard = document.getElementById("modal-start-ward-select");
   const dashboardWard = document.getElementById("dashboard-ward");
   const shiftWard = document.getElementById("shift-ward");
+  const adminSelectEdit = document.getElementById("admin-ward-select-edit");
   const adminSelectEnf = document.getElementById("admin-ward-select-enf");
   const adminSelectBed = document.getElementById("admin-ward-select-bed");
   const adminSelectDel = document.getElementById("admin-ward-select-del");
   if (select) select.innerHTML = "";
+  if (modalStartWard) modalStartWard.innerHTML = "";
   if (dashboardWard) {
     dashboardWard.innerHTML = "";
     dashboardWard.appendChild(new Option("Todos os setores", ""));
   }
   if (shiftWard) shiftWard.innerHTML = "";
+  if (adminSelectEdit) adminSelectEdit.innerHTML = "";
   if (adminSelectEnf) adminSelectEnf.innerHTML = "";
   if (adminSelectBed) adminSelectBed.innerHTML = "";
   if (adminSelectDel) adminSelectDel.innerHTML = "";
   for (const w of wards) {
     if (select) select.appendChild(new Option(w.nome, w.id));
+    if (modalStartWard) modalStartWard.appendChild(new Option(w.nome, w.id));
     if (dashboardWard) dashboardWard.appendChild(new Option(w.nome, w.id));
     if (shiftWard) shiftWard.appendChild(new Option(w.nome, w.id));
+    if (adminSelectEdit) adminSelectEdit.appendChild(new Option(w.nome, w.id));
     if (adminSelectEnf) adminSelectEnf.appendChild(new Option(w.nome, w.id));
     if (adminSelectBed) adminSelectBed.appendChild(new Option(w.nome, w.id));
     if (adminSelectDel) adminSelectDel.appendChild(new Option(w.nome, w.id));
   }
-  if (!currentWardId && wards.length) currentWardId = wards[0].id;
+  if (adminSelectEdit) {
+    adminSelectEdit.innerHTML = "";
+    for (const w of allWards) {
+      const label = w.archived ? `${w.nome} (Arquivado)` : w.nome;
+      adminSelectEdit.appendChild(new Option(label, w.id));
+    }
+  }
+  if (!wards.length) currentWardId = null;
+  else if (!currentWardId || !wards.some(item => item.id === currentWardId)) currentWardId = wards[0].id;
   if (currentWardId) {
     if (select) select.value = String(currentWardId);
+    if (modalStartWard) modalStartWard.value = String(currentWardId);
     if (shiftWard) shiftWard.value = String(currentWardId);
     if (adminSelectEnf) adminSelectEnf.value = String(currentWardId);
     if (adminSelectBed) adminSelectBed.value = String(currentWardId);
     if (adminSelectDel) adminSelectDel.value = String(currentWardId);
   }
+  if (adminSelectEdit) {
+    const preferredWardId = currentWardId && allWards.some(item => item.id === currentWardId)
+      ? currentWardId
+      : allWards[0]?.id;
+    if (preferredWardId) adminSelectEdit.value = String(preferredWardId);
+  }
+  syncAdminWardEditForm();
+  renderAdminWardList();
+  renderHeaderWardTabs();
   updateAdminEnfDropdown();
   updateDeleteEnfDropdown();
   if (dashboardWard && !Array.from(dashboardWard.options).some(option => option.value === String(dashboardFilters.wardId))) {
@@ -1343,6 +1906,345 @@ async function refreshWards() {
   await refreshSidebarPatients();
 }
 
+function syncAdminWardEditForm() {
+  const select = document.getElementById("admin-ward-select-edit");
+  const input = document.getElementById("admin-ward-edit-name");
+  const archiveButton = document.getElementById("btn-archive-ward");
+  const title = document.getElementById("admin-ward-editor-title");
+  const subtitle = document.getElementById("admin-ward-editor-subtitle");
+  const adminSelectEnf = document.getElementById("admin-ward-select-enf");
+  const adminSelectBed = document.getElementById("admin-ward-select-bed");
+  const adminSelectDel = document.getElementById("admin-ward-select-del");
+  if (!select || !input) return;
+  const wardId = parseInt(select.value, 10);
+  const selectedWard = allWards.find(item => item.id === wardId);
+  input.value = selectedWard?.nome || "";
+  if (title) {
+    title.textContent = selectedWard ? `Editar setor ${selectedWard.nome}` : "Editar setor";
+  }
+  if (subtitle) {
+    subtitle.textContent = selectedWard
+      ? "Use este menu para alterar o nome, cadastrar enfermarias e gerenciar leitos deste setor."
+      : "Abra um setor para alterar estrutura, enfermarias e leitos.";
+  }
+  if (selectedWard) {
+    if (adminSelectEnf) adminSelectEnf.value = String(selectedWard.id);
+    if (adminSelectBed) adminSelectBed.value = String(selectedWard.id);
+    if (adminSelectDel) adminSelectDel.value = String(selectedWard.id);
+  }
+  if (archiveButton) {
+    archiveButton.textContent = selectedWard?.archived ? "Reativar setor" : "Arquivar setor";
+    archiveButton.disabled = !selectedWard;
+  }
+  updateAdminEnfDropdown();
+  updateDeleteEnfDropdown();
+  syncAdminWardEditorFlow();
+}
+
+function setElementsDisabled(ids, disabled) {
+  for (const id of ids) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    element.disabled = disabled;
+    element.classList.toggle("muted", disabled);
+  }
+}
+
+async function loadAdminWardDetails(wardId) {
+  if (!wardId) {
+    currentAdminWardDetails = null;
+    renderAdminBedList();
+    return null;
+  }
+  currentAdminWardDetails = await api(`/api/wards/${wardId}`);
+  renderAdminBedList();
+  return currentAdminWardDetails;
+}
+
+function syncAdminWardEditorFlow() {
+  const wardId = parseInt(document.getElementById("admin-ward-select-edit")?.value || "", 10);
+  const selectedWard = allWards.find(item => item.id === wardId);
+  const hasEnfermarias = Boolean(selectedWard?.enfermarias?.length);
+  const isArchived = Boolean(selectedWard?.archived);
+  const flowHint = document.getElementById("admin-ward-flow-hint");
+  const bedRow = document.getElementById("admin-bed-row");
+  const deleteRow = document.getElementById("admin-delete-row");
+
+  setElementsDisabled(
+    ["admin-ward-select-bed", "admin-enf-select-bed", "admin-bed-start", "admin-bed-end", "btn-add-beds"],
+    isArchived || !hasEnfermarias
+  );
+  setElementsDisabled(
+    ["admin-ward-select-del", "admin-enf-select-del", "del-bed-start", "del-bed-end", "btn-del-beds", "btn-del-enf"],
+    isArchived || !hasEnfermarias
+  );
+
+  bedRow?.classList.toggle("muted", isArchived || !hasEnfermarias);
+  deleteRow?.classList.toggle("muted", isArchived || !hasEnfermarias);
+
+  if (flowHint) {
+    if (isArchived) {
+      flowHint.textContent = "Este setor está arquivado. Reative o setor para alterar enfermarias e leitos.";
+    } else if (!hasEnfermarias) {
+      flowHint.textContent = "Passo 1: crie a enfermaria deste setor. Depois disso o cadastro de leitos será liberado.";
+    } else {
+      flowHint.textContent = "Passo 2: enfermaria criada. Agora você pode cadastrar ou excluir leitos deste setor.";
+    }
+  }
+}
+
+function renderAdminBedList() {
+  const container = document.getElementById("admin-bed-list");
+  const empty = document.getElementById("admin-bed-list-empty");
+  if (!container || !empty) return;
+
+  const beds = Array.isArray(currentAdminWardDetails?.beds) ? currentAdminWardDetails.beds.slice() : [];
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", beds.length > 0);
+  if (!beds.length) return;
+
+  const groups = new Map();
+  for (const bed of beds.sort((a, b) => a.id - b.id)) {
+    const key = bed.enfermaria || "Sem enfermaria";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(bed);
+  }
+
+  const list = document.createElement("div");
+  list.className = "bed-group-list";
+
+  for (const [enfermaria, groupBeds] of groups.entries()) {
+    const card = document.createElement("div");
+    card.className = "bed-group-card";
+    const rows = groupBeds.map(bed => `
+      <div class="bed-admin-row">
+        <div>
+          <strong>Leito ${bed.id}</strong>
+          <span>Status: ${bed.status || "-"}${bed.nome ? ` • ${bed.nome}` : ""}</span>
+        </div>
+        <div>
+          <strong>${enfermaria}</strong>
+          <span>${bed.admissao ? `Admissao: ${toBRDate(bed.admissao)}` : "Sem admissao ativa"}</span>
+        </div>
+        <div class="bed-admin-actions">
+          <button type="button" class="ghost btn-admin-bed-edit" data-id="${bed.id}">Alterar</button>
+          <button type="button" class="ghost btn-admin-bed-delete" data-id="${bed.id}">Excluir</button>
+        </div>
+      </div>
+    `).join("");
+
+    card.innerHTML = `
+      <div class="bed-group-header">
+        <strong>${enfermaria}</strong>
+        <span>${groupBeds.length} leito(s)</span>
+      </div>
+      ${rows}
+    `;
+    list.appendChild(card);
+  }
+
+  container.appendChild(list);
+}
+
+function openAdminBedEditModal(bedId) {
+  const bed = currentAdminWardDetails?.beds?.find(item => item.id === bedId);
+  if (!bed) return;
+  currentAdminBedEdit = bed;
+  document.getElementById("admin-bed-current-id").value = String(bed.id);
+  document.getElementById("admin-bed-current-status").value = bed.status || "";
+  document.getElementById("admin-bed-edit-id").value = String(bed.id);
+  const select = document.getElementById("admin-bed-edit-enfermaria");
+  select.innerHTML = "";
+  for (const enfermaria of currentAdminWardDetails?.enfermarias || []) {
+    select.appendChild(new Option(enfermaria, enfermaria));
+  }
+  if (bed.enfermaria) select.value = bed.enfermaria;
+  setAdminBedEditFeedback(
+    bed.status === "OCUPADO" || bed.nome
+      ? "Leito ocupado: o sistema nao permite trocar numero ou enfermaria enquanto houver paciente internado."
+      : ""
+  );
+  document.getElementById("modal-admin-bed")?.showModal();
+}
+
+async function saveAdminBedEdit() {
+  if (!currentAdminBedEdit || !currentAdminWardDetails?.id) return;
+  const nextBedId = parseInt(document.getElementById("admin-bed-edit-id").value, 10);
+  const enfermaria = document.getElementById("admin-bed-edit-enfermaria").value;
+  try {
+    await api(`/api/wards/${currentAdminWardDetails.id}/beds/${currentAdminBedEdit.id}/meta`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nextBedId, enfermaria })
+    });
+    await refreshWards();
+    await loadAdminWardDetails(currentAdminWardDetails.id);
+    setAdminWardFeedback("Leito alterado com sucesso.");
+    document.getElementById("modal-admin-bed")?.close();
+    currentAdminBedEdit = null;
+  } catch (error) {
+    setAdminBedEditFeedback(error.message || "Nao foi possivel alterar o leito.", true);
+  }
+}
+
+async function deleteAdminBed(bedId) {
+  const bed = currentAdminWardDetails?.beds?.find(item => item.id === bedId);
+  if (!bed || !currentAdminWardDetails?.id) return;
+  if (bed.status === "OCUPADO" || bed.nome) {
+    setAdminWardFeedback("Nao e possivel excluir leito com paciente internado.", true);
+    return;
+  }
+  if (!confirm(`Excluir o leito ${bed.id} da enfermaria ${bed.enfermaria || "Sem enfermaria"}?`)) return;
+  try {
+    await api(`/api/wards/${currentAdminWardDetails.id}/beds/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enfermaria: bed.enfermaria || "", start: bed.id, end: bed.id })
+    });
+    await refreshWards();
+    await loadAdminWardDetails(currentAdminWardDetails.id);
+    setAdminWardFeedback("Leito excluido com sucesso.");
+  } catch (error) {
+    setAdminWardFeedback(error.message || "Nao foi possivel excluir o leito.", true);
+  }
+}
+
+function renderAdminWardList() {
+  const container = document.getElementById("admin-ward-list");
+  const empty = document.getElementById("admin-ward-list-empty");
+  if (!container || !empty) return;
+
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", allWards.length > 0);
+
+  for (const item of allWards) {
+    const row = document.createElement("div");
+    row.className = "patient-row";
+    row.innerHTML = `
+      <div>
+        <strong>${item.nome || "-"}</strong>
+        <span>${item.archived ? "Setor arquivado" : "Setor ativo"}</span>
+      </div>
+      <div>
+        <strong>${item.enfermariasCount || 0}</strong>
+        <span>Enfermarias</span>
+      </div>
+      <div>
+        <strong>${item.bedsCount || 0}</strong>
+        <span>Leitos</span>
+      </div>
+      <div class="patient-actions">
+        <button type="button" class="ghost btn-ward-edit" data-id="${item.id}">Alterar</button>
+        <button type="button" class="ghost btn-ward-archive" data-id="${item.id}">${item.archived ? "Reativar" : "Arquivar"}</button>
+        <button type="button" class="ghost btn-ward-delete" data-id="${item.id}">Excluir</button>
+      </div>
+    `;
+    container.appendChild(row);
+  }
+}
+
+function focusAdminWard(wardId) {
+  const select = document.getElementById("admin-ward-select-edit");
+  const editor = document.getElementById("admin-ward-editor");
+  if (!select) return;
+  select.value = String(wardId);
+  if (editor) editor.classList.remove("hidden");
+  syncAdminWardEditForm();
+  loadAdminWardDetails(parseInt(wardId, 10)).catch(() => {
+    setAdminWardFeedback("Nao foi possivel carregar os leitos do setor.", true);
+  });
+  editor?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function closeAdminWardEditor() {
+  document.getElementById("admin-ward-editor")?.classList.add("hidden");
+}
+
+async function updateSelectedWard() {
+  const wardId = parseInt(document.getElementById("admin-ward-select-edit").value, 10);
+  const nome = document.getElementById("admin-ward-edit-name").value.trim();
+  if (!wardId) {
+    setAdminWardFeedback("Selecione um setor.", true);
+    return;
+  }
+  if (!nome) {
+    setAdminWardFeedback("Informe o novo nome do setor.", true);
+    return;
+  }
+
+  try {
+    await api(`/api/wards/${wardId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nome })
+    });
+    await refreshWards();
+    await refreshCurrentUser();
+    if (currentWardId === wardId) await load();
+    focusAdminWard(wardId);
+    setAdminWardFeedback("Setor alterado com sucesso.");
+  } catch (error) {
+    setAdminWardFeedback(error.message || "Não foi possível alterar o setor.", true);
+  }
+}
+
+async function toggleArchiveWard(wardId) {
+  const selectedWard = allWards.find(item => item.id === wardId);
+  if (!selectedWard) {
+    setAdminWardFeedback("Selecione um setor.", true);
+    return;
+  }
+  const nextArchived = !selectedWard.archived;
+  const message = nextArchived
+    ? `Arquivar o setor "${selectedWard.nome}"?`
+    : `Reativar o setor "${selectedWard.nome}"?`;
+  if (!confirm(message)) return;
+
+  try {
+    await api(`/api/wards/${wardId}/archive`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived: nextArchived })
+    });
+    if (currentWardId === wardId && nextArchived) {
+      currentWardId = wards.find(item => item.id !== wardId)?.id || null;
+    }
+    await refreshWards();
+    await refreshCurrentUser();
+    if (currentWardId) await load();
+    else setAppEnabled(false);
+    focusAdminWard(wardId);
+    setAdminWardFeedback(nextArchived ? "Setor arquivado com sucesso." : "Setor reativado com sucesso.");
+  } catch (error) {
+    setAdminWardFeedback(error.message || "Não foi possível atualizar o setor.", true);
+  }
+}
+
+async function deleteSelectedWard(wardId) {
+  const selectedWard = allWards.find(item => item.id === wardId);
+  if (!selectedWard) {
+    setAdminWardFeedback("Selecione um setor.", true);
+    return;
+  }
+  if (!confirm(`Excluir o setor "${selectedWard.nome}"?`)) return;
+
+  try {
+    await api(`/api/wards/${wardId}`, {
+      method: "DELETE"
+    });
+    if (currentWardId === wardId) {
+      currentWardId = wards.find(item => item.id !== wardId)?.id || null;
+    }
+    await refreshWards();
+    await refreshCurrentUser();
+    if (currentWardId) await load();
+    else setAppEnabled(false);
+    setAdminWardFeedback("Setor excluído com sucesso.");
+  } catch (error) {
+    setAdminWardFeedback(error.message || "Não foi possível excluir o setor.", true);
+  }
+}
+
 function updateAdminEnfDropdown() {
   const bedSelect = document.getElementById("admin-ward-select-bed");
   if (!bedSelect) return;
@@ -1351,7 +2253,6 @@ function updateAdminEnfDropdown() {
   const select = document.getElementById("admin-enf-select-bed");
   if (!select) return;
   select.innerHTML = "";
-  select.appendChild(new Option("Sem enfermaria", NO_ENFERMARIA_VALUE));
   if (w && w.enfermarias) {
     for (const enf of w.enfermarias) {
       select.appendChild(new Option(enf, enf));
@@ -1360,6 +2261,10 @@ function updateAdminEnfDropdown() {
 }
 
 document.getElementById("admin-ward-select-bed")?.addEventListener("change", updateAdminEnfDropdown);
+document.getElementById("admin-ward-select-edit")?.addEventListener("change", syncAdminWardEditForm);
+document.getElementById("admin-ward-select-edit")?.addEventListener("change", async event => {
+  await loadAdminWardDetails(parseInt(event.target.value, 10));
+});
 
 function updateDeleteEnfDropdown() {
   const wardSelect = document.getElementById("admin-ward-select-del");
@@ -1369,7 +2274,6 @@ function updateDeleteEnfDropdown() {
   const select = document.getElementById("admin-enf-select-del");
   if (!select) return;
   select.innerHTML = "";
-  select.appendChild(new Option("Sem enfermaria", NO_ENFERMARIA_VALUE));
   if (w && w.enfermarias) {
     for (const enf of w.enfermarias) {
       select.appendChild(new Option(enf, enf));
@@ -1411,6 +2315,40 @@ function updateTopbarEnfSelect() {
 }
 
 function closeSidebarOnMobile() {
+}
+
+function syncStartupWardModalOptions() {
+  const select = document.getElementById("modal-start-ward-select");
+  if (!select) return;
+  select.innerHTML = "";
+  for (const w of wards) {
+    select.appendChild(new Option(w.nome, w.id));
+  }
+  if (currentWardId && wards.some(item => item.id === currentWardId)) {
+    select.value = String(currentWardId);
+  }
+}
+
+async function openSelectedWard(wardId) {
+  if (!wardId) return;
+  currentWardId = wardId;
+  setAppEnabled(true);
+  showOnly(null);
+  document.getElementById("nav-home")?.classList.remove("ghost");
+  document.getElementById("nav-dashboard")?.classList.add("ghost");
+  document.getElementById("nav-patients")?.classList.add("ghost");
+  document.getElementById("nav-gerenciar")?.classList.add("ghost");
+  await load();
+  updateTopbarWardSelectors();
+}
+
+function maybeOpenStartWardModal() {
+  const modal = document.getElementById("modal-start-ward");
+  if (!modal || currentUser?.activeShift || !wards.length) return;
+  syncStartupWardModalOptions();
+  if (!modal.open) {
+    modal.showModal();
+  }
 }
 
 async function openTopbarWard() {
@@ -1455,52 +2393,60 @@ async function openPatientsView() {
 }
 
 async function savePatientRegistry() {
-  if (!currentPatientRecord?.id) return;
   const payload = {
     nome: document.getElementById("patient-registry-name").value.trim(),
     cpf: normalizeCpf(document.getElementById("patient-registry-cpf").value),
     birthDate: document.getElementById("patient-registry-birthdate").value,
-    diagnostico: document.getElementById("patient-registry-diagnostico").value.trim(),
     nir: document.getElementById("patient-registry-nir").value.trim()
   };
 
-  await api(`/api/patients/${currentPatientRecord.id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
+  try {
+    const isNew = !currentPatientRecord?.id;
+    const saved = await api(isNew ? "/api/patients" : `/api/patients/${currentPatientRecord.id}`, {
+      method: isNew ? "POST" : "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
 
-  setPatientsFeedback("Cadastro do paciente atualizado com sucesso.");
-  await loadPatientsRegistry();
-  if (currentWardId && currentPatientRecord.currentAdmission?.wardId === currentWardId) {
-    await load();
+    document.getElementById("modal-patient-registry")?.close();
+    currentPatientRecord = saved?.patient || null;
+    setPatientsFeedback(isNew ? "Paciente cadastrado com sucesso." : "Cadastro do paciente atualizado com sucesso.");
+    await loadPatientsRegistry();
+    if (currentWardId && currentPatientRecord?.currentAdmission?.wardId === currentWardId) {
+      await load();
+    }
+  } catch (error) {
+    setPatientsFeedback(error.message || "Não foi possível salvar o paciente.", true);
   }
-  const refreshed = await api(`/api/patients/${currentPatientRecord.id}`);
-  fillPatientRegistryModal(refreshed.patient);
 }
 
 async function deletePatientRegistry() {
   if (!currentPatientRecord?.id) return;
   if (!confirm(`Excluir o cadastro de ${currentPatientRecord.nome || "este paciente"}?`)) return;
 
-  await api(`/api/patients/${currentPatientRecord.id}`, {
-    method: "DELETE"
-  });
+  try {
+    await api(`/api/patients/${currentPatientRecord.id}`, {
+      method: "DELETE"
+    });
 
-  document.getElementById("modal-patient-registry").close();
-  currentPatientRecord = null;
-  setPatientsFeedback("Cadastro do paciente excluído com sucesso.");
-  await loadPatientsRegistry();
+    document.getElementById("modal-patient-registry")?.close();
+    currentPatientRecord = null;
+    setPatientsFeedback("Cadastro do paciente excluído com sucesso.");
+    await loadPatientsRegistry();
+    if (currentWardId) await load();
+  } catch (error) {
+    setPatientsFeedback(error.message || "Não foi possível excluir o paciente.", true);
+  }
 }
 
 async function startApp() {
   setAppEnabled(false);
-  showOnly("view-dashboard");
+  showOnly("view-home");
   await refreshCurrentUser();
+  await refreshStaffSuggestions();
   await refreshWards();
-  updateDashboardFilterInputs();
-  await loadDashboard();
   setAppEnabled(false);
+  maybeOpenStartWardModal();
 }
 
 async function checkAuth() {
@@ -1554,8 +2500,12 @@ document.getElementById("topbar-ward-select")?.addEventListener("change", async 
   await refreshSidebarPatients();
 });
 
-document.getElementById("btn-abrir-setor").addEventListener("click", async () => {
-  currentWardId = parseInt(document.getElementById("select-ward").value, 10);
+document.getElementById("header-ward-tabs")?.addEventListener("click", async event => {
+  const tab = event.target.closest(".hero-tab");
+  if (!tab) return;
+  const wardId = parseInt(tab.dataset.id, 10);
+  if (!wardId) return;
+  currentWardId = wardId;
   setAppEnabled(true);
   showOnly(null);
   document.getElementById("nav-home")?.classList.remove("ghost");
@@ -1566,14 +2516,30 @@ document.getElementById("btn-abrir-setor").addEventListener("click", async () =>
   updateTopbarWardSelectors();
 });
 
+document.getElementById("btn-abrir-setor").addEventListener("click", async () => {
+  await openSelectedWard(parseInt(document.getElementById("select-ward").value, 10));
+});
+
 document.getElementById("btn-gerenciar").addEventListener("click", async () => {
+  if (!isAdminUser()) {
+    setShiftFeedback("Somente administrador pode acessar o cadastro.", true);
+    return;
+  }
   await refreshWards();
+  await loadAdminUsers();
+  clearAdminUserForm();
   setAppEnabled(false);
   showOnly("view-admin");
 });
 
 document.getElementById("nav-gerenciar")?.addEventListener("click", async () => {
+  if (!isAdminUser()) {
+    setShiftFeedback("Somente administrador pode acessar o cadastro.", true);
+    return;
+  }
   await refreshWards();
+  await loadAdminUsers();
+  clearAdminUserForm();
   setAppEnabled(false);
   showOnly("view-admin");
   closeSidebarOnMobile();
@@ -1595,6 +2561,8 @@ document.getElementById("nav-home")?.addEventListener("click", async () => {
 });
 
 document.getElementById("nav-patients")?.addEventListener("click", openPatientsView);
+
+document.getElementById("btn-patient-new")?.addEventListener("click", openNewPatientRegistry);
 
 document.getElementById("btn-patients-search")?.addEventListener("click", loadPatientsRegistry);
 
@@ -1626,6 +2594,10 @@ document.getElementById("patient-registry-cpf")?.addEventListener("input", event
   event.target.value = formatCpf(event.target.value);
 });
 
+document.getElementById("admin-user-cpf")?.addEventListener("input", event => {
+  event.target.value = formatCpf(event.target.value);
+});
+
 document.getElementById("patient-registry-save")?.addEventListener("click", async event => {
   event.preventDefault();
   await savePatientRegistry();
@@ -1634,6 +2606,24 @@ document.getElementById("patient-registry-save")?.addEventListener("click", asyn
 document.getElementById("patient-registry-delete")?.addEventListener("click", async event => {
   event.preventDefault();
   await deletePatientRegistry();
+});
+
+document.getElementById("btn-save-user")?.addEventListener("click", async () => {
+  await saveAdminUser();
+});
+
+document.getElementById("btn-cancel-user-edit")?.addEventListener("click", () => {
+  clearAdminUserForm();
+  setAdminUsersFeedback("");
+});
+
+document.getElementById("admin-users-list")?.addEventListener("click", event => {
+  const editButton = event.target.closest(".btn-admin-user-edit");
+  if (!editButton) return;
+  const user = adminUsers.find(item => String(item.id) === String(editButton.dataset.id));
+  if (!user) return;
+  fillAdminUserForm(user);
+  setAdminUsersFeedback(`Alterando o usuário ${user.nome || user.username}.`);
 });
 
 document.getElementById("btn-voltar-home").addEventListener("click", async () => {
@@ -1646,6 +2636,8 @@ document.getElementById("btn-voltar-home").addEventListener("click", async () =>
 
 document.getElementById("btn-open-shift")?.addEventListener("click", async () => {
   const wardId = parseInt(document.getElementById("shift-ward").value, 10);
+  const shiftLength = normalizeShiftLength(document.getElementById("shift-length")?.value);
+  const shiftPeriod = normalizeShiftPeriod(document.getElementById("shift-period")?.value, shiftLength);
   if (!wardId) {
     setShiftFeedback("Selecione um setor para abrir o plantão.", true);
     return;
@@ -1653,12 +2645,24 @@ document.getElementById("btn-open-shift")?.addEventListener("click", async () =>
   const res = await api("/api/shifts/open", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ wardId })
+    body: JSON.stringify({ wardId, shiftLength, shiftPeriod })
   });
   currentUser = res.user || currentUser;
+  currentWardId = wardId;
   renderCurrentUser();
   setShiftFeedback("Plantão aberto com sucesso.");
 });
+
+document.getElementById("btn-confirm-start-ward")?.addEventListener("click", async event => {
+  event.preventDefault();
+  const wardId = parseInt(document.getElementById("modal-start-ward-select")?.value, 10);
+  if (!wardId) return;
+  document.getElementById("modal-start-ward")?.close();
+  await openSelectedWard(wardId);
+});
+
+document.getElementById("shift-length")?.addEventListener("change", syncShiftFormVisibility);
+document.getElementById("shift-period")?.addEventListener("change", syncShiftFormVisibility);
 
 document.getElementById("btn-close-shift")?.addEventListener("click", async () => {
   if (!currentUser?.activeShift) {
@@ -1684,21 +2688,14 @@ document.getElementById("btn-print-last-shift")?.addEventListener("click", () =>
 });
 
 document.getElementById("btn-whatsapp-shift")?.addEventListener("click", openWhatsAppSummary);
+document.getElementById("btn-whatsapp-maintenance")?.addEventListener("click", openGeneralMaintenanceSummary);
 document.getElementById("btn-whatsapp-open-group")?.addEventListener("click", async event => {
   event.preventDefault();
   if (!pendingWhatsAppMessage) {
     setShiftFeedback("Nenhuma solicitacao foi gerada ainda.", true);
     return;
   }
-
-  try {
-    await navigator.clipboard.writeText(pendingWhatsAppMessage);
-    setShiftFeedback("Texto copiado. O grupo foi aberto para voce colar e enviar.");
-  } catch {
-    setShiftFeedback("Grupo aberto. Se necessario, copie o texto manualmente antes de enviar.");
-  }
-
-  window.location.href = DEFAULT_WHATSAPP_GROUP_LINK;
+  await sendWhatsAppMessageNow(pendingWhatsAppMessage, WHATSAPP_MAINTENANCE_LINK);
   document.getElementById("modal-whatsapp-preview")?.close();
 });
 
@@ -1719,6 +2716,63 @@ document.getElementById("btn-criar-ward").addEventListener("click", async () => 
   }
 });
 
+document.getElementById("btn-update-ward")?.addEventListener("click", async () => {
+  await updateSelectedWard();
+});
+
+document.getElementById("btn-delete-ward")?.addEventListener("click", async () => {
+  const wardId = parseInt(document.getElementById("admin-ward-select-edit").value, 10);
+  await deleteSelectedWard(wardId);
+});
+
+document.getElementById("btn-archive-ward")?.addEventListener("click", async () => {
+  const wardId = parseInt(document.getElementById("admin-ward-select-edit").value, 10);
+  await toggleArchiveWard(wardId);
+});
+
+document.getElementById("btn-close-ward-editor")?.addEventListener("click", () => {
+  closeAdminWardEditor();
+  setAdminWardFeedback("");
+});
+
+document.getElementById("admin-ward-list")?.addEventListener("click", async event => {
+  const editButton = event.target.closest(".btn-ward-edit");
+  if (editButton) {
+    focusAdminWard(editButton.dataset.id);
+    setAdminWardFeedback("Setor selecionado para alteração.");
+    return;
+  }
+
+  const archiveButton = event.target.closest(".btn-ward-archive");
+  if (archiveButton) {
+    await toggleArchiveWard(parseInt(archiveButton.dataset.id, 10));
+    return;
+  }
+
+  const deleteButton = event.target.closest(".btn-ward-delete");
+  if (deleteButton) {
+    await deleteSelectedWard(parseInt(deleteButton.dataset.id, 10));
+  }
+});
+
+document.getElementById("admin-bed-list")?.addEventListener("click", async event => {
+  const editButton = event.target.closest(".btn-admin-bed-edit");
+  if (editButton) {
+    openAdminBedEditModal(parseInt(editButton.dataset.id, 10));
+    return;
+  }
+
+  const deleteButton = event.target.closest(".btn-admin-bed-delete");
+  if (deleteButton) {
+    await deleteAdminBed(parseInt(deleteButton.dataset.id, 10));
+  }
+});
+
+document.getElementById("btn-save-admin-bed")?.addEventListener("click", async event => {
+  event.preventDefault();
+  await saveAdminBedEdit();
+});
+
 document.getElementById("btn-criar-enf")?.addEventListener("click", async () => {
   const wardId = parseInt(document.getElementById("admin-ward-select-enf").value, 10);
   const input = document.getElementById("admin-enf-name");
@@ -1735,7 +2789,12 @@ document.getElementById("btn-criar-enf")?.addEventListener("click", async () => 
     document.getElementById("admin-ward-select-bed").value = String(wardId);
     updateAdminEnfDropdown();
     document.getElementById("admin-enf-select-bed").value = nome;
+    document.getElementById("admin-ward-select-del").value = String(wardId);
+    updateDeleteEnfDropdown();
+    document.getElementById("admin-enf-select-del").value = nome;
     await refreshCurrentUser();
+    syncAdminWardEditorFlow();
+    setAdminWardFeedback("Enfermaria criada. Agora voce pode cadastrar os leitos.");
   } catch (e) {
     alert(e.message);
   }
@@ -1744,9 +2803,13 @@ document.getElementById("btn-criar-enf")?.addEventListener("click", async () => 
 document.getElementById("btn-add-beds").addEventListener("click", async () => {
   const wardId = parseInt(document.getElementById("admin-ward-select-bed").value, 10);
   const enfermariaValue = document.getElementById("admin-enf-select-bed").value;
-  const enfermaria = enfermariaValue === NO_ENFERMARIA_VALUE ? "" : enfermariaValue;
+  const enfermaria = String(enfermariaValue || "").trim();
   const start = parseInt(document.getElementById("admin-bed-start").value, 10);
   const end = parseInt(document.getElementById("admin-bed-end").value, 10);
+  if (!enfermaria) {
+    setAdminWardFeedback("Crie ou selecione uma enfermaria antes de cadastrar os leitos.", true);
+    return;
+  }
   try {
     await api(`/api/wards/${wardId}/beds`, {
       method: "POST",
@@ -1757,6 +2820,7 @@ document.getElementById("btn-add-beds").addEventListener("click", async () => {
     document.getElementById("admin-bed-end").value = "";
     await refreshWards();
     await refreshCurrentUser();
+    setAdminWardFeedback("Leitos cadastrados com sucesso.");
   } catch (e) {
     alert(e.message);
   }
@@ -1765,7 +2829,7 @@ document.getElementById("btn-add-beds").addEventListener("click", async () => {
 document.getElementById("btn-del-beds")?.addEventListener("click", async () => {
   const wardId = parseInt(document.getElementById("admin-ward-select-del").value, 10);
   const enfermariaValue = document.getElementById("admin-enf-select-del").value;
-  const enfermaria = enfermariaValue === NO_ENFERMARIA_VALUE ? "" : enfermariaValue;
+  const enfermaria = String(enfermariaValue || "").trim();
   const start = document.getElementById("del-bed-start").value;
   const end = document.getElementById("del-bed-end").value;
   const labelBase = enfermaria ? `da enfermaria ${enfermaria}` : "sem enfermaria";
@@ -1804,6 +2868,8 @@ document.getElementById("btn-del-enf")?.addEventListener("click", async () => {
     await refreshWards();
     await refreshCurrentUser();
     if (currentWardId === wardId) await load();
+    syncAdminWardEditorFlow();
+    setAdminWardFeedback("Enfermaria excluida com sucesso.");
   } catch (e) {
     alert(e.message);
   }

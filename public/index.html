@@ -42,6 +42,7 @@
         <div>
           <div class="hero-title" id="header-title">Dashboard Hospitalar</div>
           <div class="hero-subtitle">Visão geral do setor, indicadores e plantão em um único painel.</div>
+          <div id="header-ward-tabs" class="hero-tabs"></div>
         </div>
         <div class="hero-meta">
           <div class="date" id="date"></div>
@@ -146,6 +147,7 @@
             <option value="false">Sem internação ativa</option>
           </select>
         </label>
+        <button id="btn-patient-new" class="ghost">Novo</button>
         <button id="btn-patients-search">Atualizar lista</button>
       </div>
       <div id="patients-feedback" class="hint hidden"></div>
@@ -160,36 +162,92 @@
         <button id="btn-criar-ward">Criar setor</button>
       </div>
 
-      <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+      <div id="admin-ward-feedback" class="hint hidden"></div>
+      <div id="admin-ward-list-empty" class="hint hidden">Nenhum setor cadastrado.</div>
+      <div id="admin-ward-list" class="patients-list"></div>
 
-      <div class="row">
-        <label>Setor <select id="admin-ward-select-enf"></select></label>
-        <label>2. Nova Enfermaria <input id="admin-enf-name" placeholder="Ex: ENF. 230"></label>
-        <button id="btn-criar-enf">Criar enfermaria</button>
-      </div>
+      <section id="admin-ward-editor" class="panel hidden">
+        <div class="row" style="justify-content: space-between; align-items: center;">
+          <div>
+            <h3 id="admin-ward-editor-title">Editar setor</h3>
+            <div class="hint" id="admin-ward-editor-subtitle">Abra um setor para alterar estrutura, enfermarias e leitos.</div>
+          </div>
+          <button id="btn-close-ward-editor" class="ghost">Fechar menu</button>
+        </div>
 
-      <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+        <div class="row">
+          <label>Setor cadastrado <select id="admin-ward-select-edit"></select></label>
+          <label>1. Alterar setor <input id="admin-ward-edit-name" placeholder="Novo nome do setor"></label>
+          <button id="btn-update-ward" class="ghost">Salvar nome</button>
+          <button id="btn-archive-ward" class="ghost">Arquivar setor</button>
+          <button id="btn-delete-ward" class="danger">Excluir setor</button>
+        </div>
 
-      <div class="row">
-        <label>Setor <select id="admin-ward-select-bed"></select></label>
-        <label>Enfermaria <select id="admin-enf-select-bed"></select></label>
-        <label>3. Leitos (de) <input id="admin-bed-start" type="number" min="1" placeholder="231"></label>
-        <label>(até) <input id="admin-bed-end" type="number" min="1" placeholder="240"></label>
-        <button id="btn-add-beds">Adicionar leitos</button>
-      </div>
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
 
-      <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+        <div class="hint" id="admin-ward-flow-hint">Siga a ordem: primeiro crie a enfermaria e depois cadastre os leitos.</div>
 
-      <div class="row">
-        <label>Setor <select id="admin-ward-select-del"></select></label>
-        <label>Enfermaria <select id="admin-enf-select-del"></select></label>
-        <label>Excluir leitos (de) <input id="del-bed-start" type="number" min="1" placeholder="231"></label>
-        <label>(até) <input id="del-bed-end" type="number" min="1" placeholder="240"></label>
-        <button id="btn-del-beds" class="ghost">Excluir leitos</button>
-        <button id="btn-del-enf" class="ghost">Excluir enfermaria</button>
-      </div>
+        <div class="row" id="admin-enf-row">
+          <label>Setor <select id="admin-ward-select-enf"></select></label>
+          <label>2. Nova Enfermaria <input id="admin-enf-name" placeholder="Ex: ENF. 230"></label>
+          <button id="btn-criar-enf">Criar enfermaria</button>
+        </div>
 
-      <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+
+        <div class="row" id="admin-bed-row">
+          <label>Setor <select id="admin-ward-select-bed"></select></label>
+          <label>Enfermaria <select id="admin-enf-select-bed"></select></label>
+          <label>3. Leitos (de) <input id="admin-bed-start" type="number" min="1" placeholder="231"></label>
+          <label>(até) <input id="admin-bed-end" type="number" min="1" placeholder="240"></label>
+          <button id="btn-add-beds">Adicionar leitos</button>
+        </div>
+
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+
+        <div class="row" id="admin-delete-row">
+          <label>Setor <select id="admin-ward-select-del"></select></label>
+          <label>Enfermaria <select id="admin-enf-select-del"></select></label>
+          <label>Excluir leitos (de) <input id="del-bed-start" type="number" min="1" placeholder="231"></label>
+          <label>(até) <input id="del-bed-end" type="number" min="1" placeholder="240"></label>
+          <button id="btn-del-beds" class="ghost">Excluir leitos</button>
+          <button id="btn-del-enf" class="ghost">Excluir enfermaria</button>
+        </div>
+
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid var(--border);">
+
+        <div class="history-panel">
+          <div class="procedimentos-title">Leitos cadastrados</div>
+          <div class="history-hint">Lista organizada por enfermaria para alterar ou excluir cada leito.</div>
+          <div id="admin-bed-list-empty" class="hint hidden">Nenhum leito cadastrado neste setor.</div>
+          <div id="admin-bed-list" class="history-list"></div>
+        </div>
+      </section>
+
+      <section id="admin-users-section" class="panel hidden">
+        <h3>Usuários</h3>
+        <div class="row">
+          <label>Nome completo <input id="admin-user-name" placeholder="Nome do servidor"></label>
+          <label>Usuário <input id="admin-user-username" placeholder="Login de acesso"></label>
+          <label>CPF <input id="admin-user-cpf" inputmode="numeric" maxlength="14" placeholder="000.000.000-00"></label>
+          <label>Data de nascimento <input id="admin-user-birthdate" type="date"></label>
+          <label>Perfil
+            <select id="admin-user-role">
+              <option value="user">Usuário</option>
+              <option value="admin">Administrador</option>
+            </select>
+          </label>
+          <label>Senha <input id="admin-user-password" type="password" placeholder="Digite para cadastrar ou alterar"></label>
+          <button id="btn-save-user">Salvar usuário</button>
+          <button id="btn-cancel-user-edit" class="ghost hidden">Cancelar edição</button>
+        </div>
+        <div id="admin-users-feedback" class="hint hidden"></div>
+        <div id="admin-users-list-empty" class="hint hidden">Nenhum usuário cadastrado.</div>
+        <div class="admin-users-list">
+          <div class="admin-users-title">Usuários cadastrados</div>
+          <div id="admin-users-list" class="admin-users-table"></div>
+        </div>
+      </section>
 
       <div class="row" style="margin-top: 24px; justify-content: flex-end;">
         <button id="btn-voltar-home" class="ghost">Voltar para o Início</button>
@@ -198,38 +256,75 @@
 
     <section class="plantao">
       <h2>Plantão</h2>
-      <div class="shift-shell">
-        <div class="shift-card">
-          <div class="shift-title">Responsável logado</div>
-          <div class="shift-user" id="shift-user-name">-</div>
-          <div class="shift-meta" id="shift-user-role">-</div>
+      <div class="plantao-layout">
+        <div class="plantao-main">
+          <div class="shift-shell">
+            <div class="shift-card">
+              <div class="shift-title">Responsável logado</div>
+              <div class="shift-user" id="shift-user-name">-</div>
+              <div class="shift-meta" id="shift-user-role">-</div>
+            </div>
+            <div class="shift-card">
+              <div class="shift-title">Status do plantão</div>
+              <div class="shift-status" id="shift-status-label">Fechado</div>
+              <div class="shift-meta" id="shift-status-meta">Nenhum plantão aberto</div>
+            </div>
+          </div>
+          <div class="row">
+            <label>Setor do plantão
+              <select id="shift-ward"></select>
+            </label>
+            <label>Data do plantão
+              <input id="shift-date" type="date" readonly>
+            </label>
+            <label>Tipo do plantão
+              <select id="shift-length">
+                <option value="12H">12H</option>
+                <option value="24H">24H</option>
+              </select>
+            </label>
+            <label>Período
+              <select id="shift-period">
+                <option value="DIA">Dia</option>
+                <option value="NOITE">Noite</option>
+                <option value="COMPLETO">Completo</option>
+              </select>
+            </label>
+            <button id="btn-open-shift">Abrir plantão</button>
+            <button id="btn-close-shift" class="ghost">Fechar plantão e imprimir</button>
+            <button id="btn-print-last-shift" class="ghost">Reimprimir última ficha</button>
+            <button id="btn-whatsapp-shift" class="ghost">Manutenção de Central de Ar</button>
+            <button id="btn-whatsapp-maintenance" class="ghost">Solicitação de Manutenção</button>
+          </div>
+          <div id="shift-feedback" class="hint hidden"></div>
+          <div id="plantao-details">
+            <div class="plantao-grid">
+              <label>Médico do plantão <input id="eq-medico" list="staff-list-medicos"></label>
+              <label id="field-eq-enf-dia">Enfermeiro(a) dia <input id="eq-enf-dia" list="staff-list-enfermeiros"></label>
+              <label id="field-eq-tec-dia">Técnicos(as) dia <input id="eq-tec-dia" list="staff-list-tecnicos"></label>
+              <label id="field-eq-enf-noite">Enfermeiro(a) noite <input id="eq-enf-noite" list="staff-list-enfermeiros"></label>
+              <label id="field-eq-tec-noite">Técnicos(as) noite <input id="eq-tec-noite" list="staff-list-tecnicos"></label>
+              <label>Faltosos <input id="eq-faltosos"></label>
+            </div>
+            <datalist id="staff-list-medicos"></datalist>
+            <datalist id="staff-list-enfermeiros"></datalist>
+            <datalist id="staff-list-tecnicos"></datalist>
+            <button id="salvar-equipe">Salvar Plantão</button>
+          </div>
         </div>
-        <div class="shift-card">
-          <div class="shift-title">Status do plantão</div>
-          <div class="shift-status" id="shift-status-label">Fechado</div>
-          <div class="shift-meta" id="shift-status-meta">Nenhum plantão aberto</div>
-        </div>
-      </div>
-      <div class="row">
-        <label>Setor do plantão
-          <select id="shift-ward"></select>
-        </label>
-        <button id="btn-open-shift">Abrir plantão</button>
-        <button id="btn-close-shift" class="ghost">Fechar plantão e imprimir</button>
-        <button id="btn-print-last-shift" class="ghost">Reimprimir última ficha</button>
-        <button id="btn-whatsapp-shift" class="ghost">Enviar no WhatsApp</button>
-      </div>
-      <div id="shift-feedback" class="hint hidden"></div>
-      <div id="plantao-details">
-        <div class="plantao-grid">
-          <label>Médico do plantão <input id="eq-medico"></label>
-          <label>Enfermeiro(a) dia <input id="eq-enf-dia"></label>
-          <label>Técnicos(as) dia <input id="eq-tec-dia"></label>
-          <label>Enfermeiro(a) noite <input id="eq-enf-noite"></label>
-          <label>Técnicos(as) noite <input id="eq-tec-noite"></label>
-          <label>Faltosos <input id="eq-faltosos"></label>
-        </div>
-        <button id="salvar-equipe">Salvar Plantão</button>
+        <aside class="plantao-side">
+          <div class="shift-card">
+            <div class="shift-title">Resumo salvo</div>
+            <div id="shift-team-summary" class="shift-team-summary hidden">
+              <div class="shift-team-summary-title">Equipe salva</div>
+              <div id="shift-team-summary-list" class="shift-team-summary-list"></div>
+            </div>
+          </div>
+          <div class="shift-card">
+            <div class="shift-title">Histórico do plantão</div>
+            <div id="shift-history-list" class="shift-history-list"></div>
+          </div>
+        </aside>
       </div>
     </section>
     <section class="cards">
@@ -277,39 +372,6 @@
     </section>
         </main>
 
-        <aside class="profile-rail">
-          <section class="profile-card">
-            <div class="profile-avatar" id="profile-avatar">A</div>
-            <div class="user-chip" id="topbar-user">-</div>
-            <div class="profile-role" id="profile-role-summary">Perfil -</div>
-            <div class="profile-metric-grid">
-              <div class="profile-metric">
-                <strong id="profile-shift-status">Fechado</strong>
-                <span>Plantão</span>
-              </div>
-              <div class="profile-metric">
-                <strong id="profile-current-ward">-</strong>
-                <span>Setor</span>
-              </div>
-            </div>
-          </section>
-
-          <section class="quick-card">
-            <div class="quick-card-title">Atalhos</div>
-            <div class="quick-card-item">
-              <strong>Dashboard</strong>
-              <span>Acompanhe indicadores e filtros do hospital.</span>
-            </div>
-            <div class="quick-card-item">
-              <strong>Setores</strong>
-              <span>Abra rapidamente o setor e a enfermaria desejados.</span>
-            </div>
-            <div class="quick-card-item">
-              <strong>Plantão</strong>
-              <span>Gerencie abertura, fechamento e envio de resumo.</span>
-            </div>
-          </section>
-        </aside>
       </div>
     </div>
   </div>
@@ -318,7 +380,6 @@
     <form method="dialog" class="modal-content">
       <div class="modal-header">
         <div class="modal-title" id="modal-title">Cadastrar paciente</div>
-        <button class="modal-close" value="cancelar" aria-label="Fechar">×</button>
       </div>
       <div class="modal-body">
         <div class="modal-grid">
@@ -375,11 +436,11 @@
         </div>
       </div>
       <div class="modal-actions">
-        <button id="modal-salvar" value="default">Registrar</button>
-        <button id="modal-transferir" class="ghost" value="default">Transferir</button>
-        <button id="modal-alta" class="ghost" value="default">Dar alta</button>
-        <button id="modal-obito" class="ghost" value="default">Óbito</button>
-        <button id="modal-baixa" class="danger" value="default">Dar baixa</button>
+        <button id="modal-salvar" type="button">Registrar</button>
+        <button id="modal-transferir" type="button" class="ghost">Transferir</button>
+        <button id="modal-alta" type="button" class="ghost">Dar alta</button>
+        <button id="modal-obito" type="button" class="ghost">Óbito</button>
+        <button id="modal-baixa" type="button" class="danger">Dar baixa</button>
         <button value="cancelar">Cancelar</button>
       </div>
     </form>
@@ -389,7 +450,6 @@
     <form method="dialog" class="modal-content">
       <div class="modal-header">
         <div class="modal-title" id="patient-registry-title">Cadastro do paciente</div>
-        <button class="modal-close" value="cancelar" aria-label="Fechar">×</button>
       </div>
       <div class="modal-body">
         <div class="modal-grid">
@@ -397,7 +457,6 @@
           <label>CPF <input id="patient-registry-cpf" inputmode="numeric" maxlength="14" placeholder="000.000.000-00"></label>
           <label>Data de nascimento <input id="patient-registry-birthdate" type="date"></label>
           <label>NIR <input id="patient-registry-nir"></label>
-          <label style="grid-column: 1 / -1;">Diagnóstico <input id="patient-registry-diagnostico"></label>
         </div>
         <div class="history-panel">
           <div class="procedimentos-title">Internação atual</div>
@@ -409,8 +468,8 @@
         </div>
       </div>
       <div class="modal-actions">
-        <button id="patient-registry-save" value="default">Salvar alterações</button>
-        <button id="patient-registry-delete" class="danger" value="default">Excluir cadastro</button>
+        <button id="patient-registry-save" type="button">Salvar alterações</button>
+        <button id="patient-registry-delete" type="button" class="danger">Excluir cadastro</button>
         <button value="cancelar">Fechar</button>
       </div>
     </form>
@@ -420,7 +479,6 @@
     <form method="dialog" class="modal-content">
       <div class="modal-header">
         <div class="modal-title">Solicitação para o WhatsApp</div>
-        <button class="modal-close" value="cancelar" aria-label="Fechar">×</button>
       </div>
       <div class="modal-body">
         <label style="grid-column: 1 / -1;">
@@ -429,8 +487,48 @@
         </label>
       </div>
       <div class="modal-actions">
-        <button id="btn-whatsapp-open-group" value="default">Copiar e abrir grupo</button>
+        <button id="btn-whatsapp-open-group" type="button">Copiar e abrir grupo</button>
         <button value="cancelar">Fechar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="modal-admin-bed" class="modal">
+    <form method="dialog" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">Editar leito</div>
+      </div>
+      <div class="modal-body">
+        <div class="modal-grid">
+          <label>Leito atual <input id="admin-bed-current-id" disabled></label>
+          <label>Status atual <input id="admin-bed-current-status" disabled></label>
+          <label>Novo número <input id="admin-bed-edit-id" type="number" min="1"></label>
+          <label>Enfermaria
+            <select id="admin-bed-edit-enfermaria"></select>
+          </label>
+        </div>
+        <div id="admin-bed-edit-feedback" class="hint hidden"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-save-admin-bed" type="button">Salvar alterações</button>
+        <button value="cancelar">Fechar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="modal-start-ward" class="modal">
+    <form method="dialog" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">Selecionar setor</div>
+      </div>
+      <div class="modal-body">
+        <div class="hint">Escolha o setor em que você vai trabalhar. Os leitos só aparecem depois dessa seleção.</div>
+        <label>Setor
+          <select id="modal-start-ward-select"></select>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-confirm-start-ward" value="default">Entrar no setor</button>
       </div>
     </form>
   </dialog>
