@@ -19,6 +19,7 @@
         <button id="nav-dashboard" class="nav-btn sidebar-btn">Dashboard</button>
         <button id="nav-home" class="nav-btn ghost sidebar-btn">Setores</button>
         <button id="nav-patients" class="nav-btn ghost sidebar-btn">Pacientes</button>
+        <button id="nav-nir" class="nav-btn ghost sidebar-btn">NIR</button>
         <button id="nav-gerenciar" class="nav-btn ghost sidebar-btn">Cadastro</button>
       </nav>
 
@@ -49,12 +50,15 @@
         </div>
       </header>
 
-      <section class="welcome-banner">
-        <div>
-          <div class="welcome-kicker">Bem-vindo ao painel assistencial</div>
-          <div class="welcome-text">Acompanhe setores, leitos, pacientes, pendências e indicadores em tempo real.</div>
+      <section id="header-team-panel" class="header-team-panel hidden">
+        <div class="header-team-top">
+          <div>
+            <div class="header-team-kicker">Equipe do dia</div>
+            <div class="header-team-title">Profissionais vinculados ao setor</div>
+          </div>
+          <div id="header-team-date" class="header-team-date"></div>
         </div>
-        <div class="welcome-icon">+</div>
+        <div id="header-team-list" class="header-team-list"></div>
       </section>
 
       <div class="layout-grid">
@@ -153,6 +157,91 @@
       <div id="patients-feedback" class="hint hidden"></div>
       <div id="patients-list-empty" class="hint hidden">Nenhum paciente cadastrado.</div>
       <div id="patients-list" class="patients-list"></div>
+    </section>
+
+    <section id="view-nir" class="panel nir-report hidden">
+      <div class="nir-report-card">
+        <div class="nir-report-top">
+          <div class="nir-report-brands">
+            <div class="nir-brand-chip">ACAIXLÂNDIA</div>
+            <div class="nir-brand-chip">SEMUS</div>
+            <div class="nir-brand-chip">HMA</div>
+          </div>
+          <div class="nir-report-title">MAPA DE PACIENTES REGULADOS</div>
+        </div>
+        <div class="nir-report-meta">
+          <div id="nir-report-date">DATA: -</div>
+          <div id="nir-report-nurse">ENFERMEIRO: -</div>
+        </div>
+        <div id="nir-feedback" class="hint hidden"></div>
+        <div class="nir-table-wrap">
+          <table class="nir-table">
+            <thead>
+              <tr>
+                <th>Setor</th>
+                <th>Paciente</th>
+                <th>Leito</th>
+                <th>NIR</th>
+                <th>Data da Internação</th>
+                <th>Especialidade</th>
+                <th>Data da Regulação</th>
+                <th>CIL</th>
+                <th>Atualizou Hoje?</th>
+                <th>Ação</th>
+              </tr>
+            </thead>
+            <tbody id="nir-list"></tbody>
+          </table>
+        </div>
+        <div id="nir-list-empty" class="hint hidden">Nenhum paciente regulado no NIR.</div>
+        <div class="nir-accepted-block">
+          <div class="procedimentos-title">Pacientes aceitos</div>
+          <div class="history-hint">Aqui aparecem os pacientes já aceitos para você conferir antes de emitir o PDF do plantão.</div>
+          <div class="nir-table-wrap">
+            <table class="nir-table">
+              <thead>
+                <tr>
+                  <th>Setor</th>
+                  <th>Paciente</th>
+                  <th>Leito</th>
+                  <th>NIR</th>
+                  <th>Data da Internação</th>
+                  <th>Especialidade</th>
+                  <th>Data da Regulação</th>
+                  <th>CIL</th>
+                  <th>Aceito em</th>
+                  <th>Ação</th>
+                </tr>
+              </thead>
+              <tbody id="nir-accepted-list"></tbody>
+            </table>
+          </div>
+          <div id="nir-accepted-list-empty" class="hint hidden">Nenhum paciente aceito neste dia operacional.</div>
+        </div>
+        <div class="nir-notes-grid">
+          <section class="history-panel">
+            <div class="procedimentos-title">Relatório do enfermeiro</div>
+            <div class="history-hint">Digite as atualizações do seu plantão para este dia operacional.</div>
+            <textarea id="nir-current-report-input" rows="6" placeholder="Descreva as regulações, e-mails, CIL, movimentações e observações do plantão."></textarea>
+            <div id="nir-report-feedback" class="hint hidden"></div>
+            <div class="modal-actions" style="justify-content: flex-start;">
+              <button id="btn-save-nir-report" type="button">Salvar relatório</button>
+              <button id="btn-print-nir-report" type="button" class="ghost">Emitir PDF do plantão</button>
+            </div>
+            <div class="nir-saved-report">
+              <div class="procedimentos-title">Relatório salvo</div>
+              <div id="nir-current-report-saved" class="patient-history-card">
+                <span>Nenhum relatório salvo para este dia operacional.</span>
+              </div>
+            </div>
+          </section>
+          <section class="history-panel">
+            <div class="procedimentos-title">Relatórios de outros profissionais</div>
+            <div class="history-hint">Aqui aparecem os registros salvos em outros logins no mesmo dia e também do plantão anterior.</div>
+            <div id="nir-previous-reports" class="history-list"></div>
+          </section>
+        </div>
+      </div>
     </section>
 
     <section id="view-admin" class="panel hidden">
@@ -254,8 +343,15 @@
       </div>
     </section>
 
-    <section class="plantao">
-      <h2>Plantão</h2>
+    <section class="plantao hidden">
+      <div class="plantao-page-header">
+        <div>
+          <div class="plantao-page-kicker">Central Assistencial</div>
+          <h2>Gestão de Plantão</h2>
+          <div class="plantao-page-text">Abra, acompanhe e salve a equipe do plantão em uma área própria do sistema.</div>
+        </div>
+        <div class="plantao-page-badge">Plantão seguro</div>
+      </div>
       <div class="plantao-layout">
         <div class="plantao-main">
           <div class="shift-shell">
@@ -270,34 +366,40 @@
               <div class="shift-meta" id="shift-status-meta">Nenhum plantão aberto</div>
             </div>
           </div>
-          <div class="row">
-            <label>Setor do plantão
-              <select id="shift-ward"></select>
-            </label>
-            <label>Data do plantão
-              <input id="shift-date" type="date" readonly>
-            </label>
-            <label>Tipo do plantão
-              <select id="shift-length">
-                <option value="12H">12H</option>
-                <option value="24H">24H</option>
-              </select>
-            </label>
-            <label>Período
-              <select id="shift-period">
-                <option value="DIA">Dia</option>
-                <option value="NOITE">Noite</option>
-                <option value="COMPLETO">Completo</option>
-              </select>
-            </label>
-            <button id="btn-open-shift">Abrir plantão</button>
-            <button id="btn-close-shift" class="ghost">Fechar plantão e imprimir</button>
-            <button id="btn-print-last-shift" class="ghost">Reimprimir última ficha</button>
-            <button id="btn-whatsapp-shift" class="ghost">Manutenção de Central de Ar</button>
-            <button id="btn-whatsapp-maintenance" class="ghost">Solicitação de Manutenção</button>
+          <div class="plantao-control-card">
+            <div class="plantao-card-title">Abertura do plantão</div>
+            <div class="plantao-form-grid">
+              <label>Setor do plantão
+                <select id="shift-ward"></select>
+              </label>
+              <label>Data do plantão
+                <input id="shift-date" type="date" readonly>
+              </label>
+              <label>Tipo do plantão
+                <select id="shift-length">
+                  <option value="12H">12H</option>
+                  <option value="24H">24H</option>
+                </select>
+              </label>
+              <label>Período
+                <select id="shift-period">
+                  <option value="DIA">Dia</option>
+                  <option value="NOITE">Noite</option>
+                  <option value="COMPLETO">Completo</option>
+                </select>
+              </label>
+            </div>
+            <div class="plantao-action-grid">
+              <button id="btn-open-shift">Abrir plantão</button>
+              <button id="btn-close-shift" class="ghost">Fechar plantão e imprimir</button>
+              <button id="btn-print-last-shift" class="ghost">Reimprimir última ficha</button>
+              <button id="btn-whatsapp-shift" class="ghost">Manutenção de Central de Ar</button>
+              <button id="btn-whatsapp-maintenance" class="ghost">Solicitação de Manutenção</button>
+            </div>
           </div>
           <div id="shift-feedback" class="hint hidden"></div>
-          <div id="plantao-details">
+          <div id="plantao-details" class="plantao-details-card hidden">
+            <div class="plantao-card-title">Equipe do plantão</div>
             <div class="plantao-grid">
               <label>Médico do plantão <input id="eq-medico" list="staff-list-medicos"></label>
               <label id="field-eq-enf-dia">Enfermeiro(a) dia <input id="eq-enf-dia" list="staff-list-enfermeiros"></label>
@@ -309,7 +411,9 @@
             <datalist id="staff-list-medicos"></datalist>
             <datalist id="staff-list-enfermeiros"></datalist>
             <datalist id="staff-list-tecnicos"></datalist>
-            <button id="salvar-equipe">Salvar Plantão</button>
+            <div class="plantao-save-bar">
+              <button id="salvar-equipe">Salvar Plantão</button>
+            </div>
           </div>
         </div>
         <aside class="plantao-side">
@@ -319,10 +423,6 @@
               <div class="shift-team-summary-title">Equipe salva</div>
               <div id="shift-team-summary-list" class="shift-team-summary-list"></div>
             </div>
-          </div>
-          <div class="shift-card">
-            <div class="shift-title">Histórico do plantão</div>
-            <div id="shift-history-list" class="shift-history-list"></div>
           </div>
         </aside>
       </div>
@@ -344,11 +444,6 @@
         <div class="ind-item"><span>Nº de Altas</span><strong id="ind-altas">0</strong></div>
         <div class="ind-item"><span>Nº de Óbitos</span><strong id="ind-obitos">0</strong></div>
         <div class="ind-item"><span>Nº de Leitos Bloqueados</span><strong id="ind-bloqueados">0</strong></div>
-      </div>
-      <div class="ind-actions">
-        <label>Altas: <input type="number" id="input-altas" min="0" value="0"></label>
-        <label>Óbitos: <input type="number" id="input-obitos" min="0" value="0"></label>
-        <button id="salvar-indicadores">Salvar</button>
       </div>
     </section>
 
@@ -393,11 +488,27 @@
               <option value="EXTRA">EXTRA</option>
             </select>
           </label>
-          <label>Nome do paciente <input id="modal-nome"></label>
+          <label>CPF do paciente
+            <div class="inline-field-action">
+              <input id="modal-nome" inputmode="numeric" maxlength="14" placeholder="000.000.000-00">
+              <button id="btn-modal-search-patient" type="button" class="ghost">Buscar</button>
+            </div>
+          </label>
           <label>Desde (admissão) <input id="modal-admissao" type="date"></label>
+          <div class="modal-static-field">
+            <span class="modal-static-label">Nome do paciente</span>
+            <div id="modal-patient-name-display" class="modal-static-value">Será preenchido automaticamente</div>
+          </div>
+          <div class="modal-static-field">
+            <span class="modal-static-label">Idade</span>
+            <div id="modal-patient-age-display" class="modal-static-value">Será preenchida automaticamente</div>
+          </div>
           <label>Diagnóstico <input id="modal-diagnostico"></label>
           <label>NIR <input id="modal-nir"></label>
+          <label>CIL <input id="modal-cil" placeholder="Número da CIL"></label>
         </div>
+        <div id="modal-patient-lookup" class="hint hidden"></div>
+        <button id="btn-modal-create-patient" type="button" class="ghost hidden">Realizar cadastro</button>
         <label>Pendências <textarea id="modal-pendencias" rows="3" placeholder="Digite uma ou mais pendências, uma por linha"></textarea></label>
         <div class="history-panel">
           <div class="procedimentos-title">Histórico de pendências</div>
@@ -456,7 +567,12 @@
           <label>Nome completo <input id="patient-registry-name"></label>
           <label>CPF <input id="patient-registry-cpf" inputmode="numeric" maxlength="14" placeholder="000.000.000-00"></label>
           <label>Data de nascimento <input id="patient-registry-birthdate" type="date"></label>
-          <label>NIR <input id="patient-registry-nir"></label>
+          <label>Número da CIL <input id="patient-registry-cil" placeholder="Digite o número da CIL"></label>
+          <div class="patient-regulation-methods">
+            <span class="modal-static-label">Regulado via</span>
+            <label class="checkbox-chip"><input id="patient-regulation-email" type="checkbox"> EMAIL</label>
+            <label class="checkbox-chip"><input id="patient-regulation-cil" type="checkbox"> CIL</label>
+          </div>
         </div>
         <div class="history-panel">
           <div class="procedimentos-title">Internação atual</div>
@@ -488,6 +604,21 @@
       </div>
       <div class="modal-actions">
         <button id="btn-whatsapp-open-group" type="button">Copiar e abrir grupo</button>
+        <button value="cancelar">Fechar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="modal-nir-report-view" class="modal">
+    <form method="dialog" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title" id="nir-report-view-title">Relatório do plantão anterior</div>
+      </div>
+      <div class="modal-body">
+        <div id="nir-report-view-meta" class="hint"></div>
+        <div id="nir-report-view-content" class="patient-history-card nir-report-view-content"></div>
+      </div>
+      <div class="modal-actions">
         <button value="cancelar">Fechar</button>
       </div>
     </form>

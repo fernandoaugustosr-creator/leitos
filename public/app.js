@@ -33,11 +33,18 @@ let lastClosedReport = null;
 let transferWardCache = new Map();
 let sidebarPatients = [];
 let registeredPatients = [];
+let nirPatients = [];
+let nirAcceptedPatients = [];
 let adminUsers = [];
 let currentAdminUserEditId = null;
 let currentPatientRecord = null;
 let pendingWhatsAppMessage = "";
 let staffDirectory = [];
+let selectedRegistryPatient = null;
+let pendingBedRegistryLink = null;
+let nirCurrentReport = null;
+let nirPreviousReports = [];
+let nirOtherUserReports = [];
 
 const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "PASSAGEM DE SONDA"];
 const NO_ENFERMARIA_VALUE = "__SEM_ENFERMARIA__";
@@ -65,6 +72,32 @@ function formatCpf(value) {
   return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}-${digits.slice(9)}`;
 }
 
+function getPatientAgeLabel(birthDate) {
+  if (!birthDate) return "";
+  const date = new Date(`${birthDate}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const today = new Date();
+  let age = today.getFullYear() - date.getFullYear();
+  const monthDiff = today.getMonth() - date.getMonth();
+  const dayDiff = today.getDate() - date.getDate();
+  if (monthDiff < 0 || (monthDiff === 0 && dayDiff < 0)) {
+    age -= 1;
+  }
+  if (age < 0) return "";
+  return `${age} anos`;
+}
+
+function isTodayIsoDate(value) {
+  if (!value) return false;
+  return String(value).slice(0, 10) === getTodayIsoDate();
+}
+
+function isUpdatedInCurrentOperationalDay(value) {
+  if (!value) return false;
+  return getOperationalDayKey(value) === getOperationalDayKey(new Date());
+}
+
 function toBRDateTime(iso) {
   if (!iso) return "";
   return new Date(iso).toLocaleString("pt-BR");
@@ -72,6 +105,21 @@ function toBRDateTime(iso) {
 
 function getTodayIsoDate() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function getOperationalDate(baseValue = new Date()) {
+  const date = baseValue instanceof Date ? new Date(baseValue) : new Date(baseValue);
+  if (Number.isNaN(date.getTime())) return new Date();
+  date.setHours(date.getHours() - 7);
+  return date;
+}
+
+function getOperationalDayKey(baseValue = new Date()) {
+  const date = getOperationalDate(baseValue);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function buildWardWhatsAppMessage() {
@@ -187,12 +235,12 @@ async function sendWhatsAppMessageNow(message, inviteLink) {
 
   try {
     await navigator.clipboard.writeText(message);
-    setShiftFeedback("Texto copiado. Abrindo o grupo para voce colar e enviar.");
+    setShiftFeedback("Texto copiado. Abrindo o grupo em outra aba para voce colar e enviar.");
   } catch {
-    setShiftFeedback("Abrindo o grupo. Se necessario, copie o texto manualmente antes de enviar.");
+    setShiftFeedback("Abrindo o grupo em outra aba. Se necessario, copie o texto manualmente antes de enviar.");
   }
 
-  window.location.assign(getWhatsAppBrowserLink(inviteLink));
+  window.open(getWhatsAppBrowserLink(inviteLink), "_blank", "noopener");
 }
 
 async function openWhatsAppSummary() {
@@ -234,9 +282,10 @@ async function openGeneralMaintenanceSummary() {
 }
 
 function setPatientFieldsEnabled(enabled) {
-  const ids = ["modal-nome", "modal-admissao", "modal-diagnostico", "modal-pendencias", "modal-nir"];
+  const ids = ["modal-nome", "modal-admissao", "modal-diagnostico", "modal-pendencias", "modal-nir", "modal-cil"];
   for (const id of ids) {
     const el = document.getElementById(id);
+    if (!el) continue;
     el.disabled = !enabled;
     if (!enabled) el.classList.add("muted");
     else el.classList.remove("muted");
@@ -249,10 +298,15 @@ function clearPatientFields() {
   document.getElementById("modal-diagnostico").value = "";
   document.getElementById("modal-pendencias").value = "";
   document.getElementById("modal-nir").value = "";
+  document.getElementById("modal-cil").value = "";
+  setPatientIdentityDisplay("", "");
+  selectedRegistryPatient = null;
+  setPatientLookupFeedback("");
+  toggleCreatePatientButton(false);
 }
 
 function showOnly(viewId) {
-  const ids = ["view-login", "view-dashboard", "view-home", "view-patients", "view-admin"];
+  const ids = ["view-login", "view-dashboard", "view-home", "view-patients", "view-nir", "view-admin"];
   for (const id of ids) {
     const el = document.getElementById(id);
     if (!el) continue;
@@ -262,16 +316,17 @@ function showOnly(viewId) {
     "view-dashboard": "nav-dashboard",
     "view-home": "nav-home",
     "view-patients": "nav-patients",
+    "view-nir": "nav-nir",
     "view-admin": "nav-gerenciar"
   };
-  for (const id of ["nav-dashboard", "nav-home", "nav-patients", "nav-gerenciar"]) {
+  for (const id of ["nav-dashboard", "nav-home", "nav-patients", "nav-nir", "nav-gerenciar"]) {
     document.getElementById(id)?.classList.toggle("ghost", navMap[viewId] !== id);
   }
   document.body.classList.toggle("login-only", viewId === "view-login");
 }
 
 function setAppEnabled(enabled) {
-  document.getElementById("plantao-details")?.classList.toggle("hidden", !enabled);
+  document.querySelector(".plantao")?.classList.toggle("hidden", !enabled);
   document.querySelector(".cards")?.classList.toggle("hidden", !enabled);
   document.querySelector(".indicadores")?.classList.toggle("hidden", !enabled);
   document.querySelector(".tabela")?.classList.toggle("hidden", !enabled);
@@ -304,8 +359,6 @@ function renderIndicadores(ind) {
   document.getElementById("ind-altas").textContent = ind.altas;
   document.getElementById("ind-obitos").textContent = ind.obitos;
   document.getElementById("ind-bloqueados").textContent = ind.leitos_bloqueados;
-  document.getElementById("input-altas").value = ind.altas;
-  document.getElementById("input-obitos").value = ind.obitos;
 }
 
 function renderBarGroup(containerId, items, options = {}) {
@@ -397,6 +450,34 @@ function setShiftFeedback(message = "", isError = false) {
   feedback.textContent = message;
   feedback.classList.toggle("hidden", !message);
   feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function setPatientLookupFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("modal-patient-lookup");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function setPatientIdentityDisplay(name = "", birthDate = "") {
+  const nameField = document.getElementById("modal-patient-name-display");
+  const ageField = document.getElementById("modal-patient-age-display");
+  if (nameField) {
+    nameField.textContent = name || "Será preenchido automaticamente";
+    nameField.classList.toggle("is-placeholder", !name);
+  }
+  if (ageField) {
+    const ageText = birthDate ? `${getPatientAgeLabel(birthDate)}${toBRDate(birthDate) ? ` • Nascimento ${toBRDate(birthDate)}` : ""}` : "";
+    ageField.textContent = ageText || "Será preenchida automaticamente";
+    ageField.classList.toggle("is-placeholder", !ageText);
+  }
+}
+
+function toggleCreatePatientButton(visible = false) {
+  const button = document.getElementById("btn-modal-create-patient");
+  if (!button) return;
+  button.classList.toggle("hidden", !visible);
 }
 
 function normalizeShiftLength(value) {
@@ -524,6 +605,140 @@ function renderShiftTeamSummary() {
     row.className = "shift-team-row";
     row.innerHTML = `<strong>${label}</strong><span>${value}</span>`;
     container.appendChild(row);
+  }
+}
+
+async function findPatientRegistryByCpf(cpf) {
+  const digits = normalizeCpf(cpf);
+  if (digits.length !== 11) return null;
+
+  try {
+    const data = await api(`/api/patients?search=${encodeURIComponent(digits)}`);
+    return (data.patients || []).find(patient => normalizeCpf(patient.cpf) === digits) || null;
+  } catch {
+    return registeredPatients.find(patient => normalizeCpf(patient.cpf) === digits) || null;
+  }
+}
+
+function applyRegistryPatientToBedForm(patient, options = {}) {
+  const { keepTypedCpf = false } = options;
+  selectedRegistryPatient = patient || null;
+  if (!patient) {
+    setPatientIdentityDisplay("", "");
+    setPatientLookupFeedback("");
+    toggleCreatePatientButton(false);
+    return;
+  }
+
+  if (!keepTypedCpf) {
+    document.getElementById("modal-nome").value = formatCpf(patient.cpf || "");
+  }
+  document.getElementById("modal-nir").value = patient.nir || "";
+  document.getElementById("modal-cil").value = patient.cil || "";
+  setPatientIdentityDisplay(patient.nome || "", patient.birthDate || "");
+  toggleCreatePatientButton(false);
+
+  const details = [];
+  if (patient.nome) details.push(patient.nome);
+  if (patient.birthDate) details.push(`Nascimento ${toBRDate(patient.birthDate)}`);
+  setPatientLookupFeedback(`Paciente localizado: ${details.join(" • ") || formatCpf(patient.cpf || "")}`);
+}
+
+function openPatientRegistryFromBedCpf() {
+  const typedCpf = document.getElementById("modal-nome").value;
+  const digits = normalizeCpf(typedCpf);
+
+  if (digits.length !== 11) {
+    setPatientLookupFeedback("Digite um CPF válido com 11 dígitos para realizar o cadastro.", true);
+    toggleCreatePatientButton(false);
+    return;
+  }
+
+  pendingBedRegistryLink = { bedId: currentBedId, cpf: digits };
+  document.getElementById("modal-paciente")?.close();
+  openNewPatientRegistry({ cpf: digits });
+}
+
+async function resolvePatientFromBedCpf(options = {}) {
+  const { openRegistryIfMissing = false } = options;
+  const typedCpf = document.getElementById("modal-nome").value;
+  const digits = normalizeCpf(typedCpf);
+
+  if (!digits) {
+    selectedRegistryPatient = null;
+    setPatientLookupFeedback("");
+    toggleCreatePatientButton(false);
+    return null;
+  }
+
+  if (digits.length !== 11) {
+    selectedRegistryPatient = null;
+    setPatientLookupFeedback("Digite um CPF com 11 dígitos para localizar o paciente.", true);
+    toggleCreatePatientButton(false);
+    return null;
+  }
+
+  const patient = await findPatientRegistryByCpf(digits);
+  if (patient) {
+    applyRegistryPatientToBedForm(patient);
+    return patient;
+  }
+
+  selectedRegistryPatient = null;
+  setPatientLookupFeedback("CPF não encontrado. Cadastre o paciente para vincular este leito.", true);
+  toggleCreatePatientButton(true);
+  if (openRegistryIfMissing) {
+    openPatientRegistryFromBedCpf();
+  }
+  return null;
+}
+
+function getHeaderTeamData() {
+  const activeShift = currentUser?.activeShift || null;
+  const activeShiftMatchesWard = Boolean(activeShift && Number(activeShift.wardId) === Number(currentWardId));
+  const sourceTeam = activeShiftMatchesWard ? (activeShift.team || {}) : (ward?.equipe || {});
+  const shiftDate = activeShiftMatchesWard ? (activeShift.shiftDate || getTodayIsoDate()) : (ward?.data || toBRDate(getTodayIsoDate()));
+  return {
+    shiftDate,
+    medico: sourceTeam.medicoPlantao || "",
+    enfermeiro: sourceTeam.enfermeiroDia || sourceTeam.enfermeiroNoite || "",
+    tecnico: sourceTeam.tecnicosDia || sourceTeam.tecnicosNoite || ""
+  };
+}
+
+function renderHeaderTeamPanel() {
+  const panel = document.getElementById("header-team-panel");
+  const list = document.getElementById("header-team-list");
+  const dateLabel = document.getElementById("header-team-date");
+  if (!panel || !list || !dateLabel) return;
+
+  const isVisible = Boolean(currentWardId && ward);
+  panel.classList.toggle("hidden", !isVisible);
+  if (!isVisible) return;
+
+  const team = getHeaderTeamData();
+  dateLabel.textContent = `Data: ${team.shiftDate || ward?.data || "-"}`;
+  list.innerHTML = "";
+
+  const items = [
+    ["Medico", team.medico],
+    ["Enfermeiro", team.enfermeiro],
+    ["Tecnico", team.tecnico]
+  ].filter(([, value]) => value);
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "header-team-empty";
+    empty.textContent = "Nenhuma equipe cadastrada para este setor nesta data.";
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const [label, value] of items) {
+    const card = document.createElement("div");
+    card.className = "header-team-card";
+    card.innerHTML = `<strong>${label}</strong><span>${value}</span>`;
+    list.appendChild(card);
   }
 }
 
@@ -933,19 +1148,21 @@ function fillPatientRegistryModal(patient) {
   document.getElementById("patient-registry-name").value = patient.nome || "";
   document.getElementById("patient-registry-cpf").value = formatCpf(patient.cpf || "");
   document.getElementById("patient-registry-birthdate").value = patient.birthDate || "";
-  document.getElementById("patient-registry-nir").value = patient.nir || "";
+  document.getElementById("patient-registry-cil").value = patient.cil || "";
+  setPatientRegulationChannels(patient.regulationChannels || []);
   renderPatientCurrentAdmission(patient.currentAdmission || null);
   renderPatientAdmissionHistory(patient.admissionHistory || []);
   document.getElementById("patient-registry-delete").disabled = Boolean(patient.currentAdmission);
 }
 
-function openNewPatientRegistry() {
+function openNewPatientRegistry(prefill = {}) {
   fillPatientRegistryModal({
     id: null,
-    nome: "",
-    cpf: "",
-    birthDate: "",
-    nir: "",
+    nome: prefill.nome || "",
+    cpf: prefill.cpf || "",
+    birthDate: prefill.birthDate || "",
+    cil: prefill.cil || "",
+    regulationChannels: Array.isArray(prefill.regulationChannels) ? prefill.regulationChannels : [],
     currentAdmission: null,
     admissionHistory: []
   });
@@ -994,6 +1211,443 @@ function renderRegisteredPatients(items) {
   }
 }
 
+function setNirFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("nir-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function setNirReportFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("nir-report-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function getPatientRegulationChannels() {
+  const channels = [];
+  if (document.getElementById("patient-regulation-email")?.checked) channels.push("EMAIL");
+  if (document.getElementById("patient-regulation-cil")?.checked) channels.push("CIL");
+  return channels;
+}
+
+function setPatientRegulationChannels(channels = []) {
+  const normalized = Array.isArray(channels) ? channels.map(item => String(item || "").toUpperCase()) : [];
+  const emailInput = document.getElementById("patient-regulation-email");
+  const cilInput = document.getElementById("patient-regulation-cil");
+  if (emailInput) emailInput.checked = normalized.includes("EMAIL");
+  if (cilInput) cilInput.checked = normalized.includes("CIL");
+}
+
+function renderNirPreviousReports(previousItems = [], otherItems = []) {
+  nirPreviousReports = Array.isArray(previousItems) ? previousItems : [];
+  nirOtherUserReports = Array.isArray(otherItems) ? otherItems : [];
+  const container = document.getElementById("nir-previous-reports");
+  if (!container) return;
+
+  container.innerHTML = "";
+  const combinedReports = [
+    ...nirOtherUserReports.map(item => ({ ...item, sourceLabel: "Outro login hoje" })),
+    ...nirPreviousReports.map(item => ({ ...item, sourceLabel: "Plantão anterior" }))
+  ];
+  if (!combinedReports.length) {
+    const empty = document.createElement("div");
+    empty.className = "chart-empty";
+    empty.textContent = "Nenhum relatório encontrado em outros logins ou no plantão anterior.";
+    container.appendChild(empty);
+    return;
+  }
+
+  for (const item of combinedReports) {
+    const card = document.createElement("div");
+    card.className = "patient-history-card";
+    card.innerHTML = `
+      <strong>${item.authorName || "-"}</strong>
+      <span>${item.sourceLabel || "-"}${item.operationalDay ? ` • Dia ${toBRDate(item.operationalDay)}` : "-"}${item.updatedAt ? ` • Atualizado em ${toBRDateTime(item.updatedAt)}` : ""}</span>
+      <span>${item.content || "-"}</span>
+      <button type="button" class="ghost btn-open-previous-nir-report" data-report-id="${item.id || ""}">Abrir relatório</button>
+    `;
+    container.appendChild(card);
+  }
+}
+
+function renderNirCurrentReport(report) {
+  nirCurrentReport = report || null;
+  const container = document.getElementById("nir-current-report-saved");
+  if (!container) return;
+
+  container.innerHTML = "";
+  if (!nirCurrentReport?.content) {
+    const empty = document.createElement("span");
+    empty.textContent = "Nenhum relatório salvo para este dia operacional.";
+    container.appendChild(empty);
+    return;
+  }
+
+  const author = document.createElement("strong");
+  author.textContent = nirCurrentReport.authorName || currentUser?.nome || currentUser?.username || "-";
+  const meta = document.createElement("span");
+  meta.textContent = `${nirCurrentReport.operationalDay ? `Dia ${toBRDate(nirCurrentReport.operationalDay)}` : "-"}${nirCurrentReport.updatedAt ? ` • Salvo em ${toBRDateTime(nirCurrentReport.updatedAt)}` : ""}`;
+  const content = document.createElement("span");
+  content.textContent = nirCurrentReport.content || "";
+  container.append(author, meta, content);
+}
+
+async function loadNirReports() {
+  try {
+    const data = await api("/api/nir/reports");
+    nirCurrentReport = data.currentReport || null;
+    const input = document.getElementById("nir-current-report-input");
+    if (input) input.value = nirCurrentReport?.content || "";
+    renderNirCurrentReport(nirCurrentReport);
+    renderNirPreviousReports(data.previousReports || [], data.otherUserReports || []);
+    setNirReportFeedback("");
+  } catch (error) {
+    renderNirCurrentReport(null);
+    renderNirPreviousReports([], []);
+    setNirReportFeedback(error.message || "Não foi possível carregar o relatório do NIR.", true);
+  }
+}
+
+async function saveNirReport() {
+  const input = document.getElementById("nir-current-report-input");
+  const content = input?.value.trim() || "";
+  if (!content) {
+    setNirReportFeedback("Digite o relatório do enfermeiro antes de salvar.", true);
+    return;
+  }
+
+  try {
+    const data = await api("/api/nir/reports", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content })
+    });
+    nirCurrentReport = data.currentReport || null;
+    renderNirCurrentReport(nirCurrentReport);
+    renderNirPreviousReports(data.previousReports || [], data.otherUserReports || []);
+    setNirReportFeedback("Relatório do enfermeiro salvo com sucesso.");
+  } catch (error) {
+    setNirReportFeedback(error.message || "Não foi possível salvar o relatório do NIR.", true);
+  }
+}
+
+function printNirReport() {
+  const operationalDate = toBRDate(getOperationalDayKey(new Date())) || "-";
+  const reportText = nirCurrentReport?.content || document.getElementById("nir-current-report-input")?.value.trim() || "Nenhum relatório salvo.";
+  const allPatients = [...nirPatients, ...nirAcceptedPatients];
+  const uniquePatients = allPatients.filter((patient, index, list) => (
+    list.findIndex(item => String(item.id) === String(patient.id)) === index
+  ));
+  const cilPatients = uniquePatients.filter(patient => (
+    String(patient.cil || "").trim()
+    || (Array.isArray(patient.regulationChannels) && patient.regulationChannels.includes("CIL"))
+    || (Array.isArray(patient.nirUpdateChannels) && patient.nirUpdateChannels.includes("CIL"))
+  ));
+  const popup = window.open("", "_blank", "noopener,noreferrer,width=1200,height=900");
+  if (!popup) {
+    setNirReportFeedback("Não foi possível abrir a janela de impressão.", true);
+    return;
+  }
+
+  setNirReportFeedback("Folha do relatório aberta. Na nova aba, clique em 'Imprimir / Salvar PDF'.");
+
+  popup.document.write(`<!DOCTYPE html>
+  <html lang="pt-BR">
+    <head>
+      <meta charset="utf-8">
+      <title>PDF do Plantão</title>
+      <style>
+        body { font-family: Arial, sans-serif; margin: 0; background: #e5edf5; color: #102a43; }
+        .toolbar { position: sticky; top: 0; z-index: 10; display: flex; gap: 12px; align-items: center; padding: 14px 18px; background: #102a43; color: #fff; }
+        .toolbar button { padding: 10px 16px; border: 0; border-radius: 8px; background: #16a34a; color: #fff; font-weight: 700; cursor: pointer; }
+        .toolbar span { font-size: 14px; }
+        .page-wrap { padding: 24px; display: flex; justify-content: center; }
+        .sheet { width: 210mm; min-height: 297mm; background: #fff; box-shadow: 0 12px 40px rgba(16, 42, 67, 0.18); padding: 18mm 14mm; }
+        h1, h2, h3 { margin: 0 0 12px; }
+        .meta { margin-bottom: 20px; font-weight: 700; }
+        .section { margin-top: 22px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #8ea3c2; padding: 8px; font-size: 12px; text-align: left; vertical-align: top; }
+        th { background: #c4d8f4; }
+        .empty { padding: 12px; border: 1px solid #8ea3c2; background: #f8fbff; }
+        .print-report { border: 1px solid #8ea3c2; background: #f8fbff; padding: 12px; white-space: pre-wrap; }
+        @media print {
+          body { background: #fff; }
+          .toolbar { display: none; }
+          .page-wrap { padding: 0; }
+          .sheet { width: auto; min-height: auto; box-shadow: none; padding: 0; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="toolbar">
+        <button onclick="window.print()">Imprimir / Salvar PDF</button>
+        <span>Visualização da folha do relatório do plantão.</span>
+      </div>
+      <div class="page-wrap">
+        <div class="sheet">
+          <h1>Relatório do Plantão</h1>
+          <div class="meta">Data: ${escapeHtml(operationalDate)} | Enfermeiro: ${escapeHtml(currentUser?.nome || currentUser?.username || "-")}</div>
+          <div class="section">
+            <h2>Pacientes em CIL</h2>
+            ${buildNirPrintTable(cilPatients, "Nenhum paciente em CIL neste dia operacional.")}
+          </div>
+          <div class="section">
+            <h2>Pacientes Aceitos</h2>
+            ${buildNirPrintTable(nirAcceptedPatients, "Nenhum paciente aceito neste dia operacional.")}
+          </div>
+          <div class="section">
+            <h2>Relatório de Enfermagem</h2>
+            <div class="print-report">${escapeHtml(reportText)}</div>
+          </div>
+        </div>
+      </div>
+    </body>
+  </html>`);
+  popup.document.close();
+  popup.focus();
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function buildNirPrintTable(items = [], emptyMessage = "Nenhum paciente.") {
+  if (!items.length) return `<div class="empty">${escapeHtml(emptyMessage)}</div>`;
+  const rows = items.map(patient => {
+    const current = patient.currentAdmission || {};
+    const via = Array.isArray(patient.regulationChannels) && patient.regulationChannels.length ? patient.regulationChannels.join(" / ") : "-";
+    const accepted = patient.regulationAcceptedAt ? toBRDateTime(patient.regulationAcceptedAt) : "-";
+    return `
+      <tr>
+        <td>${escapeHtml(current.wardNome || "-")}</td>
+        <td>${escapeHtml(patient.nome || "-")}<br>CPF ${escapeHtml(formatCpf(patient.cpf || "") || "-")}</td>
+        <td>${escapeHtml(current.bedId || "-")}</td>
+        <td>${escapeHtml(patient.nir || "-")}</td>
+        <td>${escapeHtml(patient.cil || "-")}</td>
+        <td>${escapeHtml(via)}</td>
+        <td>${escapeHtml(accepted)}</td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <table>
+      <thead>
+        <tr>
+          <th>Setor</th>
+          <th>Paciente</th>
+          <th>Leito</th>
+          <th>NIR</th>
+          <th>CIL</th>
+          <th>Via</th>
+          <th>Aceito em</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function openPreviousNirReport(reportId) {
+  const report = [...nirPreviousReports, ...nirOtherUserReports].find(item => String(item.id) === String(reportId));
+  if (!report) return;
+  const title = document.getElementById("nir-report-view-title");
+  const meta = document.getElementById("nir-report-view-meta");
+  const content = document.getElementById("nir-report-view-content");
+  if (title) title.textContent = `Relatório de ${report.authorName || "-"}`;
+  if (meta) meta.textContent = `${report.operationalDay ? `Dia ${toBRDate(report.operationalDay)}` : "-"}${report.updatedAt ? ` • Atualizado em ${toBRDateTime(report.updatedAt)}` : ""}`;
+  if (content) {
+    content.innerHTML = "";
+    const text = document.createElement("span");
+    text.textContent = report.content || "";
+    content.appendChild(text);
+  }
+  document.getElementById("modal-nir-report-view")?.showModal();
+}
+
+function renderNirPatients(items) {
+  nirPatients = Array.isArray(items) ? items : [];
+  const container = document.getElementById("nir-list");
+  const empty = document.getElementById("nir-list-empty");
+  const dateLabel = document.getElementById("nir-report-date");
+  const nurseLabel = document.getElementById("nir-report-nurse");
+  if (!container || !empty) return;
+
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", nirPatients.length > 0);
+  if (dateLabel) dateLabel.textContent = `DATA: ${toBRDate(getOperationalDayKey(new Date())) || "-"}`;
+  if (nurseLabel) nurseLabel.textContent = `ENFERMEIRO: ${currentUser?.nome || currentUser?.username || "-"}`;
+
+  for (const patient of nirPatients) {
+    const row = document.createElement("tr");
+    const current = patient.currentAdmission;
+    const currentWard = current?.wardNome || "-";
+    const currentBed = current?.bedId || "-";
+    const admittedAt = current?.admittedAt ? toBRDate(current.admittedAt) : "-";
+    const regulationDate = patient.updatedAt ? toBRDate(String(patient.updatedAt).slice(0, 10)) : "-";
+    const updatedToday = isUpdatedInCurrentOperationalDay(patient.nirLastUpdateAt);
+    const updateLabel = updatedToday ? "SIM" : "ATUALIZAR";
+    const updateChannels = Array.isArray(patient.nirUpdateChannels) && patient.nirUpdateChannels.length
+      ? patient.nirUpdateChannels.join(" / ")
+      : "";
+    const updateTooltip = patient.nirLastUpdateAt
+      ? `Última atualização: ${toBRDateTime(patient.nirLastUpdateAt)}${patient.nirLastUpdateBy ? ` • ${patient.nirLastUpdateBy}` : ""}${updateChannels ? ` • ${updateChannels}` : ""}`
+      : "Clique para registrar atualização de CIL ou EMAIL.";
+    const specialty = patient.nir || patient.diagnostico || "-";
+    const regulationChannels = Array.isArray(patient.regulationChannels) && patient.regulationChannels.length
+      ? patient.regulationChannels.join(" / ")
+      : "-";
+    const acceptedLabel = patient.regulationAcceptedAt ? `Aceito em ${toBRDateTime(patient.regulationAcceptedAt)}` : "Ainda aguardando aceite";
+    row.innerHTML = `
+      <td>${currentWard}</td>
+      <td>
+        <strong>${patient.nome || "-"}</strong>
+        <span>CPF ${formatCpf(patient.cpf || "") || "-"}</span>
+      </td>
+      <td>${currentBed}</td>
+      <td><strong>${patient.nir || "-"}</strong><span>Via ${regulationChannels}</span></td>
+      <td>${admittedAt}</td>
+      <td>${specialty}</td>
+      <td>${regulationDate}</td>
+      <td>${patient.cil || "-"}</td>
+      <td class="${updatedToday ? "nir-table-yes" : "nir-table-no"}">
+        <button type="button" class="nir-status-button ${updatedToday ? "is-updated" : "is-pending"} btn-nir-status" data-id="${patient.id}" title="${updateTooltip}">${updateLabel}</button>
+      </td>
+      <td>
+        <div class="nir-actions">
+          <button type="button" class="ghost btn-nir-open" data-id="${patient.id}">Abrir</button>
+          <button type="button" class="ghost btn-nir-accept" data-id="${patient.id}" title="${acceptedLabel}">Aceito</button>
+        </div>
+      </td>
+    `;
+    container.appendChild(row);
+  }
+}
+
+function renderNirAcceptedPatients(items) {
+  nirAcceptedPatients = Array.isArray(items) ? items : [];
+  const container = document.getElementById("nir-accepted-list");
+  const empty = document.getElementById("nir-accepted-list-empty");
+  if (!container || !empty) return;
+
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", nirAcceptedPatients.length > 0);
+
+  for (const patient of nirAcceptedPatients) {
+    const row = document.createElement("tr");
+    const current = patient.currentAdmission;
+    const currentWard = current?.wardNome || "-";
+    const currentBed = current?.bedId || "-";
+    const admittedAt = current?.admittedAt ? toBRDate(current.admittedAt) : "-";
+    const regulationDate = patient.updatedAt ? toBRDate(String(patient.updatedAt).slice(0, 10)) : "-";
+    const specialty = patient.nir || patient.diagnostico || "-";
+    const acceptedAt = patient.regulationAcceptedAt ? toBRDateTime(patient.regulationAcceptedAt) : "-";
+    const regulationChannels = Array.isArray(patient.regulationChannels) && patient.regulationChannels.length
+      ? patient.regulationChannels.join(" / ")
+      : "-";
+    row.innerHTML = `
+      <td>${currentWard}</td>
+      <td>
+        <strong>${patient.nome || "-"}</strong>
+        <span>CPF ${formatCpf(patient.cpf || "") || "-"}</span>
+      </td>
+      <td>${currentBed}</td>
+      <td><strong>${patient.nir || "-"}</strong><span>Via ${regulationChannels}</span></td>
+      <td>${admittedAt}</td>
+      <td>${specialty}</td>
+      <td>${regulationDate}</td>
+      <td>${patient.cil || "-"}</td>
+      <td>${acceptedAt}</td>
+      <td>
+        <div class="nir-actions">
+          <button type="button" class="ghost btn-nir-open" data-id="${patient.id}">Abrir</button>
+        </div>
+      </td>
+    `;
+    container.appendChild(row);
+  }
+}
+
+async function markNirPatientUpdated(patientId) {
+  const patient = nirPatients.find(item => String(item.id) === String(patientId))
+    || registeredPatients.find(item => String(item.id) === String(patientId));
+  if (!patient) return;
+
+  const updatedCil = window.confirm(`Paciente: ${patient.nome || "-"}\n\nHouve atualização na CIL?`);
+  const updatedEmail = window.confirm(`Paciente: ${patient.nome || "-"}\n\nHouve atualização no EMAIL?`);
+  const channels = [];
+  if (updatedCil) channels.push("CIL");
+  if (updatedEmail) channels.push("EMAIL");
+
+  if (!channels.length) {
+    setNirFeedback("Nenhuma atualização foi registrada para este paciente.", true);
+    return;
+  }
+
+  try {
+    await api(`/api/patients/${patientId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nome: patient.nome || "",
+        cpf: normalizeCpf(patient.cpf || ""),
+        birthDate: patient.birthDate || "",
+        diagnostico: patient.diagnostico || "",
+        nir: patient.nir || "",
+        cil: patient.cil || "",
+        regulationChannels: patient.regulationChannels || [],
+        nirLastUpdateAt: new Date().toISOString(),
+        nirLastUpdateBy: currentUser?.nome || currentUser?.username || "",
+        nirUpdateChannels: channels
+      })
+    });
+    await loadNirPatientsView();
+    setNirFeedback(`Atualização registrada para ${patient.nome || "o paciente"}: ${channels.join(" / ")}.`);
+  } catch (error) {
+    setNirFeedback(error.message || "Não foi possível registrar a atualização do NIR.", true);
+  }
+}
+
+async function markNirPatientAccepted(patientId) {
+  const patient = nirPatients.find(item => String(item.id) === String(patientId))
+    || registeredPatients.find(item => String(item.id) === String(patientId));
+  if (!patient) return;
+  if (!window.confirm(`Confirmar que o paciente ${patient.nome || "-"} foi aceito?`)) return;
+
+  try {
+    await api(`/api/patients/${patientId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nome: patient.nome || "",
+        cpf: normalizeCpf(patient.cpf || ""),
+        birthDate: patient.birthDate || "",
+        diagnostico: patient.diagnostico || "",
+        nir: patient.nir || "",
+        cil: patient.cil || "",
+        regulationChannels: patient.regulationChannels || [],
+        regulationAcceptedAt: new Date().toISOString(),
+        nirLastUpdateAt: patient.nirLastUpdateAt || "",
+        nirLastUpdateBy: patient.nirLastUpdateBy || "",
+        nirUpdateChannels: patient.nirUpdateChannels || []
+      })
+    });
+    await loadNirPatientsView();
+    setNirFeedback(`Paciente ${patient.nome || "-"} marcado como aceito.`);
+  } catch (error) {
+    setNirFeedback(error.message || "Não foi possível marcar o paciente como aceito.", true);
+  }
+}
+
 async function buildPatientsFallbackList() {
   const wardsData = await api("/api/wards");
   const wardItems = wardsData.wards || [];
@@ -1010,6 +1664,12 @@ async function buildPatientsFallbackList() {
         birthDate: bed.birthDate || "",
         diagnostico: bed.diagnostico || "",
         nir: bed.nir || "",
+        cil: bed.cil || "",
+        regulationChannels: [],
+        regulationAcceptedAt: "",
+        nirLastUpdateAt: "",
+        nirLastUpdateBy: "",
+        nirUpdateChannels: [],
         createdAt: "",
         updatedAt: "",
         admissionCount: 1,
@@ -1038,6 +1698,60 @@ async function buildPatientsFallbackList() {
   }
 
   return patients;
+}
+
+async function loadNirPatientsView() {
+  try {
+    const data = await api("/api/patients");
+    const regulatedAll = (data.patients || [])
+      .filter(patient => {
+        const hasRegulation = String(patient.nir || "").trim()
+          || String(patient.cil || "").trim()
+          || (Array.isArray(patient.regulationChannels) && patient.regulationChannels.length)
+          || String(patient.nirLastUpdateAt || "").trim();
+        return Boolean(hasRegulation);
+      })
+      .sort((a, b) =>
+        Number(Boolean(b.currentAdmission)) - Number(Boolean(a.currentAdmission))
+        || String(a.nome || "").localeCompare(String(b.nome || ""), "pt-BR")
+      );
+    const regulated = regulatedAll.filter(patient => !String(patient.regulationAcceptedAt || "").trim());
+    nirAcceptedPatients = regulatedAll.filter(patient => String(patient.regulationAcceptedAt || "").trim());
+    renderNirPatients(regulated);
+    renderNirAcceptedPatients(nirAcceptedPatients);
+    await loadNirReports();
+    setNirFeedback(`${regulated.length} paciente(s) listado(s) no NIR.`);
+    return regulated;
+  } catch (error) {
+    try {
+      const fallback = await buildPatientsFallbackList();
+      const regulatedAll = fallback
+        .filter(patient => {
+          const hasRegulation = String(patient.nir || "").trim()
+            || String(patient.cil || "").trim()
+            || (Array.isArray(patient.regulationChannels) && patient.regulationChannels.length)
+            || String(patient.nirLastUpdateAt || "").trim();
+          return Boolean(hasRegulation);
+        })
+        .sort((a, b) => String(a.nome || "").localeCompare(String(b.nome || ""), "pt-BR"));
+      const regulated = regulatedAll.filter(patient => !String(patient.regulationAcceptedAt || "").trim());
+      nirAcceptedPatients = regulatedAll.filter(patient => String(patient.regulationAcceptedAt || "").trim());
+      renderNirPatients(regulated);
+      renderNirAcceptedPatients(nirAcceptedPatients);
+      renderNirPreviousReports([], []);
+      renderNirCurrentReport(null);
+      setNirReportFeedback("O relatório do NIR depende da API principal ativa.", true);
+      setNirFeedback("Lista do NIR carregada pelos leitos atuais enquanto a API completa não responde.");
+      return regulated;
+    } catch (fallbackError) {
+      renderNirPatients([]);
+      nirAcceptedPatients = [];
+      renderNirAcceptedPatients([]);
+      renderNirPreviousReports([], []);
+      setNirFeedback(fallbackError.message || error.message || "Não foi possível carregar a lista do NIR.", true);
+      return [];
+    }
+  }
 }
 
 async function loadPatientsRegistry() {
@@ -1181,6 +1895,7 @@ function renderCurrentUser() {
   document.getElementById("shift-status-meta").textContent = activeShift
     ? `${activeShift.wardNome} • ${toBRDate(activeShift.shiftDate || getTodayIsoDate())} • ${activeShift.shiftLength || "12H"} • ${getShiftPeriodLabel(activeShift.shiftPeriod)} • início ${toBRDateTime(activeShift.openedAt)}`
     : "Nenhum plantão aberto";
+  document.getElementById("plantao-details")?.classList.toggle("hidden", !activeShift);
 
   const shiftWard = document.getElementById("shift-ward");
   const shiftLength = document.getElementById("shift-length");
@@ -1205,6 +1920,7 @@ function renderCurrentUser() {
   syncShiftFormVisibility();
   renderShiftTeamForm();
   renderShiftTeamSummary();
+  renderHeaderTeamPanel();
   renderShiftHistory();
 }
 
@@ -1462,14 +2178,31 @@ async function openPatientModal(bedId) {
   const bed = ward.beds.find(b => b.id === bedId);
   if (!bed) return;
   currentBedId = bedId;
+  selectedRegistryPatient = null;
   document.getElementById("modal-title").textContent = `Leito ${bed.id}`;
   document.getElementById("modal-leito").value = `LEITO ${bed.id}`;
   document.getElementById("modal-status").value = bed.status;
-  document.getElementById("modal-nome").value = bed.nome || "";
+  document.getElementById("modal-nome").value = formatCpf(bed.cpf || "");
   document.getElementById("modal-admissao").value = bed.admissao || "";
   document.getElementById("modal-diagnostico").value = bed.diagnostico || "";
   document.getElementById("modal-pendencias").value = "";
   document.getElementById("modal-nir").value = bed.nir || "";
+  document.getElementById("modal-cil").value = bed.cil || "";
+  setPatientIdentityDisplay("", "");
+  toggleCreatePatientButton(false);
+  if (bed.cpf) {
+    const patient = await findPatientRegistryByCpf(bed.cpf);
+    if (patient) {
+      applyRegistryPatientToBedForm(patient);
+    } else {
+      setPatientIdentityDisplay(bed.nome || "", bed.birthDate || "");
+      setPatientLookupFeedback("CPF já informado neste leito, mas ainda sem cadastro localizado.");
+      toggleCreatePatientButton(true);
+    }
+  } else {
+    setPatientIdentityDisplay(bed.nome || "", bed.birthDate || "");
+    setPatientLookupFeedback(bed.nome ? `Paciente atual: ${bed.nome}` : "");
+  }
   const current = new Set();
   for (const el of document.querySelectorAll(".proc-check")) {
     el.checked = current.has(el.value);
@@ -1617,18 +2350,36 @@ async function salvarPaciente() {
     return;
   }
 
-  const nome = document.getElementById("modal-nome").value.trim();
-  if (!nome) {
-    alert("Informe o nome do paciente.");
+  const cpfDigitado = normalizeCpf(document.getElementById("modal-nome").value);
+  if (!cpfDigitado || cpfDigitado.length !== 11) {
+    setPatientLookupFeedback("Digite um CPF válido com 11 dígitos para localizar o paciente.", true);
     return;
   }
+  const patient = selectedRegistryPatient && normalizeCpf(selectedRegistryPatient.cpf) === cpfDigitado
+    ? selectedRegistryPatient
+    : await resolvePatientFromBedCpf({ openRegistryIfMissing: true });
+  if (!patient) return;
+
   const admissao = document.getElementById("modal-admissao").value;
   const diagnostico = document.getElementById("modal-diagnostico").value.trim();
   const pendenciasAdd = document.getElementById("modal-pendencias").value.trim();
-  const nir = document.getElementById("modal-nir").value.trim();
+  const nir = document.getElementById("modal-nir").value.trim() || patient.nir || "";
+  const cil = document.getElementById("modal-cil").value.trim() || patient.cil || "";
   const procedimentos = getSelectedProcedures();
   const pendenciasStatus = getPendingStatusPayload();
-  const payload = { status: "OCUPADO", nome, admissao, diagnostico, pendenciasAdd, pendenciasStatus, nir, procedimentos };
+  const payload = {
+    status: "OCUPADO",
+    nome: patient.nome || "",
+    cpf: normalizeCpf(patient.cpf),
+    birthDate: patient.birthDate || "",
+    admissao,
+    diagnostico,
+    pendenciasAdd,
+    pendenciasStatus,
+    nir,
+    cil,
+    procedimentos
+  };
   await api(`/api/wards/${currentWardId}/beds/${currentBedId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -1699,6 +2450,7 @@ async function load() {
   transferWardCache.set(currentWardId, ward);
   document.getElementById("header-title").textContent = ward.nome;
   document.getElementById("date").textContent = ward.data;
+  renderHeaderTeamPanel();
   renderCounts(ward.counts);
   renderIndicadores(ward.indicadores);
   renderBeds(ward.beds);
@@ -1714,18 +2466,6 @@ async function load() {
     target?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 }
-
-document.getElementById("salvar-indicadores").addEventListener("click", async () => {
-  const altas = parseInt(document.getElementById("input-altas").value || "0", 10);
-  const obitos = parseInt(document.getElementById("input-obitos").value || "0", 10);
-  const res = await api(`/api/wards/${currentWardId}/indicadores`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ altas, obitos })
-  });
-  renderIndicadores(res.indicadores);
-  await refreshCurrentUser();
-});
 
 document.getElementById("salvar-equipe").addEventListener("click", async () => {
   if (!currentUser?.activeShift) {
@@ -2337,6 +3077,7 @@ async function openSelectedWard(wardId) {
   document.getElementById("nav-home")?.classList.remove("ghost");
   document.getElementById("nav-dashboard")?.classList.add("ghost");
   document.getElementById("nav-patients")?.classList.add("ghost");
+  document.getElementById("nav-nir")?.classList.add("ghost");
   document.getElementById("nav-gerenciar")?.classList.add("ghost");
   await load();
   updateTopbarWardSelectors();
@@ -2360,6 +3101,7 @@ async function openTopbarWard() {
   document.getElementById("nav-home")?.classList.remove("ghost");
   document.getElementById("nav-dashboard")?.classList.add("ghost");
   document.getElementById("nav-patients")?.classList.add("ghost");
+  document.getElementById("nav-nir")?.classList.add("ghost");
   document.getElementById("nav-gerenciar")?.classList.add("ghost");
   await load();
   updateTopbarWardSelectors();
@@ -2379,6 +3121,7 @@ async function openTopbarEnfermaria() {
   document.getElementById("nav-home")?.classList.remove("ghost");
   document.getElementById("nav-dashboard")?.classList.add("ghost");
   document.getElementById("nav-patients")?.classList.add("ghost");
+  document.getElementById("nav-nir")?.classList.add("ghost");
   document.getElementById("nav-gerenciar")?.classList.add("ghost");
   await load();
   updateTopbarWardSelectors();
@@ -2392,16 +3135,26 @@ async function openPatientsView() {
   closeSidebarOnMobile();
 }
 
+async function openNirView() {
+  await refreshWards();
+  setAppEnabled(false);
+  showOnly("view-nir");
+  await loadNirPatientsView();
+  closeSidebarOnMobile();
+}
+
 async function savePatientRegistry() {
   const payload = {
     nome: document.getElementById("patient-registry-name").value.trim(),
     cpf: normalizeCpf(document.getElementById("patient-registry-cpf").value),
     birthDate: document.getElementById("patient-registry-birthdate").value,
-    nir: document.getElementById("patient-registry-nir").value.trim()
+    cil: document.getElementById("patient-registry-cil").value.trim(),
+    regulationChannels: getPatientRegulationChannels()
   };
 
   try {
     const isNew = !currentPatientRecord?.id;
+    const pendingLink = pendingBedRegistryLink;
     const saved = await api(isNew ? "/api/patients" : `/api/patients/${currentPatientRecord.id}`, {
       method: isNew ? "POST" : "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -2412,8 +3165,15 @@ async function savePatientRegistry() {
     currentPatientRecord = saved?.patient || null;
     setPatientsFeedback(isNew ? "Paciente cadastrado com sucesso." : "Cadastro do paciente atualizado com sucesso.");
     await loadPatientsRegistry();
+    await loadNirPatientsView();
     if (currentWardId && currentPatientRecord?.currentAdmission?.wardId === currentWardId) {
       await load();
+    }
+    if (pendingLink?.bedId && normalizeCpf(payload.cpf) === normalizeCpf(pendingLink.cpf)) {
+      pendingBedRegistryLink = null;
+      await openPatientModal(pendingLink.bedId);
+      applyRegistryPatientToBedForm(saved?.patient || currentPatientRecord);
+      setPatientLookupFeedback("CPF cadastrado com sucesso. Agora conclua o registro do leito.");
     }
   } catch (error) {
     setPatientsFeedback(error.message || "Não foi possível salvar o paciente.", true);
@@ -2511,6 +3271,7 @@ document.getElementById("header-ward-tabs")?.addEventListener("click", async eve
   document.getElementById("nav-home")?.classList.remove("ghost");
   document.getElementById("nav-dashboard")?.classList.add("ghost");
   document.getElementById("nav-patients")?.classList.add("ghost");
+  document.getElementById("nav-nir")?.classList.add("ghost");
   document.getElementById("nav-gerenciar")?.classList.add("ghost");
   await load();
   updateTopbarWardSelectors();
@@ -2561,6 +3322,7 @@ document.getElementById("nav-home")?.addEventListener("click", async () => {
 });
 
 document.getElementById("nav-patients")?.addEventListener("click", openPatientsView);
+document.getElementById("nav-nir")?.addEventListener("click", openNirView);
 
 document.getElementById("btn-patient-new")?.addEventListener("click", openNewPatientRegistry);
 
@@ -2583,6 +3345,30 @@ document.getElementById("patients-list")?.addEventListener("click", async event 
   }
 });
 
+document.getElementById("nir-list")?.addEventListener("click", async event => {
+  const statusButton = event.target.closest(".btn-nir-status");
+  if (statusButton) {
+    await markNirPatientUpdated(statusButton.dataset.id);
+    return;
+  }
+
+  const acceptButton = event.target.closest(".btn-nir-accept");
+  if (acceptButton) {
+    await markNirPatientAccepted(acceptButton.dataset.id);
+    return;
+  }
+
+  const openButton = event.target.closest(".btn-nir-open");
+  if (!openButton) return;
+  await openPatientRegistry(openButton.dataset.id);
+});
+
+document.getElementById("nir-previous-reports")?.addEventListener("click", event => {
+  const button = event.target.closest(".btn-open-previous-nir-report");
+  if (!button) return;
+  openPreviousNirReport(button.dataset.reportId);
+});
+
 document.getElementById("patients-search")?.addEventListener("keydown", async event => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -2594,6 +3380,27 @@ document.getElementById("patient-registry-cpf")?.addEventListener("input", event
   event.target.value = formatCpf(event.target.value);
 });
 
+document.getElementById("modal-nome")?.addEventListener("input", event => {
+  event.target.value = formatCpf(event.target.value);
+  selectedRegistryPatient = null;
+  setPatientLookupFeedback("");
+  toggleCreatePatientButton(false);
+});
+
+document.getElementById("modal-nome")?.addEventListener("blur", async () => {
+  await resolvePatientFromBedCpf({ openRegistryIfMissing: true });
+});
+
+document.getElementById("btn-modal-search-patient")?.addEventListener("click", async event => {
+  event.preventDefault();
+  await resolvePatientFromBedCpf({ openRegistryIfMissing: true });
+});
+
+document.getElementById("btn-modal-create-patient")?.addEventListener("click", event => {
+  event.preventDefault();
+  openPatientRegistryFromBedCpf();
+});
+
 document.getElementById("admin-user-cpf")?.addEventListener("input", event => {
   event.target.value = formatCpf(event.target.value);
 });
@@ -2601,6 +3408,16 @@ document.getElementById("admin-user-cpf")?.addEventListener("input", event => {
 document.getElementById("patient-registry-save")?.addEventListener("click", async event => {
   event.preventDefault();
   await savePatientRegistry();
+});
+
+document.getElementById("btn-save-nir-report")?.addEventListener("click", async event => {
+  event.preventDefault();
+  await saveNirReport();
+});
+
+document.getElementById("btn-print-nir-report")?.addEventListener("click", event => {
+  event.preventDefault();
+  printNirReport();
 });
 
 document.getElementById("patient-registry-delete")?.addEventListener("click", async event => {

@@ -31,6 +31,7 @@ const users = [{
   actions: []
 }];
 const patientRegistry = [];
+const nirDailyReports = [];
 const sessions = new Map();
 const storageStatus = {
   provider: "supabase",
@@ -161,6 +162,7 @@ function buildStatePayload() {
     nextPatientId,
     users,
     patientRegistry,
+    nirDailyReports,
     wards
   };
 }
@@ -213,11 +215,31 @@ function applyStatePayload(payload) {
         birthDate: patient.birthDate || "",
         diagnostico: patient.diagnostico || "",
         nir: patient.nir || "",
+        cil: patient.cil || "",
+        regulationChannels: Array.isArray(patient.regulationChannels) ? patient.regulationChannels : [],
+        regulationAcceptedAt: patient.regulationAcceptedAt || "",
+        nirLastUpdateAt: patient.nirLastUpdateAt || "",
+        nirLastUpdateBy: patient.nirLastUpdateBy || "",
+        nirUpdateChannels: Array.isArray(patient.nirUpdateChannels) ? patient.nirUpdateChannels : [],
         createdAt: patient.createdAt || new Date().toISOString(),
         updatedAt: patient.updatedAt || new Date().toISOString(),
         deletedAt: patient.deletedAt || null,
         currentAdmission: patient.currentAdmission || null,
         admissionHistory: Array.isArray(patient.admissionHistory) ? patient.admissionHistory : []
+      });
+    }
+  }
+  nirDailyReports.length = 0;
+  if (Array.isArray(payload.nirDailyReports)) {
+    for (const report of payload.nirDailyReports) {
+      nirDailyReports.push({
+        id: report.id || createRecordId(),
+        operationalDay: report.operationalDay || "",
+        authorUsername: report.authorUsername || "",
+        authorName: report.authorName || "",
+        content: report.content || "",
+        createdAt: report.createdAt || new Date().toISOString(),
+        updatedAt: report.updatedAt || new Date().toISOString()
       });
     }
   }
@@ -452,6 +474,21 @@ function getCurrentIsoDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function getOperationalDate(baseValue = new Date()) {
+  const date = baseValue instanceof Date ? new Date(baseValue) : new Date(baseValue);
+  if (Number.isNaN(date.getTime())) return new Date();
+  date.setHours(date.getHours() - 7);
+  return date;
+}
+
+function getOperationalDayKey(baseValue = new Date()) {
+  const date = getOperationalDate(baseValue);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function isBedOccupiedByPatient(bed) {
   return String(bed?.status || "").toUpperCase() === "OCUPADO" && Boolean(String(bed?.nome || "").trim());
 }
@@ -500,6 +537,12 @@ function createPatientRecordFromBed(bed) {
     birthDate: bed.birthDate || "",
     diagnostico: bed.diagnostico || "",
     nir: bed.nir || "",
+    cil: bed.cil || "",
+    regulationChannels: [],
+    regulationAcceptedAt: "",
+    nirLastUpdateAt: "",
+    nirLastUpdateBy: "",
+    nirUpdateChannels: [],
     createdAt: now,
     updatedAt: now,
     deletedAt: null,
@@ -517,6 +560,12 @@ function createEmptyPatientRecord(payload = {}) {
     birthDate: String(payload.birthDate || "").trim(),
     diagnostico: String(payload.diagnostico || "").trim(),
     nir: String(payload.nir || "").trim(),
+    cil: String(payload.cil || "").trim(),
+    regulationChannels: Array.isArray(payload.regulationChannels) ? payload.regulationChannels : [],
+    regulationAcceptedAt: String(payload.regulationAcceptedAt || "").trim(),
+    nirLastUpdateAt: String(payload.nirLastUpdateAt || "").trim(),
+    nirLastUpdateBy: String(payload.nirLastUpdateBy || "").trim(),
+    nirUpdateChannels: Array.isArray(payload.nirUpdateChannels) ? payload.nirUpdateChannels : [],
     createdAt: now,
     updatedAt: now,
     deletedAt: null,
@@ -536,6 +585,7 @@ function ensurePatientRecordFromBed(bed) {
   patient.birthDate = bed.birthDate || patient.birthDate || "";
   patient.diagnostico = bed.diagnostico || "";
   patient.nir = bed.nir || "";
+  patient.cil = bed.cil || "";
   patient.deletedAt = null;
   patient.updatedAt = new Date().toISOString();
   return patient;
@@ -634,6 +684,7 @@ function registerPatientTransfer(sourceWard, sourceBed, targetWard, targetBed, a
   patient.birthDate = targetBed.birthDate || patient.birthDate || "";
   patient.diagnostico = targetBed.diagnostico || "";
   patient.nir = targetBed.nir || "";
+  patient.cil = targetBed.cil || "";
   patient.updatedAt = new Date().toISOString();
   return patient;
 }
@@ -674,6 +725,12 @@ function patientForClient(patient) {
     birthDate: patient.birthDate || "",
     diagnostico: patient.diagnostico || "",
     nir: patient.nir || "",
+    cil: patient.cil || "",
+    regulationChannels: Array.isArray(patient.regulationChannels) ? patient.regulationChannels : [],
+    regulationAcceptedAt: patient.regulationAcceptedAt || "",
+    nirLastUpdateAt: patient.nirLastUpdateAt || "",
+    nirLastUpdateBy: patient.nirLastUpdateBy || "",
+    nirUpdateChannels: Array.isArray(patient.nirUpdateChannels) ? patient.nirUpdateChannels : [],
     createdAt: patient.createdAt || "",
     updatedAt: patient.updatedAt || "",
     active: Boolean(patient.currentAdmission),
@@ -958,6 +1015,7 @@ function clearBedPatientData(bed, nextStatus = "LIVRE") {
   bed.diagnostico = "";
   bed.pendencias = "";
   bed.nir = "";
+  bed.cil = "";
   bed.procedimentos = [];
   bed.pendenciasHistorico = [];
   bed.procedimentosHistorico = [];
@@ -975,6 +1033,7 @@ function clonePatientPayload(bed) {
     diagnostico: bed.diagnostico || "",
     pendencias: bed.pendencias || "",
     nir: bed.nir || "",
+    cil: bed.cil || "",
     procedimentos: Array.isArray(bed.procedimentos) ? [...bed.procedimentos] : [],
     pendenciasHistorico: Array.isArray(bed.pendenciasHistorico) ? JSON.parse(JSON.stringify(bed.pendenciasHistorico)) : [],
     procedimentosHistorico: Array.isArray(bed.procedimentosHistorico) ? JSON.parse(JSON.stringify(bed.procedimentosHistorico)) : []
@@ -1234,6 +1293,13 @@ app.post("/api/patients", requireAuth, async (req, res) => {
   const cpf = normalizeCpf(req.body?.cpf);
   const birthDate = String(req.body?.birthDate || "").trim();
   const nir = String(req.body?.nir || "").trim();
+  const cil = String(req.body?.cil || "").trim();
+  const regulationChannels = Array.isArray(req.body?.regulationChannels)
+    ? req.body.regulationChannels
+      .map(item => String(item || "").trim().toUpperCase())
+      .filter(item => item === "EMAIL" || item === "CIL")
+    : [];
+  const regulationAcceptedAt = String(req.body?.regulationAcceptedAt || "").trim();
 
   if (!nome) return res.status(400).json({ error: "Nome é obrigatório" });
   if (!cpf || cpf.length !== 11) return res.status(400).json({ error: "CPF deve ter 11 dígitos" });
@@ -1245,7 +1311,7 @@ app.post("/api/patients", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Já existe paciente com esse CPF" });
   }
 
-  const patient = createEmptyPatientRecord({ nome, cpf, birthDate, nir });
+  const patient = createEmptyPatientRecord({ nome, cpf, birthDate, nir, cil, regulationChannels, regulationAcceptedAt });
   patientRegistry.push(patient);
 
   addUserAction(req.user, "PATIENT_CREATE", `Cadastrou o paciente ${patient.nome}`, {
@@ -1268,6 +1334,28 @@ app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
     ? String(patient.diagnostico || "").trim()
     : String(req.body?.diagnostico || "").trim();
   const nir = String(req.body?.nir || "").trim();
+  const cil = req.body?.cil === undefined
+    ? String(patient.cil || "").trim()
+    : String(req.body?.cil || "").trim();
+  const regulationChannels = Array.isArray(req.body?.regulationChannels)
+    ? req.body.regulationChannels
+      .map(item => String(item || "").trim().toUpperCase())
+      .filter(item => item === "EMAIL" || item === "CIL")
+    : (Array.isArray(patient.regulationChannels) ? patient.regulationChannels : []);
+  const nirUpdateChannels = Array.isArray(req.body?.nirUpdateChannels)
+    ? req.body.nirUpdateChannels
+      .map(item => String(item || "").trim().toUpperCase())
+      .filter(item => item === "EMAIL" || item === "CIL")
+    : (Array.isArray(patient.nirUpdateChannels) ? patient.nirUpdateChannels : []);
+  const nirLastUpdateAt = req.body?.nirLastUpdateAt === undefined
+    ? String(patient.nirLastUpdateAt || "").trim()
+    : String(req.body?.nirLastUpdateAt || "").trim();
+  const nirLastUpdateBy = req.body?.nirLastUpdateBy === undefined
+    ? String(patient.nirLastUpdateBy || "").trim()
+    : String(req.body?.nirLastUpdateBy || "").trim();
+  const regulationAcceptedAt = req.body?.regulationAcceptedAt === undefined
+    ? String(patient.regulationAcceptedAt || "").trim()
+    : String(req.body?.regulationAcceptedAt || "").trim();
 
   if (!nome) return res.status(400).json({ error: "Nome é obrigatório" });
   if (!cpf || cpf.length !== 11) return res.status(400).json({ error: "CPF deve ter 11 dígitos" });
@@ -1284,6 +1372,12 @@ app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
   patient.birthDate = birthDate;
   patient.diagnostico = diagnostico;
   patient.nir = nir;
+  patient.cil = cil;
+  patient.regulationChannels = Array.from(new Set(regulationChannels));
+  patient.regulationAcceptedAt = regulationAcceptedAt;
+  patient.nirLastUpdateAt = nirLastUpdateAt;
+  patient.nirLastUpdateBy = nirLastUpdateBy;
+  patient.nirUpdateChannels = Array.from(new Set(nirUpdateChannels));
   patient.updatedAt = new Date().toISOString();
 
   if (patient.currentAdmission) {
@@ -1295,6 +1389,7 @@ app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
       bed.birthDate = birthDate;
       bed.diagnostico = diagnostico;
       bed.nir = nir;
+      bed.cil = cil;
       normalizeBedData(bed);
     }
   }
@@ -1307,6 +1402,99 @@ app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
 
   await persistState();
   res.json({ ok: true, patient: patientForClient(patient) });
+});
+
+app.post("/api/patients/:patientId/nir-update", requireAuth, async (req, res) => {
+  const patient = findPatientOr404(req, res);
+  if (!patient) return;
+
+  const channels = Array.isArray(req.body?.channels)
+    ? req.body.channels
+      .map(item => String(item || "").trim().toUpperCase())
+      .filter(item => item === "CIL" || item === "EMAIL")
+    : [];
+
+  if (!channels.length) {
+    return res.status(400).json({ error: "Informe ao menos uma atualização: CIL ou EMAIL." });
+  }
+
+  const now = new Date().toISOString();
+  patient.nirLastUpdateAt = now;
+  patient.nirLastUpdateBy = req.user.nome || req.user.username || "";
+  patient.nirUpdateChannels = Array.from(new Set(channels));
+  patient.updatedAt = now;
+
+  addUserAction(req.user, "PATIENT_NIR_UPDATE", `Atualizou o NIR do paciente ${patient.nome}`, {
+    patientId: patient.id,
+    patientName: patient.nome,
+    channels: patient.nirUpdateChannels
+  });
+
+  await persistState();
+  res.json({ ok: true, patient: patientForClient(patient) });
+});
+
+app.get("/api/nir/reports", requireAuth, (req, res) => {
+  const currentOperationalDay = getOperationalDayKey(new Date());
+  const previousOperationalDay = getOperationalDayKey(new Date(Date.now() - (24 * 60 * 60 * 1000)));
+  const currentReports = nirDailyReports
+    .filter(item => item.operationalDay === currentOperationalDay)
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  const otherUserReports = currentReports
+    .filter(item => item.authorUsername !== req.user.username);
+  const previousReports = nirDailyReports
+    .filter(item => item.operationalDay === previousOperationalDay)
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  const currentReport = currentReports.find(item => item.authorUsername === req.user.username) || null;
+
+  res.json({
+    operationalDay: currentOperationalDay,
+    previousOperationalDay,
+    currentReport,
+    otherUserReports,
+    previousReports
+  });
+});
+
+app.post("/api/nir/reports", requireAuth, async (req, res) => {
+  const content = String(req.body?.content || "").trim();
+  if (!content) {
+    return res.status(400).json({ error: "Digite o relatório do enfermeiro." });
+  }
+
+  const operationalDay = getOperationalDayKey(new Date());
+  const now = new Date().toISOString();
+  let report = nirDailyReports.find(item => item.operationalDay === operationalDay && item.authorUsername === req.user.username);
+  if (!report) {
+    report = {
+      id: createRecordId(),
+      operationalDay,
+      authorUsername: req.user.username,
+      authorName: req.user.nome || req.user.username || "",
+      content,
+      createdAt: now,
+      updatedAt: now
+    };
+    nirDailyReports.unshift(report);
+  } else {
+    report.authorName = req.user.nome || req.user.username || "";
+    report.content = content;
+    report.updatedAt = now;
+  }
+
+  addUserAction(req.user, "NIR_REPORT_SAVE", `Salvou o relatório do NIR do dia ${operationalDay}`, {
+    operationalDay
+  });
+
+  await persistState();
+  const previousOperationalDay = getOperationalDayKey(new Date(Date.now() - (24 * 60 * 60 * 1000)));
+  const otherUserReports = nirDailyReports
+    .filter(item => item.operationalDay === operationalDay && item.authorUsername !== req.user.username)
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  const previousReports = nirDailyReports
+    .filter(item => item.operationalDay === previousOperationalDay)
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  res.json({ ok: true, currentReport: report, otherUserReports, previousReports });
 });
 
 app.delete("/api/patients/:patientId", requireAuth, async (req, res) => {
