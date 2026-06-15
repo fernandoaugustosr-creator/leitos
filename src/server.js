@@ -9,7 +9,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 const statuses = ["OCUPADO", "LIVRE", "BLOQUEADO", "RESERVADO", "EXTRA"];
-const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "PASSAGEM DE SONDA"];
+const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "DRENO DE TORAX"];
 const supabaseUrl = String(process.env.SUPABASE_URL || "").trim();
 const supabaseKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "").trim();
 const supabaseTable = process.env.SUPABASE_TABLE || "app_state";
@@ -225,7 +225,8 @@ function applyStatePayload(payload) {
         updatedAt: patient.updatedAt || new Date().toISOString(),
         deletedAt: patient.deletedAt || null,
         currentAdmission: patient.currentAdmission || null,
-        admissionHistory: Array.isArray(patient.admissionHistory) ? patient.admissionHistory : []
+        admissionHistory: Array.isArray(patient.admissionHistory) ? patient.admissionHistory : [],
+        visitHistory: Array.isArray(patient.visitHistory) ? patient.visitHistory : []
       });
     }
   }
@@ -547,7 +548,8 @@ function createPatientRecordFromBed(bed) {
     updatedAt: now,
     deletedAt: null,
     currentAdmission: null,
-    admissionHistory: []
+    admissionHistory: [],
+    visitHistory: []
   };
 }
 
@@ -570,7 +572,8 @@ function createEmptyPatientRecord(payload = {}) {
     updatedAt: now,
     deletedAt: null,
     currentAdmission: null,
-    admissionHistory: []
+    admissionHistory: [],
+    visitHistory: []
   };
 }
 
@@ -736,7 +739,8 @@ function patientForClient(patient) {
     active: Boolean(patient.currentAdmission),
     currentAdmission,
     admissionCount: Array.isArray(patient.admissionHistory) ? patient.admissionHistory.length : 0,
-    lastAdmission
+    lastAdmission,
+    visitHistory: Array.isArray(patient.visitHistory) ? patient.visitHistory : []
   };
 }
 
@@ -1283,7 +1287,8 @@ app.get("/api/patients/:patientId", requireAuth, (req, res) => {
   res.json({
     patient: {
       ...patientForClient(patient),
-      admissionHistory: Array.isArray(patient.admissionHistory) ? patient.admissionHistory : []
+      admissionHistory: Array.isArray(patient.admissionHistory) ? patient.admissionHistory : [],
+      visitHistory: Array.isArray(patient.visitHistory) ? patient.visitHistory : []
     }
   });
 });
@@ -1321,6 +1326,50 @@ app.post("/api/patients", requireAuth, async (req, res) => {
 
   await persistState();
   res.json({ ok: true, patient: patientForClient(patient) });
+});
+
+app.post("/api/patients/:patientId/visits", requireAuth, async (req, res) => {
+  const patient = findPatientOr404(req, res);
+  if (!patient) return;
+
+  const visitorName = String(req.body?.visitorName || "").trim();
+  const visitDate = String(req.body?.visitDate || "").trim();
+  const visitShift = String(req.body?.visitShift || "").trim().toUpperCase();
+  const visitTime = String(req.body?.visitTime || "").trim();
+  const note = String(req.body?.note || "").trim();
+
+  if (!visitorName) return res.status(400).json({ error: "Informe o nome do visitante" });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(visitDate)) return res.status(400).json({ error: "Informe a data da visita" });
+  if (!["MANHA", "TARDE", "NOITE"].includes(visitShift)) return res.status(400).json({ error: "Selecione o turno da visita" });
+  if (!/^\d{2}:\d{2}$/.test(visitTime)) return res.status(400).json({ error: "Informe o horário da visita" });
+
+  const now = new Date().toISOString();
+  const visit = {
+    id: createRecordId(),
+    visitorName,
+    visitDate,
+    visitShift,
+    visitTime,
+    note,
+    createdAt: now,
+    createdBy: req.user.nome || req.user.username || ""
+  };
+
+  if (!Array.isArray(patient.visitHistory)) patient.visitHistory = [];
+  patient.visitHistory.unshift(visit);
+  patient.updatedAt = now;
+
+  addUserAction(req.user, "PATIENT_VISIT_CREATE", `Registrou visita para o paciente ${patient.nome}`, {
+    patientId: patient.id,
+    patientName: patient.nome,
+    visitorName,
+    visitDate,
+    visitShift,
+    visitTime
+  });
+
+  await persistState();
+  res.json({ ok: true, visit, patient: patientForClient(patient) });
 });
 
 app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
@@ -2164,17 +2213,35 @@ app.post("/api/wards/:wardId/beds/:bedId/outcome", requireAuth, async (req, res)
   const bed = ward.beds.find(b => b.id === bedId);
   if (!bed) return res.status(404).json({ error: "Leito não encontrado" });
   const type = String(req.body?.type || "").trim().toUpperCase();
-  if (type !== "ALTA" && type !== "OBITO") return res.status(400).json({ error: "Tipo inválido" });
+  const note = String(req.body?.note || "").trim();
+  const allowedTypes = ["ALTA", "OBITO", "EVASAO", "TRANSFERENCIA_EXTERNA"];
+  if (!allowedTypes.includes(type)) return res.status(400).json({ error: "Tipo inválido" });
+  if (type === "TRANSFERENCIA_EXTERNA" && !note) {
+    return res.status(400).json({ error: "Informe a observação da transferência externa" });
+  }
   if (type === "ALTA") ward.indicadores.altas = Math.max(0, (ward.indicadores.altas || 0) + 1);
   if (type === "OBITO") ward.indicadores.obitos = Math.max(0, (ward.indicadores.obitos || 0) + 1);
   const patientName = bed.nome || "";
-  closePatientAdmissionByBedSnapshot(bed, ward, type, req.user.nome || req.user.username, "Desfecho da internação");
+  const outcomeReasonMap = {
+    ALTA: "Desfecho da internação",
+    OBITO: "Desfecho da internação",
+    EVASAO: "Paciente evadiu da unidade",
+    TRANSFERENCIA_EXTERNA: note
+  };
+  closePatientAdmissionByBedSnapshot(bed, ward, type, req.user.nome || req.user.username, outcomeReasonMap[type] || "Desfecho da internação");
   clearBedPatientData(bed, "LIVRE");
-  addUserAction(req.user, type, `${type === "ALTA" ? "Registrou alta" : "Registrou óbito"} no leito ${bed.id}`, {
+  const actionLabelMap = {
+    ALTA: "Registrou alta",
+    OBITO: "Registrou óbito",
+    EVASAO: "Registrou evasão",
+    TRANSFERENCIA_EXTERNA: "Registrou transferência externa"
+  };
+  addUserAction(req.user, type, `${actionLabelMap[type] || "Registrou desfecho"} no leito ${bed.id}`, {
     wardId: ward.id,
     wardNome: ward.nome,
     bedId: bed.id,
-    patient: patientName
+    patient: patientName,
+    note
   });
   await persistState();
   res.json({ ok: true, indicadores: ward.indicadores, counts: computeCounts(ward.beds), bed: bedForClient(bed) });
@@ -2223,7 +2290,8 @@ app.get("/health", (req, res) => {
 if (require.main === module) {
   ensureStorageInitialized()
     .then(() => {
-      app.listen(port, () => {
+      const host = process.env.HOST || "0.0.0.0";
+      app.listen(port, host, () => {
         console.log(`Server running at http://localhost:${port}`);
       });
     })

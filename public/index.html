@@ -18,6 +18,7 @@
       <nav class="sidebar-nav">
         <button id="nav-dashboard" class="nav-btn sidebar-btn">Dashboard</button>
         <button id="nav-home" class="nav-btn ghost sidebar-btn">Setores</button>
+        <button id="nav-portaria" class="nav-btn ghost sidebar-btn">Portaria</button>
         <button id="nav-patients" class="nav-btn ghost sidebar-btn">Pacientes</button>
         <button id="nav-nir" class="nav-btn ghost sidebar-btn">NIR</button>
         <button id="nav-gerenciar" class="nav-btn ghost sidebar-btn">Cadastro</button>
@@ -157,6 +158,14 @@
       <div id="patients-feedback" class="hint hidden"></div>
       <div id="patients-list-empty" class="hint hidden">Nenhum paciente cadastrado.</div>
       <div id="patients-list" class="patients-list"></div>
+    </section>
+
+    <section id="view-portaria" class="panel hidden">
+      <h2>Portaria</h2>
+      <div class="hint">Lista simples dos pacientes internados para consulta da portaria.</div>
+      <div id="portaria-feedback" class="hint hidden"></div>
+      <div id="portaria-list-empty" class="hint hidden">Nenhum paciente internado no momento.</div>
+      <div id="portaria-list" class="portaria-list"></div>
     </section>
 
     <section id="view-nir" class="panel nir-report hidden">
@@ -504,8 +513,6 @@
             <div id="modal-patient-age-display" class="modal-static-value">Será preenchida automaticamente</div>
           </div>
           <label>Diagnóstico <input id="modal-diagnostico"></label>
-          <label>NIR <input id="modal-nir"></label>
-          <label>CIL <input id="modal-cil" placeholder="Número da CIL"></label>
         </div>
         <div id="modal-patient-lookup" class="hint hidden"></div>
         <button id="btn-modal-create-patient" type="button" class="ghost hidden">Realizar cadastro</button>
@@ -523,7 +530,7 @@
             <label class="proc-item"><input type="checkbox" value="SNG" class="proc-check"> SNG</label>
             <label class="proc-item"><input type="checkbox" value="SANGUE" class="proc-check"> SANGUE</label>
             <label class="proc-item"><input type="checkbox" value="ASPIRAÇÃO" class="proc-check"> ASPIRAÇÃO</label>
-            <label class="proc-item"><input type="checkbox" value="PASSAGEM DE SONDA" class="proc-check"> PASSAGEM DE SONDA</label>
+            <label class="proc-item"><input type="checkbox" value="DRENO DE TORAX" class="proc-check"> DRENO DE TORAX</label>
           </div>
         </div>
         <div class="history-panel">
@@ -532,24 +539,30 @@
         </div>
         <div class="history-panel">
           <div class="procedimentos-title">Transferência de paciente</div>
-          <div class="history-hint">Selecione o setor, a enfermaria e o leito de destino para transferir o paciente com todos os dados cadastrados.</div>
+          <div class="history-hint">Selecione o setor e o leito de destino para transferir o paciente com todos os dados cadastrados.</div>
           <div class="modal-grid">
             <label>Setor
               <select id="modal-transfer-ward"></select>
-            </label>
-            <label>Enfermaria
-              <select id="modal-transfer-enfermaria"></select>
             </label>
             <label>Destino
               <select id="modal-transfer-bed"></select>
             </label>
           </div>
         </div>
+        <div id="modal-external-transfer-panel" class="history-panel hidden">
+          <div class="procedimentos-title">Transferência externa</div>
+          <div class="history-hint">Descreva para onde o paciente foi transferido e outras observações necessárias.</div>
+          <label>Observação da transferência externa
+            <textarea id="modal-external-transfer-note" rows="3" placeholder="Ex: Transferido para UPA, Hospital Regional, regulação externa, motivo e horário."></textarea>
+          </label>
+        </div>
       </div>
       <div class="modal-actions">
         <button id="modal-salvar" type="button">Registrar</button>
         <button id="modal-transferir" type="button" class="ghost">Transferir</button>
-        <button id="modal-alta" type="button" class="ghost">Dar alta</button>
+        <button id="modal-transferencia-externa" type="button" class="ghost">Transferência externa</button>
+        <button id="modal-alta" type="button" class="ghost">Alta</button>
+        <button id="modal-evasao" type="button" class="ghost">Evasão</button>
         <button id="modal-obito" type="button" class="ghost">Óbito</button>
         <button id="modal-baixa" type="button" class="danger">Dar baixa</button>
         <button value="cancelar">Cancelar</button>
@@ -567,6 +580,7 @@
           <label>Nome completo <input id="patient-registry-name"></label>
           <label>CPF <input id="patient-registry-cpf" inputmode="numeric" maxlength="14" placeholder="000.000.000-00"></label>
           <label>Data de nascimento <input id="patient-registry-birthdate" type="date"></label>
+          <label>NIR <input id="patient-registry-nir" placeholder="Digite o NIR do paciente"></label>
           <label>Número da CIL <input id="patient-registry-cil" placeholder="Digite o número da CIL"></label>
           <div class="patient-regulation-methods">
             <span class="modal-static-label">Regulado via</span>
@@ -586,6 +600,58 @@
       <div class="modal-actions">
         <button id="patient-registry-save" type="button">Salvar alterações</button>
         <button id="patient-registry-delete" type="button" class="danger">Excluir cadastro</button>
+        <button value="cancelar">Fechar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="modal-portaria-visit" class="modal">
+    <form method="dialog" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title" id="portaria-visit-title">Registrar visita</div>
+      </div>
+      <div class="modal-body">
+        <div class="modal-grid">
+          <div class="modal-static-field">
+            <span class="modal-static-label">Paciente</span>
+            <div id="portaria-visit-patient-name" class="modal-static-value">-</div>
+          </div>
+          <div class="modal-static-field">
+            <span class="modal-static-label">Idade</span>
+            <div id="portaria-visit-patient-age" class="modal-static-value">-</div>
+          </div>
+          <div class="modal-static-field">
+            <span class="modal-static-label">Setor</span>
+            <div id="portaria-visit-patient-ward" class="modal-static-value">-</div>
+          </div>
+          <div class="modal-static-field">
+            <span class="modal-static-label">Leito</span>
+            <div id="portaria-visit-patient-bed" class="modal-static-value">-</div>
+          </div>
+          <label>Nome do visitante <input id="portaria-visit-visitor-name" placeholder="Digite o nome do visitante"></label>
+          <label>Data da visita <input id="portaria-visit-date" type="date"></label>
+          <label>Turno
+            <select id="portaria-visit-shift">
+              <option value="MANHA">MANHA</option>
+              <option value="TARDE">TARDE</option>
+              <option value="NOITE">NOITE</option>
+            </select>
+          </label>
+          <label>Horario <input id="portaria-visit-time" type="time"></label>
+        </div>
+        <label>Observacao
+          <textarea id="portaria-visit-note" rows="3" placeholder="Opcional"></textarea>
+        </label>
+        <div id="portaria-visit-feedback" class="hint hidden"></div>
+        <div class="history-panel">
+          <div class="procedimentos-title">Historico de visitas</div>
+          <div class="history-hint">As visitas registradas para este paciente aparecem aqui.</div>
+          <div id="portaria-visit-history-empty" class="hint hidden">Nenhuma visita registrada para este paciente.</div>
+          <div id="portaria-visit-history" class="history-list"></div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-save-portaria-visit" type="button">Registrar visita</button>
         <button value="cancelar">Fechar</button>
       </div>
     </form>

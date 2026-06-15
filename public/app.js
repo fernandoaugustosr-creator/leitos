@@ -45,8 +45,9 @@ let pendingBedRegistryLink = null;
 let nirCurrentReport = null;
 let nirPreviousReports = [];
 let nirOtherUserReports = [];
+let currentPortariaPatient = null;
 
-const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "PASSAGEM DE SONDA"];
+const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "DRENO DE TORAX"];
 const NO_ENFERMARIA_VALUE = "__SEM_ENFERMARIA__";
 const ALL_ENFERMARIA_VALUE = "__TODAS_ENFERMARIAS__";
 const WHATSAPP_CENTRAL_AIR_LINK = "https://chat.whatsapp.com/FbxcYoy45yCD1TW6eZwGKd";
@@ -105,6 +106,19 @@ function toBRDateTime(iso) {
 
 function getTodayIsoDate() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function getCurrentTimeValue() {
+  const now = new Date();
+  return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+}
+
+function getSuggestedVisitShift(baseValue = new Date()) {
+  const date = baseValue instanceof Date ? baseValue : new Date(baseValue);
+  const hour = date.getHours();
+  if (hour < 12) return "MANHA";
+  if (hour < 18) return "TARDE";
+  return "NOITE";
 }
 
 function getOperationalDate(baseValue = new Date()) {
@@ -282,7 +296,7 @@ async function openGeneralMaintenanceSummary() {
 }
 
 function setPatientFieldsEnabled(enabled) {
-  const ids = ["modal-nome", "modal-admissao", "modal-diagnostico", "modal-pendencias", "modal-nir", "modal-cil"];
+  const ids = ["modal-nome", "modal-admissao", "modal-diagnostico", "modal-pendencias", "modal-external-transfer-note"];
   for (const id of ids) {
     const el = document.getElementById(id);
     if (!el) continue;
@@ -297,16 +311,16 @@ function clearPatientFields() {
   document.getElementById("modal-admissao").value = "";
   document.getElementById("modal-diagnostico").value = "";
   document.getElementById("modal-pendencias").value = "";
-  document.getElementById("modal-nir").value = "";
-  document.getElementById("modal-cil").value = "";
+  document.getElementById("modal-external-transfer-note").value = "";
   setPatientIdentityDisplay("", "");
   selectedRegistryPatient = null;
   setPatientLookupFeedback("");
   toggleCreatePatientButton(false);
+  toggleExternalTransferPanel(false);
 }
 
 function showOnly(viewId) {
-  const ids = ["view-login", "view-dashboard", "view-home", "view-patients", "view-nir", "view-admin"];
+  const ids = ["view-login", "view-dashboard", "view-home", "view-portaria", "view-patients", "view-nir", "view-admin"];
   for (const id of ids) {
     const el = document.getElementById(id);
     if (!el) continue;
@@ -315,11 +329,12 @@ function showOnly(viewId) {
   const navMap = {
     "view-dashboard": "nav-dashboard",
     "view-home": "nav-home",
+    "view-portaria": "nav-portaria",
     "view-patients": "nav-patients",
     "view-nir": "nav-nir",
     "view-admin": "nav-gerenciar"
   };
-  for (const id of ["nav-dashboard", "nav-home", "nav-patients", "nav-nir", "nav-gerenciar"]) {
+  for (const id of ["nav-dashboard", "nav-home", "nav-portaria", "nav-patients", "nav-nir", "nav-gerenciar"]) {
     document.getElementById(id)?.classList.toggle("ghost", navMap[viewId] !== id);
   }
   document.body.classList.toggle("login-only", viewId === "view-login");
@@ -480,6 +495,18 @@ function toggleCreatePatientButton(visible = false) {
   button.classList.toggle("hidden", !visible);
 }
 
+function toggleExternalTransferPanel(visible = false) {
+  const panel = document.getElementById("modal-external-transfer-panel");
+  const field = document.getElementById("modal-external-transfer-note");
+  if (!panel || !field) return;
+  panel.classList.toggle("hidden", !visible);
+  if (!visible) {
+    field.value = "";
+  } else {
+    field.focus();
+  }
+}
+
 function normalizeShiftLength(value) {
   return String(value || "").trim().toUpperCase() === "24H" ? "24H" : "12H";
 }
@@ -633,8 +660,6 @@ function applyRegistryPatientToBedForm(patient, options = {}) {
   if (!keepTypedCpf) {
     document.getElementById("modal-nome").value = formatCpf(patient.cpf || "");
   }
-  document.getElementById("modal-nir").value = patient.nir || "";
-  document.getElementById("modal-cil").value = patient.cil || "";
   setPatientIdentityDisplay(patient.nome || "", patient.birthDate || "");
   toggleCreatePatientButton(false);
 
@@ -1148,6 +1173,7 @@ function fillPatientRegistryModal(patient) {
   document.getElementById("patient-registry-name").value = patient.nome || "";
   document.getElementById("patient-registry-cpf").value = formatCpf(patient.cpf || "");
   document.getElementById("patient-registry-birthdate").value = patient.birthDate || "";
+  document.getElementById("patient-registry-nir").value = patient.nir || "";
   document.getElementById("patient-registry-cil").value = patient.cil || "";
   setPatientRegulationChannels(patient.regulationChannels || []);
   renderPatientCurrentAdmission(patient.currentAdmission || null);
@@ -1161,6 +1187,7 @@ function openNewPatientRegistry(prefill = {}) {
     nome: prefill.nome || "",
     cpf: prefill.cpf || "",
     birthDate: prefill.birthDate || "",
+    nir: prefill.nir || "",
     cil: prefill.cil || "",
     regulationChannels: Array.isArray(prefill.regulationChannels) ? prefill.regulationChannels : [],
     currentAdmission: null,
@@ -1208,6 +1235,161 @@ function renderRegisteredPatients(items) {
       </div>
     `;
     container.appendChild(row);
+  }
+}
+
+function setPortariaFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("portaria-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function setPortariaVisitFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("portaria-visit-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function renderPortariaVisitHistory(items) {
+  const history = Array.isArray(items) ? items : [];
+  const container = document.getElementById("portaria-visit-history");
+  const empty = document.getElementById("portaria-visit-history-empty");
+  if (!container || !empty) return;
+
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", history.length > 0);
+
+  for (const visit of history) {
+    const card = document.createElement("div");
+    card.className = "visit-history-card";
+    card.innerHTML = `
+      <strong>${escapeHtml(visit.visitorName || "-")}</strong>
+      <span>Data: ${escapeHtml(toBRDate(visit.visitDate) || "-")} • Turno: ${escapeHtml(visit.visitShift || "-")} • Horario: ${escapeHtml(visit.visitTime || "-")}</span>
+      <span>Registrado por ${escapeHtml(visit.createdBy || "-")} em ${escapeHtml(toBRDateTime(visit.createdAt) || "-")}</span>
+      ${visit.note ? `<span>Observacao: ${escapeHtml(visit.note)}</span>` : ""}
+    `;
+    container.appendChild(card);
+  }
+}
+
+function fillPortariaVisitForm(patient) {
+  currentPortariaPatient = patient || null;
+  const currentAdmission = patient?.currentAdmission || null;
+  const name = patient?.nome || "-";
+  const age = getPatientAgeLabel(patient?.birthDate) || "Idade não informada";
+  const now = new Date();
+
+  document.getElementById("portaria-visit-title").textContent = `Registrar visita - ${name}`;
+  document.getElementById("portaria-visit-patient-name").textContent = name;
+  document.getElementById("portaria-visit-patient-age").textContent = age;
+  document.getElementById("portaria-visit-patient-ward").textContent = currentAdmission?.wardNome || "-";
+  document.getElementById("portaria-visit-patient-bed").textContent = currentAdmission?.bedId || "-";
+  document.getElementById("portaria-visit-visitor-name").value = "";
+  document.getElementById("portaria-visit-date").value = getTodayIsoDate();
+  document.getElementById("portaria-visit-shift").value = getSuggestedVisitShift(now);
+  document.getElementById("portaria-visit-time").value = getCurrentTimeValue();
+  document.getElementById("portaria-visit-note").value = "";
+  setPortariaVisitFeedback("");
+  renderPortariaVisitHistory(patient?.visitHistory || []);
+}
+
+async function openPortariaVisitModal(patientId) {
+  const numericId = parseInt(patientId, 10);
+  if (!Number.isInteger(numericId)) {
+    setPortariaFeedback("Nao foi possivel abrir o registro de visita enquanto a lista estiver em modo temporario.", true);
+    return;
+  }
+
+  try {
+    const data = await api(`/api/patients/${numericId}`);
+    fillPortariaVisitForm(data.patient || null);
+    document.getElementById("modal-portaria-visit")?.showModal();
+  } catch (error) {
+    setPortariaFeedback(error.message || "Nao foi possivel abrir o registro de visita.", true);
+  }
+}
+
+function renderPortariaPatients(items) {
+  const patients = Array.isArray(items) ? items : [];
+  const container = document.getElementById("portaria-list");
+  const empty = document.getElementById("portaria-list-empty");
+  if (!container || !empty) return;
+
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", patients.length > 0);
+
+  for (const patient of patients) {
+    const card = document.createElement("div");
+    card.className = "portaria-card";
+    card.dataset.id = patient.id;
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.title = "Clique para registrar visita e ver o historico";
+    card.innerHTML = `
+      <strong>${patient.nome || "-"}</strong>
+      <span>${getPatientAgeLabel(patient.birthDate) || "Idade não informada"}</span>
+    `;
+    container.appendChild(card);
+  }
+}
+
+async function openPortariaView() {
+  await refreshWards();
+  setAppEnabled(false);
+  showOnly("view-portaria");
+  closeSidebarOnMobile();
+
+  try {
+    const data = await api("/api/patients?active=true");
+    const activePatients = (data.patients || [])
+      .filter(patient => Boolean(patient.currentAdmission))
+      .sort((a, b) => String(a.nome || "").localeCompare(String(b.nome || ""), "pt-BR"));
+    renderPortariaPatients(activePatients);
+    setPortariaFeedback(`${activePatients.length} paciente(s) internado(s) listado(s).`);
+  } catch (error) {
+    try {
+      const fallbackPatients = (await buildPatientsFallbackList())
+        .filter(patient => Boolean(patient.currentAdmission))
+        .sort((a, b) => String(a.nome || "").localeCompare(String(b.nome || ""), "pt-BR"));
+      renderPortariaPatients(fallbackPatients);
+      setPortariaFeedback("Lista da portaria carregada pelos leitos atuais enquanto a API completa não responde.");
+    } catch (fallbackError) {
+      renderPortariaPatients([]);
+      setPortariaFeedback(fallbackError.message || error.message || "Não foi possível carregar a lista da portaria.", true);
+    }
+  }
+}
+
+async function savePortariaVisit() {
+  const patientId = currentPortariaPatient?.id;
+  if (!patientId) return;
+
+  const payload = {
+    visitorName: document.getElementById("portaria-visit-visitor-name").value.trim(),
+    visitDate: document.getElementById("portaria-visit-date").value,
+    visitShift: document.getElementById("portaria-visit-shift").value,
+    visitTime: document.getElementById("portaria-visit-time").value,
+    note: document.getElementById("portaria-visit-note").value.trim()
+  };
+
+  try {
+    const data = await api(`/api/patients/${patientId}/visits`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    currentPortariaPatient = data.patient || currentPortariaPatient;
+    renderPortariaVisitHistory(currentPortariaPatient?.visitHistory || []);
+    document.getElementById("portaria-visit-visitor-name").value = "";
+    document.getElementById("portaria-visit-time").value = getCurrentTimeValue();
+    document.getElementById("portaria-visit-note").value = "";
+    setPortariaVisitFeedback("Visita registrada com sucesso.");
+  } catch (error) {
+    setPortariaVisitFeedback(error.message || "Nao foi possivel registrar a visita.", true);
   }
 }
 
@@ -2186,8 +2368,8 @@ async function openPatientModal(bedId) {
   document.getElementById("modal-admissao").value = bed.admissao || "";
   document.getElementById("modal-diagnostico").value = bed.diagnostico || "";
   document.getElementById("modal-pendencias").value = "";
-  document.getElementById("modal-nir").value = bed.nir || "";
-  document.getElementById("modal-cil").value = bed.cil || "";
+  document.getElementById("modal-external-transfer-note").value = "";
+  toggleExternalTransferPanel(false);
   setPatientIdentityDisplay("", "");
   toggleCreatePatientButton(false);
   if (bed.cpf) {
@@ -2209,7 +2391,7 @@ async function openPatientModal(bedId) {
   }
   renderPendingHistory(Array.isArray(bed.pendenciasHistorico) ? bed.pendenciasHistorico : []);
   renderProcedureHistory(Array.isArray(bed.procedimentosHistorico) ? bed.procedimentosHistorico : []);
-  await updateTransferOptions(bed.id, currentWardId, ALL_ENFERMARIA_VALUE);
+  await updateTransferOptions(bed.id, currentWardId);
   setPatientFieldsEnabled(bed.status === "OCUPADO");
   document.getElementById("modal-paciente").showModal();
 }
@@ -2240,7 +2422,7 @@ async function getTransferWardData(wardId) {
 }
 
 function setTransferControlsDisabled(disabled, title = "") {
-  const ids = ["modal-transfer-ward", "modal-transfer-enfermaria", "modal-transfer-bed", "modal-transferir"];
+  const ids = ["modal-transfer-ward", "modal-transfer-bed", "modal-transferir"];
   for (const id of ids) {
     const el = document.getElementById(id);
     if (!el) continue;
@@ -2262,29 +2444,7 @@ function fillTransferWardOptions(selectedWardId) {
   }
 }
 
-function fillTransferEnfermariaOptions(targetWard, selectedEnfermaria = ALL_ENFERMARIA_VALUE) {
-  const enfermariaSelect = document.getElementById("modal-transfer-enfermaria");
-  if (!enfermariaSelect) return;
-  enfermariaSelect.innerHTML = "";
-  enfermariaSelect.appendChild(new Option("Todas as enfermarias", ALL_ENFERMARIA_VALUE));
-
-  const names = new Set(targetWard?.enfermarias || []);
-  if ((targetWard?.beds || []).some(item => !item.enfermaria)) {
-    names.add(NO_ENFERMARIA_VALUE);
-  }
-
-  for (const name of Array.from(names).sort((a, b) => String(a).localeCompare(String(b), "pt-BR"))) {
-    enfermariaSelect.appendChild(new Option(name === NO_ENFERMARIA_VALUE ? "Sem enfermaria" : name, name));
-  }
-
-  if (Array.from(enfermariaSelect.options).some(option => option.value === selectedEnfermaria)) {
-    enfermariaSelect.value = selectedEnfermaria;
-  } else {
-    enfermariaSelect.value = ALL_ENFERMARIA_VALUE;
-  }
-}
-
-function fillTransferBedOptions(targetWard, selectedEnfermaria, sourceBedId) {
+function fillTransferBedOptions(targetWard, sourceBedId) {
   const bedSelect = document.getElementById("modal-transfer-bed");
   const transferButton = document.getElementById("modal-transferir");
   if (!bedSelect || !transferButton) return;
@@ -2295,9 +2455,7 @@ function fillTransferBedOptions(targetWard, selectedEnfermaria, sourceBedId) {
   const destinationBeds = (targetWard?.beds || []).filter(item => {
     if (targetWard.id === currentWardId && item.id === sourceBedId) return false;
     if (item.status !== "LIVRE" && item.status !== "EXTRA") return false;
-    if (selectedEnfermaria === ALL_ENFERMARIA_VALUE) return true;
-    if (selectedEnfermaria === NO_ENFERMARIA_VALUE) return !item.enfermaria;
-    return item.enfermaria === selectedEnfermaria;
+    return true;
   });
 
   for (const item of destinationBeds) {
@@ -2310,24 +2468,21 @@ function fillTransferBedOptions(targetWard, selectedEnfermaria, sourceBedId) {
   bedSelect.title = destinationBeds.length ? "" : "Não há leitos disponíveis para o destino selecionado.";
 }
 
-async function updateTransferOptions(selectedBedId, selectedWardId = currentWardId, selectedEnfermaria = ALL_ENFERMARIA_VALUE) {
+async function updateTransferOptions(selectedBedId, selectedWardId = currentWardId) {
   fillTransferWardOptions(selectedWardId);
   const sourceBed = ward?.beds?.find(item => item.id === selectedBedId);
   const isTransferAllowed = sourceBed?.status === "OCUPADO" && Boolean(sourceBed?.nome);
 
   if (!isTransferAllowed) {
     setTransferControlsDisabled(true, "A transferência só está disponível para paciente ocupado.");
-    fillTransferEnfermariaOptions({ enfermarias: [], beds: [] }, ALL_ENFERMARIA_VALUE);
-    fillTransferBedOptions({ id: currentWardId, beds: [] }, ALL_ENFERMARIA_VALUE, selectedBedId);
+    fillTransferBedOptions({ id: currentWardId, beds: [] }, selectedBedId);
     return;
   }
 
   setTransferControlsDisabled(false, "");
   try {
     const targetWard = await getTransferWardData(Number.parseInt(String(selectedWardId), 10));
-    fillTransferEnfermariaOptions(targetWard, selectedEnfermaria);
-    const enfermariaValue = document.getElementById("modal-transfer-enfermaria")?.value || ALL_ENFERMARIA_VALUE;
-    fillTransferBedOptions(targetWard, enfermariaValue, selectedBedId);
+    fillTransferBedOptions(targetWard, selectedBedId);
   } catch (error) {
     setTransferControlsDisabled(true, "Não foi possível carregar os destinos.");
     setShiftFeedback(error.message || "Não foi possível carregar os destinos de transferência.", true);
@@ -2363,8 +2518,6 @@ async function salvarPaciente() {
   const admissao = document.getElementById("modal-admissao").value;
   const diagnostico = document.getElementById("modal-diagnostico").value.trim();
   const pendenciasAdd = document.getElementById("modal-pendencias").value.trim();
-  const nir = document.getElementById("modal-nir").value.trim() || patient.nir || "";
-  const cil = document.getElementById("modal-cil").value.trim() || patient.cil || "";
   const procedimentos = getSelectedProcedures();
   const pendenciasStatus = getPendingStatusPayload();
   const payload = {
@@ -2376,8 +2529,8 @@ async function salvarPaciente() {
     diagnostico,
     pendenciasAdd,
     pendenciasStatus,
-    nir,
-    cil,
+    nir: patient.nir || "",
+    cil: patient.cil || "",
     procedimentos
   };
   await api(`/api/wards/${currentWardId}/beds/${currentBedId}`, {
@@ -2434,10 +2587,19 @@ async function darBaixa() {
 
 async function registrarOutcome(type) {
   if (currentBedId == null) return;
+  const normalizedType = String(type || "").trim().toUpperCase();
+  const note = normalizedType === "TRANSFERENCIA_EXTERNA"
+    ? document.getElementById("modal-external-transfer-note")?.value.trim() || ""
+    : "";
+  if (normalizedType === "TRANSFERENCIA_EXTERNA" && !note) {
+    toggleExternalTransferPanel(true);
+    setPatientLookupFeedback("Descreva a transferência externa antes de registrar.", true);
+    return;
+  }
   await api(`/api/wards/${currentWardId}/beds/${currentBedId}/outcome`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type })
+    body: JSON.stringify({ type: normalizedType, note })
   });
   transferWardCache.clear();
   await load();
@@ -2509,6 +2671,7 @@ document.getElementById("modal-salvar").addEventListener("click", async (e) => {
 
 document.getElementById("modal-transferir")?.addEventListener("click", async (e) => {
   e.preventDefault();
+  toggleExternalTransferPanel(false);
   await transferirPaciente();
 });
 
@@ -2519,12 +2682,37 @@ document.getElementById("modal-baixa").addEventListener("click", async (e) => {
 
 document.getElementById("modal-alta")?.addEventListener("click", async (e) => {
   e.preventDefault();
+  toggleExternalTransferPanel(false);
   if (!confirm("Registrar ALTA e liberar o leito?")) return;
   await registrarOutcome("ALTA");
 });
 
+document.getElementById("modal-transferencia-externa")?.addEventListener("click", async (e) => {
+  e.preventDefault();
+  const panel = document.getElementById("modal-external-transfer-panel");
+  const note = document.getElementById("modal-external-transfer-note")?.value.trim() || "";
+  if (panel?.classList.contains("hidden")) {
+    toggleExternalTransferPanel(true);
+    return;
+  }
+  if (!note) {
+    setPatientLookupFeedback("Descreva a transferência externa antes de registrar.", true);
+    return;
+  }
+  if (!confirm("Registrar TRANSFERÊNCIA EXTERNA e liberar o leito?")) return;
+  await registrarOutcome("TRANSFERENCIA_EXTERNA");
+});
+
+document.getElementById("modal-evasao")?.addEventListener("click", async (e) => {
+  e.preventDefault();
+  toggleExternalTransferPanel(false);
+  if (!confirm("Registrar EVASÃO e liberar o leito?")) return;
+  await registrarOutcome("EVASAO");
+});
+
 document.getElementById("modal-obito")?.addEventListener("click", async (e) => {
   e.preventDefault();
+  toggleExternalTransferPanel(false);
   if (!confirm("Registrar ÓBITO e liberar o leito?")) return;
   await registrarOutcome("OBITO");
 });
@@ -2533,10 +2721,10 @@ document.getElementById("modal-status").addEventListener("change", () => {
   const status = document.getElementById("modal-status").value;
   const isOcupado = status === "OCUPADO";
   setPatientFieldsEnabled(isOcupado);
+  if (!isOcupado) toggleExternalTransferPanel(false);
   updateTransferOptions(
     currentBedId,
-    parseInt(document.getElementById("modal-transfer-ward").value || String(currentWardId), 10),
-    document.getElementById("modal-transfer-enfermaria").value || ALL_ENFERMARIA_VALUE
+    parseInt(document.getElementById("modal-transfer-ward").value || String(currentWardId), 10)
   );
   if (!isOcupado) clearPatientFields();
 });
@@ -2544,16 +2732,7 @@ document.getElementById("modal-status").addEventListener("change", () => {
 document.getElementById("modal-transfer-ward")?.addEventListener("change", async () => {
   await updateTransferOptions(
     currentBedId,
-    parseInt(document.getElementById("modal-transfer-ward").value || String(currentWardId), 10),
-    ALL_ENFERMARIA_VALUE
-  );
-});
-
-document.getElementById("modal-transfer-enfermaria")?.addEventListener("change", async () => {
-  await updateTransferOptions(
-    currentBedId,
-    parseInt(document.getElementById("modal-transfer-ward").value || String(currentWardId), 10),
-    document.getElementById("modal-transfer-enfermaria").value || ALL_ENFERMARIA_VALUE
+    parseInt(document.getElementById("modal-transfer-ward").value || String(currentWardId), 10)
   );
 });
 
@@ -3076,6 +3255,7 @@ async function openSelectedWard(wardId) {
   showOnly(null);
   document.getElementById("nav-home")?.classList.remove("ghost");
   document.getElementById("nav-dashboard")?.classList.add("ghost");
+  document.getElementById("nav-portaria")?.classList.add("ghost");
   document.getElementById("nav-patients")?.classList.add("ghost");
   document.getElementById("nav-nir")?.classList.add("ghost");
   document.getElementById("nav-gerenciar")?.classList.add("ghost");
@@ -3100,6 +3280,7 @@ async function openTopbarWard() {
   showOnly(null);
   document.getElementById("nav-home")?.classList.remove("ghost");
   document.getElementById("nav-dashboard")?.classList.add("ghost");
+  document.getElementById("nav-portaria")?.classList.add("ghost");
   document.getElementById("nav-patients")?.classList.add("ghost");
   document.getElementById("nav-nir")?.classList.add("ghost");
   document.getElementById("nav-gerenciar")?.classList.add("ghost");
@@ -3120,6 +3301,7 @@ async function openTopbarEnfermaria() {
   showOnly(null);
   document.getElementById("nav-home")?.classList.remove("ghost");
   document.getElementById("nav-dashboard")?.classList.add("ghost");
+  document.getElementById("nav-portaria")?.classList.add("ghost");
   document.getElementById("nav-patients")?.classList.add("ghost");
   document.getElementById("nav-nir")?.classList.add("ghost");
   document.getElementById("nav-gerenciar")?.classList.add("ghost");
@@ -3148,6 +3330,7 @@ async function savePatientRegistry() {
     nome: document.getElementById("patient-registry-name").value.trim(),
     cpf: normalizeCpf(document.getElementById("patient-registry-cpf").value),
     birthDate: document.getElementById("patient-registry-birthdate").value,
+    nir: document.getElementById("patient-registry-nir").value.trim(),
     cil: document.getElementById("patient-registry-cil").value.trim(),
     regulationChannels: getPatientRegulationChannels()
   };
@@ -3321,6 +3504,7 @@ document.getElementById("nav-home")?.addEventListener("click", async () => {
   closeSidebarOnMobile();
 });
 
+document.getElementById("nav-portaria")?.addEventListener("click", openPortariaView);
 document.getElementById("nav-patients")?.addEventListener("click", openPatientsView);
 document.getElementById("nav-nir")?.addEventListener("click", openNirView);
 
@@ -3343,6 +3527,20 @@ document.getElementById("patients-list")?.addEventListener("click", async event 
     currentPatientRecord = patient;
     await deletePatientRegistry();
   }
+});
+
+document.getElementById("portaria-list")?.addEventListener("click", async event => {
+  const card = event.target.closest(".portaria-card");
+  if (!card) return;
+  await openPortariaVisitModal(card.dataset.id);
+});
+
+document.getElementById("portaria-list")?.addEventListener("keydown", async event => {
+  const card = event.target.closest(".portaria-card");
+  if (!card) return;
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  await openPortariaVisitModal(card.dataset.id);
 });
 
 document.getElementById("nir-list")?.addEventListener("click", async event => {
@@ -3408,6 +3606,11 @@ document.getElementById("admin-user-cpf")?.addEventListener("input", event => {
 document.getElementById("patient-registry-save")?.addEventListener("click", async event => {
   event.preventDefault();
   await savePatientRegistry();
+});
+
+document.getElementById("btn-save-portaria-visit")?.addEventListener("click", async event => {
+  event.preventDefault();
+  await savePortariaVisit();
 });
 
 document.getElementById("btn-save-nir-report")?.addEventListener("click", async event => {
