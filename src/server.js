@@ -1,4 +1,5 @@
 const express = require("express");
+const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const app = express();
@@ -15,9 +16,26 @@ const supabaseKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.
 const supabaseTable = process.env.SUPABASE_TABLE || "app_state";
 const supabaseStateId = process.env.SUPABASE_STATE_ID || "main";
 const supabaseStateColumns = ["payload", "data"];
+const localStateDir = path.join(__dirname, "..", "data");
+const localStateFile = path.join(localStateDir, "app-state.local.json");
+const HOSPITAL_TRIP_ORIGIN_CITY = "Açailândia";
+const HOSPITAL_TRIP_ORIGIN_LABEL = "Hospital Municipal de Açailândia";
+const HOSPITAL_TRIP_ORIGIN_COORDS = { lat: -4.9533, lon: -47.5054 };
+const ROAD_DISTANCE_FACTOR = 1.22;
+const PATIENT_TRAVEL_PROCEDURE = {
+  code: "08.03.01.012-5",
+  description: "UNIDADE DE REMUNERACAO PARA DESLOCAMENTO DE PACIENTE POR TRANSPORTE TERRESTRE (CADA 50 KM)"
+};
+const COMPANION_TRAVEL_PROCEDURE = {
+  code: "08.03.01.010-9",
+  description: "UNIDADE DE REMUNERACAO PARA DESLOCAMENTO DE ACOMPANHANTE POR TRANSPORTE TERRESTRE (CADA 50 KM DE DISTANCIA)"
+};
+let maranhaoCitiesCache = null;
 
 let nextShiftId = 2;
 let nextPatientId = 1;
+const visitorRegistryEntries = [];
+const hospitalTripEntries = [];
 const users = [{
   id: 1,
   username: "admin",
@@ -38,9 +56,65 @@ const storageStatus = {
   configured: Boolean(supabaseUrl && supabaseKey),
   synced: false,
   lastSyncAt: null,
-  lastError: null
+  lastError: null,
+  pendingLocalSync: false,
+  localSnapshotAt: null
 };
 let storageInitializationPromise = null;
+let usingLocalFallback = false;
+
+function shouldUseLocalFallback() {
+  return !isServerlessRuntime && process.env.ALLOW_LOCAL_FALLBACK !== "false";
+}
+
+function enableLocalFallback(error) {
+  usingLocalFallback = true;
+  storageStatus.provider = "local";
+  storageStatus.synced = true;
+  storageStatus.lastSyncAt = new Date().toISOString();
+  storageStatus.lastError = error?.message || null;
+}
+
+function disableLocalFallback() {
+  usingLocalFallback = false;
+  storageStatus.provider = "supabase";
+  storageStatus.configured = Boolean(supabaseUrl && supabaseKey);
+  storageStatus.lastError = null;
+}
+
+function ensureLocalStateDir() {
+  fs.mkdirSync(localStateDir, { recursive: true });
+}
+
+function readLocalStateEnvelope() {
+  try {
+    if (!fs.existsSync(localStateFile)) return null;
+    const raw = fs.readFileSync(localStateFile, "utf8");
+    if (!raw.trim()) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!parsed.payload || typeof parsed.payload !== "object") return null;
+    storageStatus.localSnapshotAt = parsed.savedAt || null;
+    storageStatus.pendingLocalSync = Boolean(parsed.pendingSync);
+    return parsed;
+  } catch (error) {
+    storageStatus.lastError = error.message;
+    return null;
+  }
+}
+
+function writeLocalStateEnvelope(pendingSync = false) {
+  ensureLocalStateDir();
+  const envelope = {
+    savedAt: new Date().toISOString(),
+    pendingSync,
+    payload: buildStatePayload()
+  };
+  fs.writeFileSync(localStateFile, JSON.stringify(envelope, null, 2), "utf8");
+  storageStatus.localSnapshotAt = envelope.savedAt;
+  storageStatus.pendingLocalSync = pendingSync;
+  return envelope;
+}
 
 function trackStorageError(error) {
   storageStatus.provider = "supabase";
@@ -51,6 +125,10 @@ function trackStorageError(error) {
 async function ensureStorageInitialized() {
   if (!storageInitializationPromise) {
     storageInitializationPromise = initializeStorage().catch(error => {
+      if (shouldUseLocalFallback()) {
+        enableLocalFallback(error);
+        return false;
+      }
       trackStorageError(error);
       storageInitializationPromise = null;
       throw error;
@@ -79,6 +157,132 @@ function createSession(username) {
 
 function createRecordId() {
   return crypto.randomBytes(10).toString("hex");
+}
+
+function toPositiveNumber(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+}
+
+function toRoundedKm(value) {
+  return Math.max(0, Math.round((Number(value) || 0) * 10) / 10);
+}
+
+function trimText(value) {
+  return String(value || "").trim();
+}
+
+function buildTravelPerson(person) {
+  return {
+    fullName: trimText(person?.fullName),
+    address: trimText(person?.address),
+    cpf: normalizeCpf(person?.cpf)
+  };
+}
+
+function hasTravelPersonData(person) {
+  return Boolean(person?.fullName || person?.address || person?.cpf);
+}
+
+function calculateProcedureUnits(distanceKm) {
+  const totalKm = toPositiveNumber(distanceKm) ?? 0;
+  if (totalKm <= 0) return 0;
+  return Math.ceil(totalKm / 50);
+}
+
+function buildTravelProcedure(procedure, units) {
+  return {
+    code: procedure.code,
+    description: procedure.description,
+    units: Number(units) || 0
+  };
+}
+
+function haversineKm(from, to) {
+  const earthRadiusKm = 6371;
+  const toRad = degrees => (degrees * Math.PI) / 180;
+  const dLat = toRad(to.lat - from.lat);
+  const dLon = toRad(to.lon - from.lon);
+  const lat1 = toRad(from.lat);
+  const lat2 = toRad(to.lat);
+
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+}
+
+async function loadMaranhaoCities() {
+  if (Array.isArray(maranhaoCitiesCache) && maranhaoCitiesCache.length) {
+    return maranhaoCitiesCache;
+  }
+
+  const response = await fetch("https://servicodados.ibge.gov.br/api/v1/localidades/estados/21/municipios");
+  if (!response.ok) {
+    throw new Error("Nao foi possivel carregar as cidades do Maranhao");
+  }
+
+  const payload = await response.json();
+  maranhaoCitiesCache = Array.isArray(payload)
+    ? payload
+      .map(item => String(item?.nome || "").trim())
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b, "pt-BR"))
+    : [];
+
+  return maranhaoCitiesCache;
+}
+
+async function geocodeMaranhaoCity(cityName) {
+  const query = encodeURIComponent(`${cityName}, Maranhão, Brasil`);
+  const response = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&countrycodes=br&limit=1&q=${query}`, {
+    headers: {
+      "User-Agent": "controle-de-leitos/1.0"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error("Nao foi possivel calcular a distancia da cidade");
+  }
+
+  const payload = await response.json();
+  const match = Array.isArray(payload) ? payload[0] : null;
+  const lat = Number(match?.lat);
+  const lon = Number(match?.lon);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    throw new Error("Cidade nao localizada para calcular a distancia");
+  }
+
+  return { lat, lon };
+}
+
+async function estimateHospitalTripDistance(destination) {
+  const normalizedDestination = String(destination || "").trim();
+  if (!normalizedDestination) {
+    throw new Error("Informe a cidade de destino");
+  }
+
+  if (normalizedDestination.localeCompare(HOSPITAL_TRIP_ORIGIN_CITY, "pt-BR", { sensitivity: "base" }) === 0) {
+    return {
+      originCity: HOSPITAL_TRIP_ORIGIN_CITY,
+      destination: normalizedDestination,
+      oneWayKm: 0,
+      roundTripKm: 0
+    };
+  }
+
+  const destinationCoords = await geocodeMaranhaoCity(normalizedDestination);
+  const airDistance = haversineKm(HOSPITAL_TRIP_ORIGIN_COORDS, destinationCoords);
+  const oneWayKm = toRoundedKm(airDistance * ROAD_DISTANCE_FACTOR);
+  const roundTripKm = toRoundedKm(oneWayKm * 2);
+
+  return {
+    originCity: HOSPITAL_TRIP_ORIGIN_CITY,
+    destination: normalizedDestination,
+    oneWayKm,
+    roundTripKm
+  };
 }
 
 function requireAuth(req, res, next) {
@@ -157,11 +361,14 @@ function ensureSupabaseConfigured() {
 function buildStatePayload() {
   return {
     schemaVersion: 1,
+    updatedAt: new Date().toISOString(),
     nextWardId,
     nextShiftId,
     nextPatientId,
     users,
     patientRegistry,
+    visitorRegistryEntries,
+    hospitalTripEntries,
     nirDailyReports,
     wards
   };
@@ -227,6 +434,46 @@ function applyStatePayload(payload) {
         currentAdmission: patient.currentAdmission || null,
         admissionHistory: Array.isArray(patient.admissionHistory) ? patient.admissionHistory : [],
         visitHistory: Array.isArray(patient.visitHistory) ? patient.visitHistory : []
+      });
+    }
+  }
+  visitorRegistryEntries.length = 0;
+  if (Array.isArray(payload.visitorRegistryEntries)) {
+    for (const entry of payload.visitorRegistryEntries) {
+      visitorRegistryEntries.push({
+        id: entry.id || createRecordId(),
+        accessCode: String(entry.accessCode || "").trim(),
+        visitorName: String(entry.visitorName || "").trim(),
+        sectorOrReason: String(entry.sectorOrReason || "").trim(),
+        createdAt: entry.createdAt || new Date().toISOString(),
+        createdBy: entry.createdBy || ""
+      });
+    }
+  }
+  hospitalTripEntries.length = 0;
+  if (Array.isArray(payload.hospitalTripEntries)) {
+    for (const entry of payload.hospitalTripEntries) {
+      const patient = buildTravelPerson(entry.patient);
+      const companion = buildTravelPerson(entry.companion);
+      const estimatedRoundTripKm = toPositiveNumber(entry.estimatedRoundTripKm);
+      const patientUnits = entry.patientProcedure?.units ?? calculateProcedureUnits(estimatedRoundTripKm);
+      const companionUnits = hasTravelPersonData(companion)
+        ? (entry.companionProcedure?.units ?? calculateProcedureUnits(estimatedRoundTripKm))
+        : 0;
+      hospitalTripEntries.push({
+        id: entry.id || createRecordId(),
+        origin: String(entry.origin || "").trim(),
+        destination: String(entry.destination || "").trim(),
+        kmStart: Number(entry.kmStart) || 0,
+        kmEnd: Number(entry.kmEnd) || 0,
+        estimatedOneWayKm: toPositiveNumber(entry.estimatedOneWayKm),
+        estimatedRoundTripKm,
+        patient,
+        companion,
+        patientProcedure: buildTravelProcedure(PATIENT_TRAVEL_PROCEDURE, patientUnits),
+        companionProcedure: buildTravelProcedure(COMPANION_TRAVEL_PROCEDURE, companionUnits),
+        createdAt: entry.createdAt || new Date().toISOString(),
+        createdBy: entry.createdBy || ""
       });
     }
   }
@@ -338,11 +585,60 @@ async function loadStateFromSupabase() {
   throw lastError || new Error("Falha ao carregar do Supabase");
 }
 
-async function persistState() {
-  ensureSupabaseConfigured();
+function loadStateFromLocalSnapshot() {
+  const localState = readLocalStateEnvelope();
+  if (!localState?.payload) return false;
+  const applied = applyStatePayload(localState.payload);
+  if (applied) {
+    storageStatus.provider = usingLocalFallback ? "local" : storageStatus.provider;
+    storageStatus.synced = true;
+    storageStatus.lastError = null;
+  }
+  return applied;
+}
+
+async function saveStateSnapshot(pendingSync = false) {
+  writeLocalStateEnvelope(pendingSync);
+  return true;
+}
+
+async function tryRecoverSupabaseSync() {
+  if (!usingLocalFallback || !hasSupabaseConfig()) return false;
+
+  const localState = readLocalStateEnvelope();
+  if (localState?.payload) {
+    applyStatePayload(localState.payload);
+  }
+
   try {
-    return await saveStateToSupabase();
+    ensureSupabaseConfigured();
+    await saveStateToSupabase();
+    await saveStateSnapshot(false);
+    disableLocalFallback();
+    return true;
   } catch (error) {
+    enableLocalFallback(error);
+    return false;
+  }
+}
+
+async function persistState() {
+  if (usingLocalFallback) {
+    await saveStateSnapshot(true);
+    return false;
+  }
+
+  try {
+    ensureSupabaseConfigured();
+    const saved = await saveStateToSupabase();
+    await saveStateSnapshot(false);
+    return saved;
+  } catch (error) {
+    if (shouldUseLocalFallback()) {
+      await saveStateSnapshot(true);
+      enableLocalFallback(error);
+      return false;
+    }
     storageStatus.provider = "supabase";
     storageStatus.synced = false;
     storageStatus.lastError = error.message;
@@ -351,13 +647,37 @@ async function persistState() {
 }
 
 async function initializeStorage() {
-  ensureSupabaseConfigured();
+  if (usingLocalFallback) {
+    return loadStateFromLocalSnapshot();
+  }
+
   try {
+    ensureSupabaseConfigured();
+    const localState = readLocalStateEnvelope();
+    if (localState?.pendingSync && localState.payload) {
+      applyStatePayload(localState.payload);
+      await saveStateToSupabase();
+      await saveStateSnapshot(false);
+      disableLocalFallback();
+      return true;
+    }
+
     const loaded = await loadStateFromSupabase();
     if (!loaded) {
+      if (localState?.payload) {
+        applyStatePayload(localState.payload);
+      }
       await saveStateToSupabase();
+      await saveStateSnapshot(false);
+    } else {
+      await saveStateSnapshot(false);
     }
   } catch (error) {
+    if (shouldUseLocalFallback()) {
+      loadStateFromLocalSnapshot();
+      enableLocalFallback(error);
+      return false;
+    }
     storageStatus.provider = "supabase";
     storageStatus.synced = false;
     storageStatus.lastError = error.message;
@@ -366,14 +686,26 @@ async function initializeStorage() {
 }
 
 async function refreshStateFromSupabase() {
-  ensureSupabaseConfigured();
+  if (usingLocalFallback) {
+    return tryRecoverSupabaseSync();
+  }
+
   try {
+    ensureSupabaseConfigured();
     const loaded = await loadStateFromSupabase();
     if (!loaded) {
       await saveStateToSupabase();
+      await saveStateSnapshot(false);
+    } else {
+      await saveStateSnapshot(false);
     }
     return loaded;
   } catch (error) {
+    if (shouldUseLocalFallback()) {
+      loadStateFromLocalSnapshot();
+      enableLocalFallback(error);
+      return false;
+    }
     storageStatus.provider = "supabase";
     storageStatus.synced = false;
     storageStatus.lastError = error.message;
@@ -384,7 +716,11 @@ async function refreshStateFromSupabase() {
 app.use("/api", async (req, res, next) => {
   try {
     await ensureStorageInitialized();
-    await refreshStateFromSupabase();
+    if (usingLocalFallback) {
+      await tryRecoverSupabaseSync();
+    } else {
+      await refreshStateFromSupabase();
+    }
     next();
   } catch (error) {
     res.status(503).json({ error: "Falha na sincronização com o Supabase", detail: error.message });
@@ -744,6 +1080,45 @@ function patientForClient(patient) {
   };
 }
 
+function visitorRegistryEntryForClient(entry) {
+  return {
+    id: entry.id,
+    accessCode: String(entry.accessCode || "").trim(),
+    visitorName: String(entry.visitorName || "").trim(),
+    sectorOrReason: String(entry.sectorOrReason || "").trim(),
+    createdAt: entry.createdAt || "",
+    createdBy: entry.createdBy || ""
+  };
+}
+
+function hospitalTripEntryForClient(entry) {
+  const kmStart = Number(entry.kmStart) || 0;
+  const kmEnd = Number(entry.kmEnd) || 0;
+  const estimatedRoundTripKm = toPositiveNumber(entry.estimatedRoundTripKm);
+  const distance = kmEnd > kmStart ? Math.max(0, kmEnd - kmStart) : (estimatedRoundTripKm ?? 0);
+  const patient = buildTravelPerson(entry.patient);
+  const companion = buildTravelPerson(entry.companion);
+  return {
+    id: entry.id,
+    origin: String(entry.origin || "").trim(),
+    destination: String(entry.destination || "").trim(),
+    kmStart,
+    kmEnd,
+    distance,
+    estimatedOneWayKm: toPositiveNumber(entry.estimatedOneWayKm) ?? null,
+    estimatedRoundTripKm,
+    patient,
+    companion,
+    patientProcedure: buildTravelProcedure(PATIENT_TRAVEL_PROCEDURE, entry.patientProcedure?.units ?? calculateProcedureUnits(distance)),
+    companionProcedure: buildTravelProcedure(
+      COMPANION_TRAVEL_PROCEDURE,
+      hasTravelPersonData(companion) ? (entry.companionProcedure?.units ?? calculateProcedureUnits(distance)) : 0
+    ),
+    createdAt: entry.createdAt || "",
+    createdBy: entry.createdBy || ""
+  };
+}
+
 function getNextUserId() {
   return users.reduce((max, user) => Math.max(max, Number(user.id) || 0), 0) + 1;
 }
@@ -762,11 +1137,15 @@ function sanitizeUser(user) {
       shiftDate: shift.shiftDate || (shift.openedAt ? String(shift.openedAt).slice(0, 10) : ""),
       wardId: shift.wardId,
       wardNome: shift.wardNome || "",
+      ownerUsername: shift.ownerUsername || "",
+      ownerName: shift.ownerName || "",
       shiftLength: shift.shiftLength || "12H",
       shiftPeriod: shift.shiftPeriod || "DIA",
       openedAt: shift.openedAt || null,
       closedAt: shift.closedAt || null,
-      team: shift.team || null
+      team: shift.team || null,
+      teamUpdatedAt: shift.teamUpdatedAt || "",
+      teamUpdatedBy: shift.teamUpdatedBy || ""
     })),
     recentActions: (user.actions || []).slice(0, 20)
   };
@@ -786,6 +1165,7 @@ function addUserAction(user, type, description, meta = {}) {
     id: createRecordId(),
     at: new Date().toISOString(),
     username: user.username,
+    authorName: user.nome || user.username,
     type,
     description,
     meta
@@ -955,8 +1335,10 @@ function buildShiftReport(user, shift) {
       shiftLength: shift.shiftLength || "12H",
       shiftPeriod: shift.shiftPeriod || "DIA",
       team: shift.team || null,
-      username: user.username,
-      nome: user.nome
+      username: shift.ownerUsername || user.username,
+      nome: shift.ownerName || user.nome,
+      teamUpdatedAt: shift.teamUpdatedAt || "",
+      teamUpdatedBy: shift.teamUpdatedBy || ""
     },
     summary: {
       pacientesAtivos: occupiedBeds.length,
@@ -972,7 +1354,15 @@ function buildShiftReport(user, shift) {
       active: activePendencias,
       solved: solvedPendencias
     },
-    actions: (shift.actions || []).slice().reverse()
+    actions: (shift.actions || []).slice().reverse().map(action => ({
+      id: action.id,
+      at: action.at,
+      type: action.type,
+      description: action.description,
+      username: action.username || "",
+      authorName: action.authorName || action.username || "",
+      meta: action.meta || {}
+    }))
   };
 }
 
@@ -1293,6 +1683,142 @@ app.get("/api/patients/:patientId", requireAuth, (req, res) => {
   });
 });
 
+app.get("/api/portaria/visitors", requireAuth, (req, res) => {
+  const items = visitorRegistryEntries
+    .slice()
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+
+  res.json({ visitors: items.map(visitorRegistryEntryForClient) });
+});
+
+app.get("/api/hospital-trips", requireAuth, (req, res) => {
+  const items = hospitalTripEntries
+    .slice()
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+
+  res.json({ trips: items.map(hospitalTripEntryForClient) });
+});
+
+app.get("/api/hospital-trips/cities", requireAuth, async (req, res) => {
+  try {
+    const cities = await loadMaranhaoCities();
+    res.json({
+      originLabel: HOSPITAL_TRIP_ORIGIN_LABEL,
+      originCity: HOSPITAL_TRIP_ORIGIN_CITY,
+      cities
+    });
+  } catch (error) {
+    console.error("Falha ao carregar cidades do Maranhao", error);
+    res.status(502).json({ error: "Nao foi possivel carregar a lista de cidades do Maranhao" });
+  }
+});
+
+app.get("/api/hospital-trips/estimate", requireAuth, async (req, res) => {
+  const destination = String(req.query?.destination || "").trim();
+  if (!destination) return res.status(400).json({ error: "Informe a cidade de destino" });
+
+  try {
+    const estimate = await estimateHospitalTripDistance(destination);
+    res.json({
+      originLabel: HOSPITAL_TRIP_ORIGIN_LABEL,
+      ...estimate
+    });
+  } catch (error) {
+    console.error("Falha ao calcular distancia da viagem", error);
+    res.status(502).json({ error: error.message || "Nao foi possivel calcular a distancia da viagem" });
+  }
+});
+
+app.post("/api/portaria/visitors", requireAuth, async (req, res) => {
+  const accessCode = String(req.body?.accessCode || "").trim();
+  const visitorName = String(req.body?.visitorName || "").trim();
+  const sectorOrReason = String(req.body?.sectorOrReason || "").trim();
+
+  if (!accessCode) return res.status(400).json({ error: "Informe o codigo de acesso" });
+  if (!visitorName) return res.status(400).json({ error: "Informe o nome do visitante" });
+  if (!sectorOrReason) return res.status(400).json({ error: "Informe o setor ou motivo" });
+
+  const now = new Date().toISOString();
+  const entry = {
+    id: createRecordId(),
+    accessCode,
+    visitorName,
+    sectorOrReason,
+    createdAt: now,
+    createdBy: req.user.nome || req.user.username || ""
+  };
+
+  visitorRegistryEntries.unshift(entry);
+
+  addUserAction(req.user, "PORTARIA_VISITOR_CREATE", `Registrou visitante ${visitorName} na portaria`, {
+    accessCode,
+    visitorName,
+    sectorOrReason
+  });
+
+  await persistState();
+  res.json({ ok: true, visitor: visitorRegistryEntryForClient(entry) });
+});
+
+app.post("/api/hospital-trips", requireAuth, async (req, res) => {
+  const origin = String(req.body?.origin || HOSPITAL_TRIP_ORIGIN_LABEL).trim();
+  const destination = String(req.body?.destination || "").trim();
+  const patient = buildTravelPerson(req.body?.patient);
+  const companion = buildTravelPerson(req.body?.companion);
+  let estimatedOneWayKm = toPositiveNumber(req.body?.estimatedOneWayKm);
+  let estimatedRoundTripKm = toPositiveNumber(req.body?.estimatedRoundTripKm);
+  const hasCompanion = hasTravelPersonData(companion);
+
+  if (!origin) return res.status(400).json({ error: "Informe a origem" });
+  if (!destination) return res.status(400).json({ error: "Informe o destino" });
+  if (!patient.fullName) return res.status(400).json({ error: "Informe o nome completo do paciente" });
+  if (!patient.address) return res.status(400).json({ error: "Informe o endereco do paciente" });
+  if (!patient.cpf || patient.cpf.length !== 11) return res.status(400).json({ error: "Informe o CPF do paciente" });
+  if (hasCompanion) {
+    if (!companion.fullName) return res.status(400).json({ error: "Informe o nome completo do acompanhante" });
+    if (!companion.address) return res.status(400).json({ error: "Informe o endereco do acompanhante" });
+    if (!companion.cpf || companion.cpf.length !== 11) return res.status(400).json({ error: "Informe o CPF do acompanhante" });
+  }
+
+  if (estimatedOneWayKm == null || estimatedRoundTripKm == null) {
+    const estimate = await estimateHospitalTripDistance(destination);
+    estimatedOneWayKm = estimate.oneWayKm;
+    estimatedRoundTripKm = estimate.roundTripKm;
+  }
+
+  const patientProcedureUnits = calculateProcedureUnits(estimatedRoundTripKm);
+  const companionProcedureUnits = hasCompanion ? calculateProcedureUnits(estimatedRoundTripKm) : 0;
+
+  const entry = {
+    id: createRecordId(),
+    origin,
+    destination,
+    kmStart: 0,
+    kmEnd: estimatedRoundTripKm ?? 0,
+    estimatedOneWayKm,
+    estimatedRoundTripKm,
+    patient,
+    companion,
+    patientProcedure: buildTravelProcedure(PATIENT_TRAVEL_PROCEDURE, patientProcedureUnits),
+    companionProcedure: buildTravelProcedure(COMPANION_TRAVEL_PROCEDURE, companionProcedureUnits),
+    createdAt: new Date().toISOString(),
+    createdBy: req.user.nome || req.user.username || ""
+  };
+
+  hospitalTripEntries.unshift(entry);
+
+  addUserAction(req.user, "HOSPITAL_TRIP_CREATE", `Registrou viagem de ${origin} para ${destination}`, {
+    origin,
+    destination,
+    estimatedRoundTripKm,
+    patient: patient.fullName,
+    companion: companion.fullName
+  });
+
+  await persistState();
+  res.json({ ok: true, trip: hospitalTripEntryForClient(entry) });
+});
+
 app.post("/api/patients", requireAuth, async (req, res) => {
   const nome = String(req.body?.nome || "").trim();
   const cpf = normalizeCpf(req.body?.cpf);
@@ -1332,13 +1858,18 @@ app.post("/api/patients/:patientId/visits", requireAuth, async (req, res) => {
   const patient = findPatientOr404(req, res);
   if (!patient) return;
 
+  const accessCode = String(req.body?.accessCode || "").trim();
   const visitorName = String(req.body?.visitorName || "").trim();
+  const kinship = String(req.body?.kinship || "").trim();
+  const visitedPersonName = String(patient.nome || "").trim();
   const visitDate = String(req.body?.visitDate || "").trim();
   const visitShift = String(req.body?.visitShift || "").trim().toUpperCase();
   const visitTime = String(req.body?.visitTime || "").trim();
   const note = String(req.body?.note || "").trim();
 
+  if (!accessCode) return res.status(400).json({ error: "Informe o codigo de acesso" });
   if (!visitorName) return res.status(400).json({ error: "Informe o nome do visitante" });
+  if (!kinship) return res.status(400).json({ error: "Informe o grau de parentesco" });
   if (!/^\d{4}-\d{2}-\d{2}$/.test(visitDate)) return res.status(400).json({ error: "Informe a data da visita" });
   if (!["MANHA", "TARDE", "NOITE"].includes(visitShift)) return res.status(400).json({ error: "Selecione o turno da visita" });
   if (!/^\d{2}:\d{2}$/.test(visitTime)) return res.status(400).json({ error: "Informe o horário da visita" });
@@ -1346,7 +1877,10 @@ app.post("/api/patients/:patientId/visits", requireAuth, async (req, res) => {
   const now = new Date().toISOString();
   const visit = {
     id: createRecordId(),
+    accessCode,
     visitorName,
+    kinship,
+    visitedPersonName,
     visitDate,
     visitShift,
     visitTime,
@@ -1362,7 +1896,10 @@ app.post("/api/patients/:patientId/visits", requireAuth, async (req, res) => {
   addUserAction(req.user, "PATIENT_VISIT_CREATE", `Registrou visita para o paciente ${patient.nome}`, {
     patientId: patient.id,
     patientName: patient.nome,
+    accessCode,
     visitorName,
+    kinship,
+    visitedPersonName,
     visitDate,
     visitShift,
     visitTime
@@ -1570,11 +2107,13 @@ app.post("/api/shifts/open", requireAuth, async (req, res) => {
   const wardId = parseInt(req.body?.wardId, 10);
   const ward = wards.find(item => item.id === wardId);
   if (!ward) return res.status(400).json({ error: "Selecione um setor válido para abrir o plantão" });
-  const wardTeam = ensureWardTeam(ward);
   const shiftLength = String(req.body?.shiftLength || "").trim().toUpperCase() === "24H" ? "24H" : "12H";
   let shiftPeriod = String(req.body?.shiftPeriod || "").trim().toUpperCase();
   if (shiftLength === "24H") shiftPeriod = "COMPLETO";
   if (!["DIA", "NOITE", "COMPLETO"].includes(shiftPeriod)) shiftPeriod = "DIA";
+  const ownerName = req.user.nome || req.user.username;
+  const defaultNurseDay = shiftLength === "24H" || shiftPeriod === "DIA" || shiftPeriod === "COMPLETO" ? ownerName : "";
+  const defaultNurseNight = shiftLength === "24H" || shiftPeriod === "NOITE" || shiftPeriod === "COMPLETO" ? ownerName : "";
 
   req.user.activeShift = {
     id: nextShiftId++,
@@ -1583,16 +2122,20 @@ app.post("/api/shifts/open", requireAuth, async (req, res) => {
     closedAt: null,
     wardId: ward.id,
     wardNome: ward.nome,
+    ownerUsername: req.user.username,
+    ownerName,
     shiftLength,
     shiftPeriod,
     team: {
-      medicoPlantao: wardTeam.medicoPlantao || "",
-      enfermeiroDia: wardTeam.enfermeiroDia || "",
-      tecnicosDia: wardTeam.tecnicosDia || "",
-      enfermeiroNoite: wardTeam.enfermeiroNoite || "",
-      tecnicosNoite: wardTeam.tecnicosNoite || "",
-      faltosos: wardTeam.faltosos || ""
+      medicoPlantao: "",
+      enfermeiroDia: defaultNurseDay,
+      tecnicosDia: "",
+      enfermeiroNoite: defaultNurseNight,
+      tecnicosNoite: "",
+      faltosos: ""
     },
+    teamUpdatedAt: "",
+    teamUpdatedBy: "",
     actions: [],
     pendenciasFinalizadas: []
   };

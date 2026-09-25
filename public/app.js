@@ -46,6 +46,11 @@ let nirCurrentReport = null;
 let nirPreviousReports = [];
 let nirOtherUserReports = [];
 let currentPortariaPatient = null;
+let portariaVisitorEntries = [];
+let hospitalTripEntries = [];
+let maranhaoTravelCities = [];
+let maranhaoTravelCitiesLookup = new Set();
+let travelDistanceEstimate = null;
 
 const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "DRENO DE TORAX"];
 const NO_ENFERMARIA_VALUE = "__SEM_ENFERMARIA__";
@@ -320,7 +325,7 @@ function clearPatientFields() {
 }
 
 function showOnly(viewId) {
-  const ids = ["view-login", "view-dashboard", "view-home", "view-portaria", "view-patients", "view-nir", "view-admin"];
+  const ids = ["view-login", "view-dashboard", "view-home", "view-portaria", "view-travel", "view-patients", "view-nir", "view-admin"];
   for (const id of ids) {
     const el = document.getElementById(id);
     if (!el) continue;
@@ -330,11 +335,12 @@ function showOnly(viewId) {
     "view-dashboard": "nav-dashboard",
     "view-home": "nav-home",
     "view-portaria": "nav-portaria",
+    "view-travel": "nav-travel",
     "view-patients": "nav-patients",
     "view-nir": "nav-nir",
     "view-admin": "nav-gerenciar"
   };
-  for (const id of ["nav-dashboard", "nav-home", "nav-portaria", "nav-patients", "nav-nir", "nav-gerenciar"]) {
+  for (const id of ["nav-dashboard", "nav-home", "nav-portaria", "nav-travel", "nav-patients", "nav-nir", "nav-gerenciar"]) {
     document.getElementById(id)?.classList.toggle("ghost", navMap[viewId] !== id);
   }
   document.body.classList.toggle("login-only", viewId === "view-login");
@@ -602,6 +608,11 @@ function renderShiftTeamSummary() {
   container.innerHTML = "";
   if (!activeShift) return;
 
+  const ownerRow = document.createElement("div");
+  ownerRow.className = "shift-team-row";
+  ownerRow.innerHTML = `<strong>Plantão vinculado</strong><span>${activeShift.ownerName || currentUser?.nome || currentUser?.username || "-"} (${activeShift.ownerUsername || currentUser?.username || "-"})</span>`;
+  container.appendChild(ownerRow);
+
   const team = activeShift.team || {};
   const shiftLength = activeShift.shiftLength || "12H";
   const shiftPeriod = activeShift.shiftPeriod || "DIA";
@@ -632,6 +643,13 @@ function renderShiftTeamSummary() {
     row.className = "shift-team-row";
     row.innerHTML = `<strong>${label}</strong><span>${value}</span>`;
     container.appendChild(row);
+  }
+
+  if (activeShift.teamUpdatedBy || activeShift.teamUpdatedAt) {
+    const updatedRow = document.createElement("div");
+    updatedRow.className = "shift-team-row";
+    updatedRow.innerHTML = `<strong>Última atualização da equipe</strong><span>${activeShift.teamUpdatedBy || "-"}${activeShift.teamUpdatedAt ? ` em ${toBRDateTime(activeShift.teamUpdatedAt)}` : ""}</span>`;
+    container.appendChild(updatedRow);
   }
 }
 
@@ -783,6 +801,9 @@ function buildShiftHistoryTeamLines(shift) {
     if (team.tecnicosNoite) items.push(`Tec. noite: ${team.tecnicosNoite}`);
   }
   if (team.faltosos) items.push(`Faltosos: ${team.faltosos}`);
+  if (shift?.teamUpdatedBy || shift?.teamUpdatedAt) {
+    items.push(`Equipe atualizada por: ${shift.teamUpdatedBy || "-"}${shift.teamUpdatedAt ? ` em ${toBRDateTime(shift.teamUpdatedAt)}` : ""}`);
+  }
 
   return items;
 }
@@ -799,7 +820,7 @@ function renderShiftHistory() {
     currentCard.innerHTML = `
       <strong>Plantão em andamento</strong>
       <span>Data: ${toBRDate(activeShift.shiftDate || getTodayIsoDate())}</span>
-      <span>Aberto por ${currentUser?.nome || currentUser?.username || "-"} em ${toBRDateTime(activeShift.openedAt)}</span>
+      <span>Aberto por ${activeShift.ownerName || currentUser?.nome || currentUser?.username || "-"} (${activeShift.ownerUsername || currentUser?.username || "-"}) em ${toBRDateTime(activeShift.openedAt)}</span>
     `;
     container.appendChild(currentCard);
   }
@@ -820,6 +841,7 @@ function renderShiftHistory() {
     const meta = [
       `Data: ${toBRDate(shift.shiftDate || (shift.openedAt ? String(shift.openedAt).slice(0, 10) : "")) || "-"}`,
       `Setor: ${shift.wardNome || "-"}`,
+      `Vinculado a: ${shift.ownerName || shift.ownerUsername || "-"}`,
       `Abertura: ${toBRDateTime(shift.openedAt) || "-"}`,
       `Fechamento: ${toBRDateTime(shift.closedAt) || "-"}`
     ];
@@ -835,14 +857,29 @@ function renderShiftHistory() {
 function renderShiftTeamForm() {
   const team = getActiveShiftTeam();
   const activeShift = currentUser?.activeShift || null;
+  const loggedUserName = currentUser?.nome || currentUser?.username || "";
+  const shiftLength = activeShift?.shiftLength || normalizeShiftLength(document.getElementById("shift-length")?.value);
+  const shiftPeriod = activeShift?.shiftPeriod || normalizeShiftPeriod(document.getElementById("shift-period")?.value, shiftLength);
+  const defaultNurseDay = (shiftLength === "24H" || shiftPeriod === "DIA" || shiftPeriod === "COMPLETO") ? loggedUserName : "";
+  const defaultNurseNight = (shiftLength === "24H" || shiftPeriod === "NOITE" || shiftPeriod === "COMPLETO") ? loggedUserName : "";
   const shiftDate = document.getElementById("shift-date");
   if (shiftDate) shiftDate.value = activeShift?.shiftDate || getTodayIsoDate();
   document.getElementById("eq-medico").value = team?.medicoPlantao || "";
-  document.getElementById("eq-enf-dia").value = team?.enfermeiroDia || "";
+  document.getElementById("eq-enf-dia").value = team?.enfermeiroDia || defaultNurseDay;
   document.getElementById("eq-tec-dia").value = team?.tecnicosDia || "";
-  document.getElementById("eq-enf-noite").value = team?.enfermeiroNoite || "";
+  document.getElementById("eq-enf-noite").value = team?.enfermeiroNoite || defaultNurseNight;
   document.getElementById("eq-tec-noite").value = team?.tecnicosNoite || "";
   document.getElementById("eq-faltosos").value = team?.faltosos || "";
+}
+
+function openShiftTeamModal() {
+  if (!currentUser?.activeShift) {
+    setShiftFeedback("Abra o plantão antes de cadastrar a equipe.", true);
+    return;
+  }
+  renderShiftTeamForm();
+  syncShiftFormVisibility();
+  document.getElementById("modal-shift-team")?.showModal();
 }
 
 function syncShiftFormVisibility() {
@@ -1254,6 +1291,166 @@ function setPortariaVisitFeedback(message = "", isError = false) {
   feedback.classList.toggle("error-text", Boolean(message && isError));
 }
 
+function setPortariaRegistryFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("portaria-registry-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function setTravelFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("travel-form-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function formatTravelKm(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "0 km";
+  return `${numeric.toLocaleString("pt-BR", {
+    minimumFractionDigits: Number.isInteger(numeric) ? 0 : 1,
+    maximumFractionDigits: 1
+  })} km`;
+}
+
+function formatProcedureUnits(value) {
+  const units = Number(value) || 0;
+  return String(units).padStart(2, "0");
+}
+
+function calculateTravelProcedureUnits(distanceKm) {
+  const total = Number(distanceKm);
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  return Math.ceil(total / 50);
+}
+
+function hasCompanionTravelFormData() {
+  return Boolean(
+    document.getElementById("travel-companion-name")?.value.trim()
+    || document.getElementById("travel-companion-cpf")?.value.trim()
+    || document.getElementById("travel-companion-address")?.value.trim()
+  );
+}
+
+function updateTravelSummary(items) {
+  const countEl = document.getElementById("travel-count");
+  const kmEl = document.getElementById("travel-km-total");
+  const trips = Array.isArray(items) ? items : [];
+  const totalKm = trips.reduce((sum, item) => sum + (Number(item.distance) || 0), 0);
+  if (countEl) countEl.textContent = `${trips.length} viagem${trips.length === 1 ? "" : "s"}`;
+  if (kmEl) kmEl.textContent = `${totalKm.toLocaleString("pt-BR")} km`;
+}
+
+function renderTravelCityOptions(cities) {
+  maranhaoTravelCities = Array.isArray(cities) ? cities : [];
+  maranhaoTravelCitiesLookup = new Set(maranhaoTravelCities.map(item => String(item || "").toLocaleLowerCase("pt-BR")));
+  const datalist = document.getElementById("travel-destination-cities");
+  if (!datalist) return;
+
+  datalist.innerHTML = "";
+  for (const city of maranhaoTravelCities) {
+    const option = document.createElement("option");
+    option.value = city;
+    datalist.appendChild(option);
+  }
+}
+
+function applyTravelEstimate(estimate = null) {
+  travelDistanceEstimate = estimate;
+  const oneWayEl = document.getElementById("travel-estimate-one-way");
+  const roundTripEl = document.getElementById("travel-estimate-round-trip");
+  if (oneWayEl) oneWayEl.textContent = formatTravelKm(estimate?.oneWayKm || 0);
+  if (roundTripEl) roundTripEl.textContent = formatTravelKm(estimate?.roundTripKm || 0);
+  updateTravelProcedureSummary();
+}
+
+function updateTravelProcedureSummary() {
+  const patientUnitsEl = document.getElementById("travel-patient-procedure-units");
+  const companionUnitsEl = document.getElementById("travel-companion-procedure-units");
+  const units = calculateTravelProcedureUnits(travelDistanceEstimate?.roundTripKm);
+  if (patientUnitsEl) patientUnitsEl.textContent = formatProcedureUnits(units);
+  if (companionUnitsEl) {
+    companionUnitsEl.textContent = formatProcedureUnits(hasCompanionTravelFormData() ? units : 0);
+  }
+}
+
+async function loadTravelCities() {
+  if (maranhaoTravelCities.length) return;
+
+  const data = await api("/api/hospital-trips/cities");
+  renderTravelCityOptions(data.cities || []);
+  document.getElementById("travel-origin").value = data.originLabel || "Hospital Municipal de Açailândia";
+  applyTravelEstimate(null);
+}
+
+async function refreshTravelEstimate(force = false) {
+  const destination = document.getElementById("travel-destination")?.value.trim() || "";
+  if (!destination) {
+    applyTravelEstimate(null);
+    return;
+  }
+
+  const normalized = destination.toLocaleLowerCase("pt-BR");
+  if (!force && maranhaoTravelCitiesLookup.size && !maranhaoTravelCitiesLookup.has(normalized)) {
+    applyTravelEstimate(null);
+    setTravelFeedback("Escolha uma cidade da lista do Maranhão para calcular o km.", true);
+    return;
+  }
+
+  try {
+    const data = await api(`/api/hospital-trips/estimate?destination=${encodeURIComponent(destination)}`);
+    applyTravelEstimate(data);
+    setTravelFeedback("");
+  } catch (error) {
+    applyTravelEstimate(null);
+    setTravelFeedback(error.message || "Nao foi possivel calcular a distancia da viagem.", true);
+  }
+}
+
+function updatePortariaRegistryCount(count) {
+  const badge = document.getElementById("portaria-registry-count");
+  if (!badge) return;
+  const total = Number(count) || 0;
+  badge.textContent = `${total} registro${total === 1 ? "" : "s"}`;
+}
+
+function renderPortariaVisitorRegistry(items) {
+  portariaVisitorEntries = Array.isArray(items) ? items : [];
+  const container = document.getElementById("portaria-registry-list");
+  const empty = document.getElementById("portaria-registry-empty");
+  if (!container || !empty) return;
+
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", portariaVisitorEntries.length > 0);
+  updatePortariaRegistryCount(portariaVisitorEntries.length);
+
+  for (const entry of portariaVisitorEntries) {
+    const card = document.createElement("div");
+    card.className = "portaria-registry-card";
+    card.innerHTML = `
+      <strong>${escapeHtml(entry.visitorName || "-")}</strong>
+      <span>Codigo de acesso: ${escapeHtml(entry.accessCode || "-")}</span>
+      <span>Setor ou motivo: ${escapeHtml(entry.sectorOrReason || "-")}</span>
+      <span>Registrado por ${escapeHtml(entry.createdBy || "-")} em ${escapeHtml(toBRDateTime(entry.createdAt) || "-")}</span>
+    `;
+    container.appendChild(card);
+  }
+}
+
+async function loadPortariaVisitorRegistry() {
+  try {
+    const data = await api("/api/portaria/visitors");
+    renderPortariaVisitorRegistry(data.visitors || []);
+    setPortariaRegistryFeedback("");
+  } catch (error) {
+    renderPortariaVisitorRegistry([]);
+    setPortariaRegistryFeedback(error.message || "Nao foi possivel carregar os visitantes da portaria.", true);
+  }
+}
+
 function renderPortariaVisitHistory(items) {
   const history = Array.isArray(items) ? items : [];
   const container = document.getElementById("portaria-visit-history");
@@ -1268,6 +1465,8 @@ function renderPortariaVisitHistory(items) {
     card.className = "visit-history-card";
     card.innerHTML = `
       <strong>${escapeHtml(visit.visitorName || "-")}</strong>
+      <span>Codigo de acesso: ${escapeHtml(visit.accessCode || "-")}</span>
+      <span>Parentesco: ${escapeHtml(visit.kinship || "-")}</span>
       <span>Data: ${escapeHtml(toBRDate(visit.visitDate) || "-")} • Turno: ${escapeHtml(visit.visitShift || "-")} • Horario: ${escapeHtml(visit.visitTime || "-")}</span>
       <span>Registrado por ${escapeHtml(visit.createdBy || "-")} em ${escapeHtml(toBRDateTime(visit.createdAt) || "-")}</span>
       ${visit.note ? `<span>Observacao: ${escapeHtml(visit.note)}</span>` : ""}
@@ -1288,13 +1487,83 @@ function fillPortariaVisitForm(patient) {
   document.getElementById("portaria-visit-patient-age").textContent = age;
   document.getElementById("portaria-visit-patient-ward").textContent = currentAdmission?.wardNome || "-";
   document.getElementById("portaria-visit-patient-bed").textContent = currentAdmission?.bedId || "-";
+  document.getElementById("portaria-visit-access-code").value = "";
   document.getElementById("portaria-visit-visitor-name").value = "";
+  document.getElementById("portaria-visit-kinship").value = "";
   document.getElementById("portaria-visit-date").value = getTodayIsoDate();
   document.getElementById("portaria-visit-shift").value = getSuggestedVisitShift(now);
   document.getElementById("portaria-visit-time").value = getCurrentTimeValue();
   document.getElementById("portaria-visit-note").value = "";
+  updatePortariaVisitHeroSchedule();
   setPortariaVisitFeedback("");
   renderPortariaVisitHistory(patient?.visitHistory || []);
+}
+
+function updatePortariaVisitHeroSchedule() {
+  const dateValue = document.getElementById("portaria-visit-date")?.value || "";
+  const shiftValue = document.getElementById("portaria-visit-shift")?.value || "";
+  const timeValue = document.getElementById("portaria-visit-time")?.value || "";
+
+  const summaryDate = document.getElementById("portaria-visit-summary-date");
+  const summaryShift = document.getElementById("portaria-visit-summary-shift");
+  const summaryTime = document.getElementById("portaria-visit-summary-time");
+
+  if (summaryDate) summaryDate.textContent = toBRDate(dateValue) || "-";
+  if (summaryShift) summaryShift.textContent = shiftValue || "-";
+  if (summaryTime) summaryTime.textContent = timeValue || "-";
+}
+
+function renderHospitalTrips(items) {
+  hospitalTripEntries = Array.isArray(items) ? items : [];
+  const container = document.getElementById("travel-list");
+  const empty = document.getElementById("travel-empty");
+  if (!container || !empty) return;
+
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", hospitalTripEntries.length > 0);
+  updateTravelSummary(hospitalTripEntries);
+  updateTravelBatchSummary();
+
+  for (const trip of hospitalTripEntries) {
+    const card = document.createElement("div");
+    card.className = "travel-trip-card";
+    card.innerHTML = `
+      <strong>${escapeHtml(trip.origin || "-")} -> ${escapeHtml(trip.destination || "-")}</strong>
+      <span>Paciente: ${escapeHtml(trip.patient?.fullName || "-")} • CPF: ${escapeHtml(trip.patient?.cpf || "-")}</span>
+      <span>Endereco do paciente: ${escapeHtml(trip.patient?.address || "-")}</span>
+      <span>Acompanhante: ${escapeHtml(trip.companion?.fullName || "Nao informado")} • CPF: ${escapeHtml(trip.companion?.cpf || "-")}</span>
+      <span>Endereco do acompanhante: ${escapeHtml(trip.companion?.address || "-")}</span>
+      <span>Estimativa: ida ${escapeHtml(String(trip.estimatedOneWayKm ?? 0))} km • total ${escapeHtml(String(trip.estimatedRoundTripKm ?? 0))} km</span>
+      <span>${escapeHtml(trip.patientProcedure?.code || "-")} • qtd ${escapeHtml(formatProcedureUnits(trip.patientProcedure?.units || 0))}</span>
+      <span>${escapeHtml(trip.companionProcedure?.code || "-")} • qtd ${escapeHtml(formatProcedureUnits(trip.companionProcedure?.units || 0))}</span>
+      <span>Registrado por ${escapeHtml(trip.createdBy || "-")} em ${escapeHtml(toBRDateTime(trip.createdAt) || "-")}</span>
+      <div class="travel-trip-actions">
+        <button type="button" class="ghost btn-travel-bpa-report" data-id="${escapeHtml(trip.id || "")}">Gerar BPA-I</button>
+      </div>
+    `;
+    container.appendChild(card);
+  }
+}
+
+async function loadHospitalTrips() {
+  try {
+    const data = await api("/api/hospital-trips");
+    renderHospitalTrips(data.trips || []);
+    setTravelFeedback("");
+  } catch (error) {
+    renderHospitalTrips([]);
+    setTravelFeedback(error.message || "Nao foi possivel carregar as viagens.", true);
+  }
+}
+
+async function openTravelView() {
+  await refreshWards();
+  setAppEnabled(false);
+  showOnly("view-travel");
+  closeSidebarOnMobile();
+  ensureTravelBatchMonthDefault();
+  await loadTravelCities();
+  await loadHospitalTrips();
 }
 
 async function openPortariaVisitModal(patientId) {
@@ -1342,6 +1611,7 @@ async function openPortariaView() {
   setAppEnabled(false);
   showOnly("view-portaria");
   closeSidebarOnMobile();
+  await loadPortariaVisitorRegistry();
 
   try {
     const data = await api("/api/patients?active=true");
@@ -1364,12 +1634,86 @@ async function openPortariaView() {
   }
 }
 
+async function savePortariaVisitorRegistry() {
+  const payload = {
+    accessCode: document.getElementById("portaria-registry-access-code").value.trim(),
+    visitorName: document.getElementById("portaria-registry-visitor-name").value.trim(),
+    sectorOrReason: document.getElementById("portaria-registry-sector-reason").value.trim()
+  };
+
+  try {
+    const data = await api("/api/portaria/visitors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const nextItems = [data.visitor, ...portariaVisitorEntries].filter(Boolean);
+    renderPortariaVisitorRegistry(nextItems);
+    document.getElementById("portaria-registry-access-code").value = "";
+    document.getElementById("portaria-registry-visitor-name").value = "";
+    document.getElementById("portaria-registry-sector-reason").value = "";
+    setPortariaRegistryFeedback("Visitante registrado com sucesso.");
+  } catch (error) {
+    setPortariaRegistryFeedback(error.message || "Nao foi possivel registrar o visitante.", true);
+  }
+}
+
+async function saveHospitalTrip() {
+  const payload = {
+    origin: document.getElementById("travel-origin").value.trim(),
+    destination: document.getElementById("travel-destination").value.trim(),
+    estimatedOneWayKm: travelDistanceEstimate?.oneWayKm,
+    estimatedRoundTripKm: travelDistanceEstimate?.roundTripKm,
+    patient: {
+      fullName: document.getElementById("travel-patient-name").value.trim(),
+      cpf: document.getElementById("travel-patient-cpf").value.trim(),
+      address: document.getElementById("travel-patient-address").value.trim()
+    },
+    companion: {
+      fullName: document.getElementById("travel-companion-name").value.trim(),
+      cpf: document.getElementById("travel-companion-cpf").value.trim(),
+      address: document.getElementById("travel-companion-address").value.trim()
+    }
+  };
+
+  if (!payload.destination) {
+    setTravelFeedback("Selecione a cidade de destino.", true);
+    return;
+  }
+  if (!travelDistanceEstimate?.roundTripKm && travelDistanceEstimate?.roundTripKm !== 0) {
+    setTravelFeedback("Escolha uma cidade valida para calcular a viagem.", true);
+    return;
+  }
+
+  try {
+    const data = await api("/api/hospital-trips", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    renderHospitalTrips([data.trip, ...hospitalTripEntries].filter(Boolean));
+    document.getElementById("travel-destination").value = "";
+    document.getElementById("travel-patient-name").value = "";
+    document.getElementById("travel-patient-cpf").value = "";
+    document.getElementById("travel-patient-address").value = "";
+    document.getElementById("travel-companion-name").value = "";
+    document.getElementById("travel-companion-cpf").value = "";
+    document.getElementById("travel-companion-address").value = "";
+    applyTravelEstimate(null);
+    setTravelFeedback("Viagem registrada com sucesso.");
+  } catch (error) {
+    setTravelFeedback(error.message || "Nao foi possivel registrar a viagem.", true);
+  }
+}
+
 async function savePortariaVisit() {
   const patientId = currentPortariaPatient?.id;
   if (!patientId) return;
 
   const payload = {
+    accessCode: document.getElementById("portaria-visit-access-code").value.trim(),
     visitorName: document.getElementById("portaria-visit-visitor-name").value.trim(),
+    kinship: document.getElementById("portaria-visit-kinship").value.trim(),
     visitDate: document.getElementById("portaria-visit-date").value,
     visitShift: document.getElementById("portaria-visit-shift").value,
     visitTime: document.getElementById("portaria-visit-time").value,
@@ -1384,9 +1728,14 @@ async function savePortariaVisit() {
     });
     currentPortariaPatient = data.patient || currentPortariaPatient;
     renderPortariaVisitHistory(currentPortariaPatient?.visitHistory || []);
+    document.getElementById("portaria-visit-access-code").value = "";
     document.getElementById("portaria-visit-visitor-name").value = "";
+    document.getElementById("portaria-visit-kinship").value = "";
+    document.getElementById("portaria-visit-date").value = getTodayIsoDate();
+    document.getElementById("portaria-visit-shift").value = getSuggestedVisitShift(new Date());
     document.getElementById("portaria-visit-time").value = getCurrentTimeValue();
     document.getElementById("portaria-visit-note").value = "";
+    updatePortariaVisitHeroSchedule();
     setPortariaVisitFeedback("Visita registrada com sucesso.");
   } catch (error) {
     setPortariaVisitFeedback(error.message || "Nao foi possivel registrar a visita.", true);
@@ -1637,6 +1986,353 @@ function buildNirPrintTable(items = [], emptyMessage = "Nenhum paciente.") {
       <tbody>${rows}</tbody>
     </table>
   `;
+}
+
+function getTravelBpaCompetenceLabel(iso) {
+  const date = iso ? new Date(iso) : new Date();
+  if (Number.isNaN(date.getTime())) return "--/----";
+  return `${String(date.getMonth() + 1).padStart(2, "0")}/${date.getFullYear()}`;
+}
+
+function getTravelBpaCompetenceValue(iso) {
+  const date = iso ? new Date(iso) : new Date();
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function ensureTravelBatchMonthDefault() {
+  const input = document.getElementById("travel-batch-month");
+  if (!input || input.value) return;
+  input.value = getTravelBpaCompetenceValue(new Date().toISOString());
+}
+
+function getTravelTripsByCompetence(monthValue) {
+  const competence = String(monthValue || "").trim();
+  if (!competence) return [];
+  return hospitalTripEntries.filter(item => getTravelBpaCompetenceValue(item.createdAt) === competence);
+}
+
+function updateTravelBatchSummary() {
+  ensureTravelBatchMonthDefault();
+  const summary = document.getElementById("travel-batch-summary");
+  if (!summary) return;
+  const monthValue = document.getElementById("travel-batch-month")?.value || "";
+  const trips = getTravelTripsByCompetence(monthValue);
+  const rows = trips.flatMap(buildTravelBpaProcedureRows);
+  const totalKm = trips.reduce((sum, item) => sum + (Number(item.estimatedRoundTripKm) || 0), 0);
+  const competenceLabel = monthValue ? monthValue.split("-").reverse().join("/") : "--/----";
+  summary.textContent = `${trips.length} viagem(ns) e ${rows.length} lancamento(s) BPA-I em ${competenceLabel}. Total estimado: ${formatTravelKm(totalKm)}.`;
+}
+
+function buildTravelBpaProcedureRows(trip) {
+  const rows = [];
+  const attendanceDate = toBRDate(String(trip?.createdAt || "").slice(0, 10)) || toBRDate(getTodayIsoDate()) || "-";
+  const commonMeta = {
+    attendanceDate,
+    destination: trip?.destination || "-",
+    totalKm: formatTravelKm(trip?.estimatedRoundTripKm || 0),
+    origin: trip?.origin || "-"
+  };
+
+  rows.push({
+    type: "Paciente",
+    person: trip?.patient || {},
+    procedure: trip?.patientProcedure || {},
+    ...commonMeta
+  });
+
+  if ((trip?.companionProcedure?.units || 0) > 0 && trip?.companion?.fullName) {
+    rows.push({
+      type: "Acompanhante",
+      person: trip.companion || {},
+      procedure: trip.companionProcedure || {},
+      ...commonMeta
+    });
+  }
+
+  return rows;
+}
+
+function openPrintPreviewWindow(html, title = "Relatorio") {
+  const popup = window.open("", "_blank", "width=1280,height=920");
+  if (!popup) {
+    throw new Error("Nao foi possivel abrir a janela de impressao.");
+  }
+
+  try {
+    popup.document.open("text/html", "replace");
+    popup.document.write(html);
+    popup.document.close();
+    popup.focus();
+    return popup;
+  } catch (error) {
+    try {
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+      const blobUrl = URL.createObjectURL(blob);
+      popup.location.replace(blobUrl);
+      popup.document.title = title;
+      popup.focus();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+      return popup;
+    } catch {
+      popup.close();
+      throw error;
+    }
+  }
+}
+
+function printTravelBpaReport(tripId) {
+  const trip = hospitalTripEntries.find(item => String(item.id) === String(tripId));
+  if (!trip) {
+    setTravelFeedback("Nao foi possivel localizar a viagem para gerar o BPA-I.", true);
+    return;
+  }
+
+  try {
+    const rows = buildTravelBpaProcedureRows(trip);
+    const rowHtml = rows.map(item => `
+    <tr>
+      <td>${escapeHtml(item.type)}</td>
+      <td>${escapeHtml(item.person?.fullName || "-")}</td>
+      <td>${escapeHtml(formatCpf(item.person?.cpf || "") || "-")}</td>
+      <td>${escapeHtml(item.person?.address || "-")}</td>
+      <td>${escapeHtml(item.procedure?.code || "-")}<br><small>${escapeHtml(item.procedure?.description || "-")}</small></td>
+      <td>${escapeHtml(formatProcedureUnits(item.procedure?.units || 0))}</td>
+      <td>${escapeHtml(item.attendanceDate)}</td>
+      <td>____________________</td>
+      <td>____________________</td>
+    </tr>
+  `).join("");
+
+    const html = `<!DOCTYPE html>
+  <html lang="pt-BR">
+    <head>
+      <meta charset="utf-8">
+      <title>BPA-I - Transporte Terrestre</title>
+      <style>
+        body { font-family: Arial, sans-serif; margin: 0; background: #e5edf5; color: #102a43; }
+        .toolbar { position: sticky; top: 0; z-index: 10; display: flex; gap: 12px; align-items: center; padding: 14px 18px; background: #102a43; color: #fff; }
+        .toolbar button { padding: 10px 16px; border: 0; border-radius: 8px; background: #16a34a; color: #fff; font-weight: 700; cursor: pointer; }
+        .page-wrap { padding: 24px; display: flex; justify-content: center; }
+        .sheet { width: 210mm; min-height: 297mm; background: #fff; box-shadow: 0 12px 40px rgba(16, 42, 67, 0.18); padding: 14mm; }
+        .header { display: flex; justify-content: space-between; gap: 14px; border-bottom: 2px solid #d8e3f0; padding-bottom: 12px; margin-bottom: 16px; }
+        .header h1 { margin: 0; font-size: 24px; }
+        .header p { margin: 4px 0 0; font-size: 13px; color: #475569; }
+        .meta-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+        .meta-card { border: 1px solid #c9d7e6; border-radius: 10px; padding: 10px; background: #f8fbff; }
+        .meta-card strong { display: block; font-size: 11px; text-transform: uppercase; color: #64748b; margin-bottom: 4px; }
+        .meta-card span { font-size: 13px; font-weight: 700; color: #0f172a; }
+        .section { margin-top: 16px; }
+        .section h2 { margin: 0 0 8px; font-size: 16px; }
+        .section p { margin: 0; font-size: 12px; color: #475569; }
+        table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+        th, td { border: 1px solid #8ea3c2; padding: 8px; font-size: 11px; text-align: left; vertical-align: top; }
+        th { background: #c4d8f4; }
+        small { color: #64748b; }
+        .notes { margin-top: 14px; padding: 12px; border: 1px dashed #94a3b8; border-radius: 10px; background: #f8fafc; font-size: 12px; color: #334155; }
+        .notes ul { margin: 8px 0 0 18px; padding: 0; }
+        @media print {
+          body { background: #fff; }
+          .toolbar { display: none; }
+          .page-wrap { padding: 0; }
+          .sheet { width: auto; min-height: auto; box-shadow: none; padding: 0; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="toolbar">
+        <button onclick="window.print()">Imprimir / Salvar PDF</button>
+        <span>Espelho BPA-I baseado nos dados da viagem cadastrada.</span>
+      </div>
+      <div class="page-wrap">
+        <div class="sheet">
+          <div class="header">
+            <div>
+              <h1>Espelho BPA-I - Transporte Terrestre</h1>
+              <p>Relatorio individualizado para conferencia e digitacao no BPA.</p>
+            </div>
+            <div>
+              <div><strong>Competencia:</strong> ${escapeHtml(getTravelBpaCompetenceLabel(trip.createdAt))}</div>
+              <div><strong>Gerado em:</strong> ${escapeHtml(toBRDateTime(new Date().toISOString()))}</div>
+            </div>
+          </div>
+
+          <div class="meta-grid">
+            <div class="meta-card"><strong>Origem</strong><span>${escapeHtml(trip.origin || "-")}</span></div>
+            <div class="meta-card"><strong>Destino</strong><span>${escapeHtml(trip.destination || "-")}</span></div>
+            <div class="meta-card"><strong>Km ida</strong><span>${escapeHtml(formatTravelKm(trip.estimatedOneWayKm || 0))}</span></div>
+            <div class="meta-card"><strong>Km total</strong><span>${escapeHtml(formatTravelKm(trip.estimatedRoundTripKm || 0))}</span></div>
+            <div class="meta-card"><strong>Paciente</strong><span>${escapeHtml(trip.patient?.fullName || "-")}</span></div>
+            <div class="meta-card"><strong>Acompanhante</strong><span>${escapeHtml(trip.companion?.fullName || "Nao informado")}</span></div>
+            <div class="meta-card"><strong>Digitador</strong><span>${escapeHtml(currentUser?.nome || currentUser?.username || "-")}</span></div>
+            <div class="meta-card"><strong>Data atendimento</strong><span>${escapeHtml(toBRDate(String(trip.createdAt || "").slice(0, 10)) || "-")}</span></div>
+          </div>
+
+          <div class="section">
+            <h2>Lancamentos BPA-I</h2>
+            <p>Os procedimentos abaixo seguem a regra de 1 unidade a cada 50 km do total da viagem.</p>
+            <table>
+              <thead>
+                <tr>
+                  <th>Tipo</th>
+                  <th>Nome completo</th>
+                  <th>CPF/CNS</th>
+                  <th>Endereco</th>
+                  <th>Procedimento</th>
+                  <th>Qtd</th>
+                  <th>Data at.</th>
+                  <th>Municipio/IBGE</th>
+                  <th>CNS Prof./CBO</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rowHtml}
+              </tbody>
+            </table>
+          </div>
+
+          <div class="notes">
+            <strong>Campos do modelo BPA-I para conferencia:</strong>
+            <ul>
+              <li>Baseado no registro individualizado do BPA, com identificacao do usuario e do atendimento.</li>
+              <li>Os procedimentos 08.03.01.012-5 e 08.03.01.010-9 usam instrumento de registro BPA-I e exigem CPF/CNS.</li>
+              <li>Se necessario no fechamento oficial, complete CNES, CNS do profissional, CBO, data de nascimento e municipio de residencia.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </body>
+  </html>`;
+
+    openPrintPreviewWindow(html, "BPA-I - Transporte Terrestre");
+    setTravelFeedback("Espelho BPA-I aberto. Na nova aba, clique em 'Imprimir / Salvar PDF'.");
+  } catch (error) {
+    console.error("Falha ao gerar BPA-I da viagem", error);
+    setTravelFeedback(error.message || "Nao foi possivel gerar o BPA-I.", true);
+  }
+}
+
+function printTravelBpaBatchReport() {
+  ensureTravelBatchMonthDefault();
+  const monthValue = document.getElementById("travel-batch-month")?.value || "";
+  const trips = getTravelTripsByCompetence(monthValue);
+  if (!trips.length) {
+    setTravelFeedback("Nao ha viagens nesse mes para gerar o BPA-I em lote.", true);
+    return;
+  }
+
+  try {
+    const rows = trips.flatMap((trip, index) =>
+      buildTravelBpaProcedureRows(trip).map(item => ({ trip, index: index + 1, item }))
+    );
+    const rowHtml = rows.map(({ trip, index, item }) => `
+    <tr>
+      <td>${escapeHtml(String(index))}</td>
+      <td>${escapeHtml(item.attendanceDate)}</td>
+      <td>${escapeHtml(trip.destination || "-")}</td>
+      <td>${escapeHtml(item.type)}</td>
+      <td>${escapeHtml(item.person?.fullName || "-")}</td>
+      <td>${escapeHtml(formatCpf(item.person?.cpf || "") || "-")}</td>
+      <td>${escapeHtml(item.person?.address || "-")}</td>
+      <td>${escapeHtml(item.procedure?.code || "-")}</td>
+      <td>${escapeHtml(formatProcedureUnits(item.procedure?.units || 0))}</td>
+      <td>____________________</td>
+      <td>____________________</td>
+    </tr>
+  `).join("");
+    const totalKm = trips.reduce((sum, item) => sum + (Number(item.estimatedRoundTripKm) || 0), 0);
+    const competenceLabel = monthValue ? monthValue.split("-").reverse().join("/") : "--/----";
+    const html = `<!DOCTYPE html>
+  <html lang="pt-BR">
+    <head>
+      <meta charset="utf-8">
+      <title>BPA-I em lote - ${escapeHtml(competenceLabel)}</title>
+      <style>
+        body { font-family: Arial, sans-serif; margin: 0; background: #e5edf5; color: #102a43; }
+        .toolbar { position: sticky; top: 0; z-index: 10; display: flex; gap: 12px; align-items: center; padding: 14px 18px; background: #102a43; color: #fff; }
+        .toolbar button { padding: 10px 16px; border: 0; border-radius: 8px; background: #16a34a; color: #fff; font-weight: 700; cursor: pointer; }
+        .page-wrap { padding: 24px; display: flex; justify-content: center; }
+        .sheet { width: 210mm; min-height: 297mm; background: #fff; box-shadow: 0 12px 40px rgba(16, 42, 67, 0.18); padding: 14mm; }
+        .header { display: flex; justify-content: space-between; gap: 14px; border-bottom: 2px solid #d8e3f0; padding-bottom: 12px; margin-bottom: 16px; }
+        .header h1 { margin: 0; font-size: 24px; }
+        .header p { margin: 4px 0 0; font-size: 13px; color: #475569; }
+        .meta-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+        .meta-card { border: 1px solid #c9d7e6; border-radius: 10px; padding: 10px; background: #f8fbff; }
+        .meta-card strong { display: block; font-size: 11px; text-transform: uppercase; color: #64748b; margin-bottom: 4px; }
+        .meta-card span { font-size: 13px; font-weight: 700; color: #0f172a; }
+        table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+        th, td { border: 1px solid #8ea3c2; padding: 7px; font-size: 10px; text-align: left; vertical-align: top; }
+        th { background: #c4d8f4; }
+        .notes { margin-top: 14px; padding: 12px; border: 1px dashed #94a3b8; border-radius: 10px; background: #f8fafc; font-size: 12px; color: #334155; }
+        .notes ul { margin: 8px 0 0 18px; padding: 0; }
+        @media print {
+          body { background: #fff; }
+          .toolbar { display: none; }
+          .page-wrap { padding: 0; }
+          .sheet { width: auto; min-height: auto; box-shadow: none; padding: 0; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="toolbar">
+        <button onclick="window.print()">Imprimir / Salvar PDF</button>
+        <span>PDF unico com todos os lancamentos BPA-I da competencia selecionada.</span>
+      </div>
+      <div class="page-wrap">
+        <div class="sheet">
+          <div class="header">
+            <div>
+              <h1>BPA-I em lote - Transporte Terrestre</h1>
+              <p>Espelho unico de todas as viagens da competencia selecionada.</p>
+            </div>
+            <div>
+              <div><strong>Competencia:</strong> ${escapeHtml(competenceLabel)}</div>
+              <div><strong>Gerado em:</strong> ${escapeHtml(toBRDateTime(new Date().toISOString()))}</div>
+            </div>
+          </div>
+          <div class="meta-grid">
+            <div class="meta-card"><strong>Viagens</strong><span>${escapeHtml(String(trips.length))}</span></div>
+            <div class="meta-card"><strong>Lancamentos BPA-I</strong><span>${escapeHtml(String(rows.length))}</span></div>
+            <div class="meta-card"><strong>Km total do mes</strong><span>${escapeHtml(formatTravelKm(totalKm))}</span></div>
+            <div class="meta-card"><strong>Digitador</strong><span>${escapeHtml(currentUser?.nome || currentUser?.username || "-")}</span></div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Viagem</th>
+                <th>Data</th>
+                <th>Destino</th>
+                <th>Tipo</th>
+                <th>Nome completo</th>
+                <th>CPF/CNS</th>
+                <th>Endereco</th>
+                <th>Procedimento</th>
+                <th>Qtd</th>
+                <th>Municipio/IBGE</th>
+                <th>CNS Prof./CBO</th>
+              </tr>
+            </thead>
+            <tbody>${rowHtml}</tbody>
+          </table>
+          <div class="notes">
+            <strong>Conferencia BPA-I do mes:</strong>
+            <ul>
+              <li>Os procedimentos de transporte terrestre seguem BPA-I e exigem CPF/CNS.</li>
+              <li>O PDF agrupa todas as viagens da competencia escolhida em um unico espelho.</li>
+              <li>Se necessario no faturamento oficial, complemente CNES, CNS profissional, CBO e municipio/IBGE.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </body>
+  </html>`;
+
+    openPrintPreviewWindow(html, `BPA-I em lote - ${competenceLabel}`);
+    setTravelFeedback("BPA-I em lote aberto. Na nova aba, clique em 'Imprimir / Salvar PDF'.");
+  } catch (error) {
+    console.error("Falha ao gerar BPA-I em lote", error);
+    setTravelFeedback(error.message || "Nao foi possivel gerar o BPA-I em lote.", true);
+  }
 }
 
 function openPreviousNirReport(reportId) {
@@ -2071,13 +2767,14 @@ function renderCurrentUser() {
   if (shiftSummary) shiftSummary.textContent = activeShift ? "Aberto" : "Fechado";
   const currentWardLabel = document.getElementById("profile-current-ward");
   if (currentWardLabel) currentWardLabel.textContent = activeShift?.wardNome || ward?.nome || "-";
-  document.getElementById("shift-user-name").textContent = userName;
-  document.getElementById("shift-user-role").textContent = `Login: ${currentUser?.username || "-"} • Perfil: ${role}`;
-  document.getElementById("shift-status-label").textContent = activeShift ? "Aberto" : "Fechado";
-  document.getElementById("shift-status-meta").textContent = activeShift
-    ? `${activeShift.wardNome} • ${toBRDate(activeShift.shiftDate || getTodayIsoDate())} • ${activeShift.shiftLength || "12H"} • ${getShiftPeriodLabel(activeShift.shiftPeriod)} • início ${toBRDateTime(activeShift.openedAt)}`
-    : "Nenhum plantão aberto";
-  document.getElementById("plantao-details")?.classList.toggle("hidden", !activeShift);
+  const shiftStatusLabel = document.getElementById("shift-status-label");
+  if (shiftStatusLabel) shiftStatusLabel.textContent = activeShift ? "Aberto" : "Fechado";
+  const shiftStatusMeta = document.getElementById("shift-status-meta");
+  if (shiftStatusMeta) {
+    shiftStatusMeta.textContent = activeShift
+      ? `${activeShift.wardNome} • ${toBRDate(activeShift.shiftDate || getTodayIsoDate())} • ${activeShift.shiftLength || "12H"} • ${getShiftPeriodLabel(activeShift.shiftPeriod)} • início ${toBRDateTime(activeShift.openedAt)}`
+      : "Nenhum plantão aberto";
+  }
 
   const shiftWard = document.getElementById("shift-ward");
   const shiftLength = document.getElementById("shift-length");
@@ -2097,12 +2794,13 @@ function renderCurrentUser() {
 
   const openButton = document.getElementById("btn-open-shift");
   const closeButton = document.getElementById("btn-close-shift");
+  const openTeamButton = document.getElementById("btn-open-team-modal");
   if (openButton) openButton.disabled = Boolean(activeShift);
   if (closeButton) closeButton.disabled = !activeShift;
+  if (openTeamButton) openTeamButton.disabled = !activeShift;
   syncShiftFormVisibility();
   renderShiftTeamForm();
   renderShiftTeamSummary();
-  renderHeaderTeamPanel();
   renderShiftHistory();
 }
 
@@ -2115,7 +2813,12 @@ async function refreshCurrentUser() {
 
 function printShiftReport(report) {
   if (!report) return;
-  const devices = (report.summary?.dispositivos || []).map(item => `<li>${item.label}: ${item.value}</li>`).join("") || "<li>Sem dispositivos registrados</li>";
+  const devices = (report.summary?.dispositivos || []).map(item => `
+    <div class="device-chip">
+      <strong>${item.label}</strong>
+      <span>${item.value}</span>
+    </div>
+  `).join("") || '<div class="empty-box">Sem dispositivos registrados.</div>';
   const team = report.shift?.team || {};
   const teamRows = [
     ["Medico do plantao", team.medicoPlantao || "-"],
@@ -2156,83 +2859,151 @@ function printShiftReport(report) {
       <td>${toBRDateTime(item.finishedAt)}</td>
     </tr>
   `).join("");
+  const actionRows = (report.actions || []).map(action => {
+    const meta = [];
+    if (action.meta?.bedId) meta.push(`Leito ${action.meta.bedId}`);
+    if (action.meta?.patient) meta.push(`Paciente: ${action.meta.patient}`);
+    if (action.meta?.toWardNome) meta.push(`Destino: ${action.meta.toWardNome}${action.meta?.toBedId ? ` / Leito ${action.meta.toBedId}` : ""}`);
+    if (Array.isArray(action.meta?.procedimentos) && action.meta.procedimentos.length) meta.push(`Procedimentos: ${action.meta.procedimentos.join(", ")}`);
+    if (Array.isArray(action.meta?.pendenciasRegistradas) && action.meta.pendenciasRegistradas.length) {
+      meta.push(`Pendências abertas: ${action.meta.pendenciasRegistradas.map(item => item.texto).join(", ")}`);
+    }
+    if (Array.isArray(action.meta?.pendenciasFinalizadas) && action.meta.pendenciasFinalizadas.length) {
+      meta.push(`Pendências finalizadas: ${action.meta.pendenciasFinalizadas.map(item => item.texto).join(", ")}`);
+    }
+    return `
+      <tr>
+        <td>${toBRDateTime(action.at)}</td>
+        <td>${action.authorName || action.username || "-"}</td>
+        <td>${action.description || "-"}</td>
+        <td>${meta.join(" • ") || "-"}</td>
+      </tr>
+    `;
+  }).join("");
   const win = window.open("", "_blank", "width=1100,height=800");
   if (!win) return;
   win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Ficha de Plantão</title><style>
-    body { font-family: Arial, sans-serif; padding: 24px; color: #111; }
-    h1,h2 { margin: 0 0 12px; }
-    .report-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 2px solid #dbe4f0; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: #eef3f8; color: #111827; padding: 16px; }
+    h1, h2, h3, p { margin: 0; }
+    .sheet { max-width: 1080px; margin: 0 auto; background: #fff; border: 1px solid #dbe4f0; border-radius: 16px; padding: 18px; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08); }
+    .report-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 2px solid #dbe4f0; }
     .brand { display: flex; align-items: center; gap: 14px; }
-    .brand-logo { width: 64px; height: 64px; border-radius: 18px; background: linear-gradient(135deg, #0f4c81, #16a34a); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 12px; text-align: center; line-height: 1.2; box-shadow: 0 6px 18px rgba(15, 76, 129, 0.18); }
-    .brand-copy strong { display: block; font-size: 18px; margin-bottom: 4px; }
-    .brand-copy span { display: block; font-size: 12px; color: #4b5563; }
-    .report-meta-top { text-align: right; font-size: 12px; color: #374151; }
-    .meta { margin-bottom: 20px; font-size: 14px; }
-    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
-    .card { border: 1px solid #d7deea; border-radius: 12px; padding: 12px; background: #f8fbff; }
-    .card strong { display: block; margin-bottom: 6px; font-size: 13px; }
-    .card div { font-size: 22px; font-weight: 800; color: #0f172a; }
-    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { border: 1px solid #d7deea; padding: 8px; font-size: 12px; text-align: left; vertical-align: top; }
-    th { background: #eef4fb; }
-    ul { margin: 8px 0 0; padding-left: 18px; }
-    .section { margin-top: 22px; }
-    .section-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-    .section-title span { font-size: 12px; color: #4b5563; }
+    .brand-logo { width: 50px; height: 50px; border-radius: 14px; background: linear-gradient(135deg, #0f4c81, #16a34a); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 10px; text-align: center; line-height: 1.2; box-shadow: 0 6px 18px rgba(15, 76, 129, 0.18); }
+    .brand-copy strong { display: block; font-size: 15px; margin-bottom: 2px; }
+    .brand-copy span { display: block; font-size: 10px; color: #4b5563; }
+    .report-meta-top { text-align: right; font-size: 10px; color: #475569; display: grid; gap: 2px; }
+    .title-block { display: grid; gap: 4px; margin-bottom: 12px; }
+    .title-block h1 { font-size: 18px; color: #0f172a; }
+    .title-block p { font-size: 10px; color: #475569; }
+    .meta-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .meta-card { border: 1px solid #d7deea; border-radius: 10px; padding: 8px 10px; background: #f8fbff; min-height: 0; }
+    .meta-card strong { display: block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.6px; color: #64748b; margin-bottom: 5px; }
+    .meta-card span { display: block; font-size: 11px; font-weight: 700; color: #0f172a; line-height: 1.25; }
+    .summary-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .summary-card { border: 1px solid #d7deea; border-radius: 10px; padding: 9px 10px; background: linear-gradient(180deg, #ffffff, #f8fbff); }
+    .summary-card strong { display: block; margin-bottom: 5px; font-size: 9px; color: #475569; text-transform: uppercase; letter-spacing: 0.5px; }
+    .summary-card div { font-size: 14px; font-weight: 800; color: #0f172a; line-height: 1; }
+    .section { margin-top: 12px; padding: 10px; border: 1px solid #dbe4f0; border-radius: 12px; background: #fff; }
+    .section-title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+    .section-title h2 { font-size: 14px; color: #0f172a; }
+    .section-title span { font-size: 12px; color: #64748b; }
+    .section-subtitle { font-size: 9px; color: #64748b; margin-top: 0; margin-bottom: 8px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #d7deea; padding: 6px 8px; font-size: 10px; text-align: left; vertical-align: top; }
+    th { background: #eef4fb; color: #334155; font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; }
+    tbody tr:nth-child(even) td { background: #fbfdff; }
+    .device-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .device-chip { border: 1px solid #d7deea; border-radius: 10px; padding: 8px; background: #f8fbff; display: grid; gap: 2px; }
+    .device-chip strong { font-size: 10px; color: #334155; }
+    .device-chip span { font-size: 13px; font-weight: 800; color: #0f172a; }
+    .empty-box { border: 1px dashed #cbd5e1; border-radius: 10px; padding: 10px; color: #64748b; background: #f8fafc; font-size: 10px; }
+    @media print {
+      body { background: #fff; padding: 0; }
+      .sheet { max-width: none; border: 0; border-radius: 0; box-shadow: none; padding: 0; }
+      .section { break-inside: avoid; }
+    }
   </style></head><body>
-    <div class="report-header">
-      <div class="brand">
-        <div class="brand-logo">PREF<br>HMA</div>
-        <div class="brand-copy">
-          <strong>Hospital Municipal</strong>
-          <span>Prefeitura Municipal • Relatorio de fechamento de plantao</span>
+    <div class="sheet">
+      <div class="report-header">
+        <div class="brand">
+          <div class="brand-logo">PREF<br>HMA</div>
+          <div class="brand-copy">
+            <strong>Hospital Municipal</strong>
+            <span>Prefeitura Municipal • Relatorio de fechamento de plantao</span>
+          </div>
+        </div>
+        <div class="report-meta-top">
+          <div>${toBRDateTime(report.shift?.closedAt)}</div>
+          <div>Ficha de Plantao</div>
         </div>
       </div>
-      <div class="report-meta-top">
-        <div>${toBRDateTime(report.shift?.closedAt)}</div>
-        <div>Ficha de Plantao</div>
+      <div class="title-block">
+        <h1>Ficha de Fechamento de Plantão</h1>
+        <p>Relatorio consolidado do plantão com equipe, pacientes, pendências e histórico de alterações.</p>
       </div>
-    </div>
-    <h1>Ficha de Fechamento de Plantão</h1>
-    <div class="meta">Usuário: ${report.shift?.nome || report.shift?.username || "-"} • Setor: ${report.shift?.wardNome || "-"} • Plantão: ${report.shift?.shiftLength || "12H"} / ${getShiftPeriodLabel(report.shift?.shiftPeriod)} • Abertura: ${toBRDateTime(report.shift?.openedAt)} • Fechamento: ${toBRDateTime(report.shift?.closedAt)}</div>
-    <div class="grid">
-      <div class="card"><strong>Pacientes ativos</strong><div>${report.summary?.pacientesAtivos ?? 0}</div></div>
-      <div class="card"><strong>Altas</strong><div>${report.summary?.altas ?? 0}</div></div>
-      <div class="card"><strong>Óbitos</strong><div>${report.summary?.obitos ?? 0}</div></div>
-      <div class="card"><strong>Alterações</strong><div>${report.summary?.totalAlteracoes ?? 0}</div></div>
-      <div class="card"><strong>Pendências ativas</strong><div>${report.summary?.pendenciasAtivas ?? 0}</div></div>
-      <div class="card"><strong>Pendências solucionadas</strong><div>${report.summary?.pendenciasSolucionadas ?? 0}</div></div>
-    </div>
-    <div class="section">
-    <div class="section-title"><h2>Equipe do plantao</h2><span>${report.shift?.shiftLength || "12H"} / ${getShiftPeriodLabel(report.shift?.shiftPeriod)}</span></div>
-    <table>
-      <tbody>${teamRows}</tbody>
-    </table>
-    </div>
-    <div class="section">
-    <h2>Dispositivos e procedimentos</h2>
-    <ul>${devices}</ul>
-    </div>
-    <div class="section">
-    <h2>Pacientes cadastrados</h2>
-    <table>
-      <thead><tr><th>Leito</th><th>Enfermaria</th><th>Paciente</th><th>Admissão</th><th>Diagnóstico</th><th>Dispositivos</th><th>Pendências</th></tr></thead>
-      <tbody>${patients || '<tr><td colspan="7">Nenhum paciente ativo no fechamento.</td></tr>'}</tbody>
-    </table>
-    </div>
-    <div class="section">
-    <div class="section-title"><h2>Pendências ativas do plantão</h2><span>${report.summary?.pendenciasAtivas ?? 0} registro(s)</span></div>
-    <table>
-      <thead><tr><th>Leito</th><th>Enfermaria</th><th>Paciente</th><th>Pendência</th><th>Registrado por</th><th>Data</th></tr></thead>
-      <tbody>${activePendings || '<tr><td colspan="6">Nenhuma pendência ativa no fechamento.</td></tr>'}</tbody>
-    </table>
-    </div>
-    <div class="section">
-    <div class="section-title"><h2>Pendências solucionadas no plantão</h2><span>${report.summary?.pendenciasSolucionadas ?? 0} registro(s)</span></div>
-    <table>
-      <thead><tr><th>Leito</th><th>Enfermaria</th><th>Paciente</th><th>Pendência</th><th>Finalizado por</th><th>Data</th></tr></thead>
-      <tbody>${solvedPendings || '<tr><td colspan="6">Nenhuma pendência solucionada neste plantão.</td></tr>'}</tbody>
-    </table>
+      <div class="meta-grid">
+        <div class="meta-card"><strong>Profissional</strong><span>${report.shift?.nome || report.shift?.username || "-"} (${report.shift?.username || "-"})</span></div>
+        <div class="meta-card"><strong>Setor</strong><span>${report.shift?.wardNome || "-"}</span></div>
+        <div class="meta-card"><strong>Plantão</strong><span>${report.shift?.shiftLength || "12H"} / ${getShiftPeriodLabel(report.shift?.shiftPeriod)}</span></div>
+        <div class="meta-card"><strong>Período</strong><span>${toBRDateTime(report.shift?.openedAt)}<br>até ${toBRDateTime(report.shift?.closedAt)}</span></div>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-card"><strong>Pacientes ativos</strong><div>${report.summary?.pacientesAtivos ?? 0}</div></div>
+        <div class="summary-card"><strong>Altas</strong><div>${report.summary?.altas ?? 0}</div></div>
+        <div class="summary-card"><strong>Óbitos</strong><div>${report.summary?.obitos ?? 0}</div></div>
+        <div class="summary-card"><strong>Alterações</strong><div>${report.summary?.totalAlteracoes ?? 0}</div></div>
+        <div class="summary-card"><strong>Pendências ativas</strong><div>${report.summary?.pendenciasAtivas ?? 0}</div></div>
+        <div class="summary-card"><strong>Pendências solucionadas</strong><div>${report.summary?.pendenciasSolucionadas ?? 0}</div></div>
+      </div>
+      <div class="section">
+        <div class="section-title"><h2>Equipe do plantao</h2><span>${report.shift?.shiftLength || "12H"} / ${getShiftPeriodLabel(report.shift?.shiftPeriod)}</span></div>
+        <div class="section-subtitle">Equipe registrada para este plantão e profissional responsável pelo fechamento.</div>
+        <table>
+          <tbody>
+            <tr><th>Plantão vinculado ao login</th><td>${report.shift?.nome || report.shift?.username || "-"} (${report.shift?.username || "-"})</td></tr>
+            ${teamRows}
+            <tr><th>Equipe atualizada por</th><td>${report.shift?.teamUpdatedBy || "-"}${report.shift?.teamUpdatedAt ? ` em ${toBRDateTime(report.shift.teamUpdatedAt)}` : ""}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="section">
+        <div class="section-title"><h2>Dispositivos e procedimentos</h2><span>${(report.summary?.dispositivos || []).length} item(ns)</span></div>
+        <div class="section-subtitle">Resumo dos principais dispositivos e procedimentos registrados no plantão.</div>
+        <div class="device-grid">${devices}</div>
+      </div>
+      <div class="section">
+        <div class="section-title"><h2>Pacientes cadastrados</h2><span>${(report.patients || []).length} paciente(s)</span></div>
+        <div class="section-subtitle">Leitos ocupados no momento do fechamento com diagnóstico, dispositivos e pendências.</div>
+        <table>
+          <thead><tr><th>Leito</th><th>Enfermaria</th><th>Paciente</th><th>Admissão</th><th>Diagnóstico</th><th>Dispositivos</th><th>Pendências</th></tr></thead>
+          <tbody>${patients || '<tr><td colspan="7">Nenhum paciente ativo no fechamento.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="section">
+        <div class="section-title"><h2>Pendências ativas do plantão</h2><span>${report.summary?.pendenciasAtivas ?? 0} registro(s)</span></div>
+        <div class="section-subtitle">Pendências que permaneceram abertas até o fechamento.</div>
+        <table>
+          <thead><tr><th>Leito</th><th>Enfermaria</th><th>Paciente</th><th>Pendência</th><th>Registrado por</th><th>Data</th></tr></thead>
+          <tbody>${activePendings || '<tr><td colspan="6">Nenhuma pendência ativa no fechamento.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="section">
+        <div class="section-title"><h2>Pendências solucionadas no plantão</h2><span>${report.summary?.pendenciasSolucionadas ?? 0} registro(s)</span></div>
+        <div class="section-subtitle">Pendências encerradas durante este plantão.</div>
+        <table>
+          <thead><tr><th>Leito</th><th>Enfermaria</th><th>Paciente</th><th>Pendência</th><th>Finalizado por</th><th>Data</th></tr></thead>
+          <tbody>${solvedPendings || '<tr><td colspan="6">Nenhuma pendência solucionada neste plantão.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="section">
+        <div class="section-title"><h2>Histórico de alterações do plantão</h2><span>${report.summary?.totalAlteracoes ?? 0} alteração(ões)</span></div>
+        <div class="section-subtitle">Registro cronológico das ações realizadas durante o plantão.</div>
+        <table>
+          <thead><tr><th>Data</th><th>Registrado por</th><th>Ação</th><th>Detalhes</th></tr></thead>
+          <tbody>${actionRows || '<tr><td colspan="4">Nenhuma alteração registrada neste plantão.</td></tr>'}</tbody>
+        </table>
+      </div>
     </div>
   </body></html>`);
   win.document.close();
@@ -2274,10 +3045,14 @@ function renderDashboard(data) {
 
   setDashboardFeedback(data.scope?.label ? `Exibindo: ${data.scope.label}` : "", false);
 
-  document.getElementById("header-title").textContent = "Dashboard Hospitalar";
-  document.getElementById("date").textContent = data.period?.from || data.period?.to
-    ? `${data.period.from || "Início"} até ${data.period.to || "Hoje"}`
-    : new Date().toLocaleDateString("pt-BR");
+  const headerTitle = document.getElementById("header-title");
+  if (headerTitle) headerTitle.textContent = "Dashboard Hospitalar";
+  const headerDate = document.getElementById("date");
+  if (headerDate) {
+    headerDate.textContent = data.period?.from || data.period?.to
+      ? `${data.period.from || "Início"} até ${data.period.to || "Hoje"}`
+      : new Date().toLocaleDateString("pt-BR");
+  }
 }
 
 async function loadDashboard() {
@@ -2610,9 +3385,10 @@ async function load() {
   if (!currentWardId) return;
   ward = await api(`/api/wards/${currentWardId}`);
   transferWardCache.set(currentWardId, ward);
-  document.getElementById("header-title").textContent = ward.nome;
-  document.getElementById("date").textContent = ward.data;
-  renderHeaderTeamPanel();
+  const headerTitle = document.getElementById("header-title");
+  if (headerTitle) headerTitle.textContent = ward.nome;
+  const headerDate = document.getElementById("date");
+  if (headerDate) headerDate.textContent = ward.data;
   renderCounts(ward.counts);
   renderIndicadores(ward.indicadores);
   renderBeds(ward.beds);
@@ -2620,7 +3396,6 @@ async function load() {
   await refreshStaffSuggestions();
   await refreshSidebarPatients();
   document.getElementById("profile-current-ward")?.replaceChildren(document.createTextNode(ward.nome));
-  renderHeaderWardTabs();
 
   if (pendingScrollEnf) {
     const target = document.getElementById(pendingScrollEnf);
@@ -2657,6 +3432,7 @@ document.getElementById("salvar-equipe").addEventListener("click", async () => {
     renderCurrentUser();
     await refreshStaffSuggestions();
     setShiftFeedback("Equipe salva neste plantao com sucesso.");
+    document.getElementById("modal-shift-team")?.close();
   } catch (error) {
     setShiftFeedback(error.message || "Nao foi possivel salvar a equipe do plantao.", true);
   } finally {
@@ -2813,7 +3589,6 @@ async function refreshWards() {
   }
   syncAdminWardEditForm();
   renderAdminWardList();
-  renderHeaderWardTabs();
   updateAdminEnfDropdown();
   updateDeleteEnfDropdown();
   if (dashboardWard && !Array.from(dashboardWard.options).some(option => option.value === String(dashboardFilters.wardId))) {
@@ -3383,12 +4158,15 @@ async function deletePatientRegistry() {
 }
 
 async function startApp() {
-  setAppEnabled(false);
-  showOnly("view-home");
   await refreshCurrentUser();
   await refreshStaffSuggestions();
   await refreshWards();
+  if (currentUser?.activeShift?.wardId) {
+    await openSelectedWard(currentUser.activeShift.wardId);
+    return;
+  }
   setAppEnabled(false);
+  showOnly("view-home");
   maybeOpenStartWardModal();
 }
 
@@ -3505,6 +4283,7 @@ document.getElementById("nav-home")?.addEventListener("click", async () => {
 });
 
 document.getElementById("nav-portaria")?.addEventListener("click", openPortariaView);
+document.getElementById("nav-travel")?.addEventListener("click", openTravelView);
 document.getElementById("nav-patients")?.addEventListener("click", openPatientsView);
 document.getElementById("nav-nir")?.addEventListener("click", openNirView);
 
@@ -3541,6 +4320,84 @@ document.getElementById("portaria-list")?.addEventListener("keydown", async even
   if (event.key !== "Enter" && event.key !== " ") return;
   event.preventDefault();
   await openPortariaVisitModal(card.dataset.id);
+});
+
+document.getElementById("btn-save-portaria-registry")?.addEventListener("click", async event => {
+  event.preventDefault();
+  await savePortariaVisitorRegistry();
+});
+
+for (const id of ["portaria-registry-access-code", "portaria-registry-visitor-name", "portaria-registry-sector-reason"]) {
+  document.getElementById(id)?.addEventListener("keydown", async event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    await savePortariaVisitorRegistry();
+  });
+}
+
+document.getElementById("btn-save-travel")?.addEventListener("click", async event => {
+  event.preventDefault();
+  await saveHospitalTrip();
+});
+
+for (const id of ["travel-origin", "travel-destination"]) {
+  document.getElementById(id)?.addEventListener("keydown", async event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    await saveHospitalTrip();
+  });
+}
+
+for (const id of [
+  "travel-patient-name",
+  "travel-patient-cpf",
+  "travel-patient-address",
+  "travel-companion-name",
+  "travel-companion-cpf",
+  "travel-companion-address"
+]) {
+  document.getElementById(id)?.addEventListener("keydown", async event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    await saveHospitalTrip();
+  });
+}
+
+document.getElementById("travel-destination")?.addEventListener("change", async () => {
+  await refreshTravelEstimate(true);
+});
+
+document.getElementById("travel-destination")?.addEventListener("input", async event => {
+  const value = event.target.value.trim();
+  if (!value) {
+    setTravelFeedback("");
+    applyTravelEstimate(null);
+    return;
+  }
+  if (maranhaoTravelCitiesLookup.has(value.toLocaleLowerCase("pt-BR"))) {
+    await refreshTravelEstimate(true);
+  }
+});
+
+for (const id of ["travel-companion-name", "travel-companion-cpf", "travel-companion-address"]) {
+  document.getElementById(id)?.addEventListener("input", () => {
+    updateTravelProcedureSummary();
+  });
+}
+
+document.getElementById("travel-list")?.addEventListener("click", event => {
+  const button = event.target.closest(".btn-travel-bpa-report");
+  if (!button) return;
+  printTravelBpaReport(button.dataset.id);
+});
+
+document.getElementById("travel-batch-month")?.addEventListener("change", () => {
+  updateTravelBatchSummary();
+});
+
+document.getElementById("btn-travel-bpa-batch")?.addEventListener("click", event => {
+  event.preventDefault();
+  printTravelBpaBatchReport();
 });
 
 document.getElementById("nir-list")?.addEventListener("click", async event => {
@@ -3654,8 +4511,8 @@ document.getElementById("btn-voltar-home").addEventListener("click", async () =>
   closeSidebarOnMobile();
 });
 
-document.getElementById("btn-open-shift")?.addEventListener("click", async () => {
-  const wardId = parseInt(document.getElementById("shift-ward").value, 10);
+async function openShiftForSelectedWard(wardId, options = {}) {
+  const { openTeamModal = true, feedbackMessage = "Plantão aberto com sucesso." } = options;
   const shiftLength = normalizeShiftLength(document.getElementById("shift-length")?.value);
   const shiftPeriod = normalizeShiftPeriod(document.getElementById("shift-period")?.value, shiftLength);
   if (!wardId) {
@@ -3669,8 +4526,23 @@ document.getElementById("btn-open-shift")?.addEventListener("click", async () =>
   });
   currentUser = res.user || currentUser;
   currentWardId = wardId;
+  await openSelectedWard(wardId);
   renderCurrentUser();
-  setShiftFeedback("Plantão aberto com sucesso.");
+  setShiftFeedback(feedbackMessage);
+  if (openTeamModal) openShiftTeamModal();
+}
+
+document.getElementById("btn-open-shift")?.addEventListener("click", async () => {
+  const wardId = parseInt(document.getElementById("shift-ward").value, 10);
+  await openShiftForSelectedWard(wardId);
+});
+
+document.getElementById("btn-open-team-modal")?.addEventListener("click", () => {
+  openShiftTeamModal();
+});
+
+document.getElementById("btn-close-shift-team")?.addEventListener("click", () => {
+  document.getElementById("modal-shift-team")?.close();
 });
 
 document.getElementById("btn-confirm-start-ward")?.addEventListener("click", async event => {
@@ -3678,7 +4550,9 @@ document.getElementById("btn-confirm-start-ward")?.addEventListener("click", asy
   const wardId = parseInt(document.getElementById("modal-start-ward-select")?.value, 10);
   if (!wardId) return;
   document.getElementById("modal-start-ward")?.close();
-  await openSelectedWard(wardId);
+  await openShiftForSelectedWard(wardId, {
+    feedbackMessage: "Plantão aberto no seu nome com sucesso."
+  });
 });
 
 document.getElementById("shift-length")?.addEventListener("change", syncShiftFormVisibility);

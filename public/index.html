@@ -19,6 +19,7 @@
         <button id="nav-dashboard" class="nav-btn sidebar-btn">Dashboard</button>
         <button id="nav-home" class="nav-btn ghost sidebar-btn">Setores</button>
         <button id="nav-portaria" class="nav-btn ghost sidebar-btn">Portaria</button>
+        <button id="nav-travel" class="nav-btn ghost sidebar-btn">Viagens</button>
         <button id="nav-patients" class="nav-btn ghost sidebar-btn">Pacientes</button>
         <button id="nav-nir" class="nav-btn ghost sidebar-btn">NIR</button>
         <button id="nav-gerenciar" class="nav-btn ghost sidebar-btn">Cadastro</button>
@@ -40,28 +41,6 @@
     </aside>
 
     <div class="content-shell">
-      <header class="hero-header">
-        <div>
-          <div class="hero-title" id="header-title">Dashboard Hospitalar</div>
-          <div class="hero-subtitle">Visão geral do setor, indicadores e plantão em um único painel.</div>
-          <div id="header-ward-tabs" class="hero-tabs"></div>
-        </div>
-        <div class="hero-meta">
-          <div class="date" id="date"></div>
-        </div>
-      </header>
-
-      <section id="header-team-panel" class="header-team-panel hidden">
-        <div class="header-team-top">
-          <div>
-            <div class="header-team-kicker">Equipe do dia</div>
-            <div class="header-team-title">Profissionais vinculados ao setor</div>
-          </div>
-          <div id="header-team-date" class="header-team-date"></div>
-        </div>
-        <div id="header-team-list" class="header-team-list"></div>
-      </section>
-
       <div class="layout-grid">
         <main class="container">
     <section id="view-login" class="panel hidden">
@@ -164,8 +143,129 @@
       <h2>Portaria</h2>
       <div class="hint">Lista simples dos pacientes internados para consulta da portaria.</div>
       <div id="portaria-feedback" class="hint hidden"></div>
+      <section class="portaria-visitor-panel">
+        <div class="portaria-visitor-shell">
+          <div class="portaria-visitor-header">
+            <div>
+              <div class="procedimentos-title">Registro de visitante</div>
+              <div class="history-hint">Cadastre visitantes rápidos da portaria com código de acesso, nome e setor ou motivo.</div>
+            </div>
+            <div id="portaria-registry-count" class="portaria-registry-count">0 registros</div>
+          </div>
+          <div class="portaria-visitor-layout">
+            <section class="portaria-visitor-form-card">
+              <div class="portaria-visitor-card-title">Novo registro</div>
+              <div class="portaria-visitor-form-grid">
+                <label>Codigo de acesso <input id="portaria-registry-access-code" placeholder="Digite o codigo de acesso"></label>
+                <label>Nome do visitante <input id="portaria-registry-visitor-name" placeholder="Digite o nome do visitante"></label>
+                <label class="portaria-visitor-field-wide">Setor ou motivo <input id="portaria-registry-sector-reason" placeholder="Ex: POSTO 1, UTI, entrega de documento"></label>
+              </div>
+              <div class="portaria-visitor-actions">
+                <button id="btn-save-portaria-registry" type="button">Registrar visitante</button>
+              </div>
+              <div id="portaria-registry-feedback" class="hint hidden"></div>
+            </section>
+            <section class="portaria-visitor-history-card">
+              <div class="portaria-visitor-card-title">Registros recentes</div>
+              <div class="history-hint">Os cadastros mais novos aparecem primeiro para a conferência rápida da portaria.</div>
+              <div id="portaria-registry-empty" class="hint hidden">Nenhum visitante registrado ainda.</div>
+              <div id="portaria-registry-list" class="history-list"></div>
+            </section>
+          </div>
+        </div>
+      </section>
       <div id="portaria-list-empty" class="hint hidden">Nenhum paciente internado no momento.</div>
       <div id="portaria-list" class="portaria-list"></div>
+    </section>
+
+    <section id="view-travel" class="panel hidden">
+      <h2>Controle de Viagem do Hospital</h2>
+      <div class="hint">Escolha a cidade de destino no Maranhão e o sistema calcula a quilometragem estimada da viagem.</div>
+      <div id="travel-feedback" class="hint hidden"></div>
+      <section class="travel-shell">
+        <div class="travel-header">
+          <div>
+            <div class="procedimentos-title">Controle de viagem</div>
+            <div class="history-hint">Cadastre cada deslocamento para manter o histórico do veículo organizado.</div>
+          </div>
+          <div class="travel-summary-badges">
+            <div id="travel-count" class="travel-summary-badge">0 viagens</div>
+            <div id="travel-km-total" class="travel-summary-badge">0 km</div>
+          </div>
+        </div>
+        <div class="travel-layout">
+          <section class="travel-form-card">
+            <div class="travel-card-title">Nova viagem</div>
+            <div class="travel-form-grid">
+              <label>Origem <input id="travel-origin" placeholder="Origem da viagem" readonly></label>
+              <label>Destino
+                <input id="travel-destination" list="travel-destination-cities" placeholder="Selecione ou digite a cidade">
+                <datalist id="travel-destination-cities"></datalist>
+              </label>
+              <div class="travel-estimate-grid">
+                <div class="travel-estimate-card">
+                  <span>Km estimado</span>
+                  <strong id="travel-estimate-one-way">0 km</strong>
+                  <small>Distancia estimada de ida</small>
+                </div>
+                <div class="travel-estimate-card travel-estimate-card-highlight">
+                  <span>Km total</span>
+                  <strong id="travel-estimate-round-trip">0 km</strong>
+                  <small>Ida e volta automatica</small>
+                </div>
+              </div>
+              <div class="travel-procedure-grid">
+                <div class="travel-procedure-card">
+                  <span>Procedimento do paciente</span>
+                  <strong id="travel-patient-procedure-code">08.03.01.012-5</strong>
+                  <small id="travel-patient-procedure-description">Unidade de remuneração para deslocamento de paciente por transporte terrestre (cada 50 km)</small>
+                  <div class="travel-procedure-qty">Qtd: <b id="travel-patient-procedure-units">00</b></div>
+                </div>
+                <div class="travel-procedure-card travel-procedure-card-highlight">
+                  <span>Procedimento do acompanhante</span>
+                  <strong id="travel-companion-procedure-code">08.03.01.010-9</strong>
+                  <small id="travel-companion-procedure-description">Unidade de remuneração para deslocamento de acompanhante por transporte terrestre (cada 50 km)</small>
+                  <div class="travel-procedure-qty">Qtd: <b id="travel-companion-procedure-units">00</b></div>
+                </div>
+              </div>
+              <div class="travel-party-card">
+                <div class="travel-party-title">Paciente</div>
+                <div class="travel-party-grid">
+                  <label>Nome completo <input id="travel-patient-name" placeholder="Digite o nome completo do paciente"></label>
+                  <label>CPF <input id="travel-patient-cpf" placeholder="Digite o CPF do paciente"></label>
+                  <label class="travel-field-wide">Endereco <input id="travel-patient-address" placeholder="Digite o endereco do paciente"></label>
+                </div>
+              </div>
+              <div class="travel-party-card">
+                <div class="travel-party-title">Acompanhante</div>
+                <div class="travel-party-grid">
+                  <label>Nome completo <input id="travel-companion-name" placeholder="Digite o nome completo do acompanhante"></label>
+                  <label>CPF <input id="travel-companion-cpf" placeholder="Digite o CPF do acompanhante"></label>
+                  <label class="travel-field-wide">Endereco <input id="travel-companion-address" placeholder="Digite o endereco do acompanhante"></label>
+                </div>
+              </div>
+            </div>
+            <div class="history-hint">A cada 50 km do total da viagem o sistema gera automaticamente a quantidade dos procedimentos do paciente e do acompanhante.</div>
+            <div class="travel-actions">
+              <button id="btn-save-travel" type="button">Registrar viagem</button>
+            </div>
+            <div id="travel-form-feedback" class="hint hidden"></div>
+          </section>
+          <section class="travel-history-card">
+            <div class="travel-card-title">Viagens recentes</div>
+            <div class="history-hint">As viagens mais novas aparecem primeiro para conferência rápida.</div>
+            <div class="travel-history-toolbar">
+              <label>Competencia
+                <input id="travel-batch-month" type="month">
+              </label>
+              <button id="btn-travel-bpa-batch" type="button" class="ghost">Gerar BPA-I do mes</button>
+            </div>
+            <div id="travel-batch-summary" class="history-hint">Selecione o mes para gerar um PDF unico.</div>
+            <div id="travel-empty" class="hint hidden">Nenhuma viagem registrada ainda.</div>
+            <div id="travel-list" class="history-list"></div>
+          </section>
+        </div>
+      </section>
     </section>
 
     <section id="view-nir" class="panel nir-report hidden">
@@ -353,28 +453,8 @@
     </section>
 
     <section class="plantao hidden">
-      <div class="plantao-page-header">
-        <div>
-          <div class="plantao-page-kicker">Central Assistencial</div>
-          <h2>Gestão de Plantão</h2>
-          <div class="plantao-page-text">Abra, acompanhe e salve a equipe do plantão em uma área própria do sistema.</div>
-        </div>
-        <div class="plantao-page-badge">Plantão seguro</div>
-      </div>
       <div class="plantao-layout">
         <div class="plantao-main">
-          <div class="shift-shell">
-            <div class="shift-card">
-              <div class="shift-title">Responsável logado</div>
-              <div class="shift-user" id="shift-user-name">-</div>
-              <div class="shift-meta" id="shift-user-role">-</div>
-            </div>
-            <div class="shift-card">
-              <div class="shift-title">Status do plantão</div>
-              <div class="shift-status" id="shift-status-label">Fechado</div>
-              <div class="shift-meta" id="shift-status-meta">Nenhum plantão aberto</div>
-            </div>
-          </div>
           <div class="plantao-control-card">
             <div class="plantao-card-title">Abertura do plantão</div>
             <div class="plantao-form-grid">
@@ -402,38 +482,11 @@
               <button id="btn-open-shift">Abrir plantão</button>
               <button id="btn-close-shift" class="ghost">Fechar plantão e imprimir</button>
               <button id="btn-print-last-shift" class="ghost">Reimprimir última ficha</button>
-              <button id="btn-whatsapp-shift" class="ghost">Manutenção de Central de Ar</button>
-              <button id="btn-whatsapp-maintenance" class="ghost">Solicitação de Manutenção</button>
+              <button id="btn-open-team-modal" type="button" class="ghost">Equipe do plantão</button>
             </div>
           </div>
           <div id="shift-feedback" class="hint hidden"></div>
-          <div id="plantao-details" class="plantao-details-card hidden">
-            <div class="plantao-card-title">Equipe do plantão</div>
-            <div class="plantao-grid">
-              <label>Médico do plantão <input id="eq-medico" list="staff-list-medicos"></label>
-              <label id="field-eq-enf-dia">Enfermeiro(a) dia <input id="eq-enf-dia" list="staff-list-enfermeiros"></label>
-              <label id="field-eq-tec-dia">Técnicos(as) dia <input id="eq-tec-dia" list="staff-list-tecnicos"></label>
-              <label id="field-eq-enf-noite">Enfermeiro(a) noite <input id="eq-enf-noite" list="staff-list-enfermeiros"></label>
-              <label id="field-eq-tec-noite">Técnicos(as) noite <input id="eq-tec-noite" list="staff-list-tecnicos"></label>
-              <label>Faltosos <input id="eq-faltosos"></label>
-            </div>
-            <datalist id="staff-list-medicos"></datalist>
-            <datalist id="staff-list-enfermeiros"></datalist>
-            <datalist id="staff-list-tecnicos"></datalist>
-            <div class="plantao-save-bar">
-              <button id="salvar-equipe">Salvar Plantão</button>
-            </div>
-          </div>
         </div>
-        <aside class="plantao-side">
-          <div class="shift-card">
-            <div class="shift-title">Resumo salvo</div>
-            <div id="shift-team-summary" class="shift-team-summary hidden">
-              <div class="shift-team-summary-title">Equipe salva</div>
-              <div id="shift-team-summary-list" class="shift-team-summary-list"></div>
-            </div>
-          </div>
-        </aside>
       </div>
     </section>
     <section class="cards">
@@ -479,6 +532,32 @@
       </div>
     </div>
   </div>
+
+  <dialog id="modal-shift-team" class="modal">
+    <form method="dialog" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">Equipe do plantão</div>
+      </div>
+      <div class="modal-body">
+        <div class="hint">Cadastre a equipe do dia vinculada ao seu plantão.</div>
+        <div class="modal-grid shift-team-modal-grid">
+          <label>Médico do plantão <input id="eq-medico" list="staff-list-medicos"></label>
+          <label id="field-eq-enf-dia">Enfermeiro(a) dia <input id="eq-enf-dia" list="staff-list-enfermeiros"></label>
+          <label id="field-eq-tec-dia">Técnicos(as) dia <input id="eq-tec-dia" list="staff-list-tecnicos"></label>
+          <label id="field-eq-enf-noite">Enfermeiro(a) noite <input id="eq-enf-noite" list="staff-list-enfermeiros"></label>
+          <label id="field-eq-tec-noite">Técnicos(as) noite <input id="eq-tec-noite" list="staff-list-tecnicos"></label>
+          <label>Faltosos <input id="eq-faltosos"></label>
+        </div>
+        <datalist id="staff-list-medicos"></datalist>
+        <datalist id="staff-list-enfermeiros"></datalist>
+        <datalist id="staff-list-tecnicos"></datalist>
+      </div>
+      <div class="modal-actions">
+        <button id="salvar-equipe" type="button" class="primary-action">Salvar equipe</button>
+        <button value="cancelar" type="button" id="btn-close-shift-team">Fechar</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="modal-paciente" class="modal">
     <form method="dialog" class="modal-content">
@@ -611,34 +690,48 @@
         <div class="modal-title" id="portaria-visit-title">Registrar visita</div>
       </div>
       <div class="modal-body">
+        <section class="portaria-visit-hero">
+          <div class="portaria-visit-patient-card">
+            <span class="portaria-visit-kicker">Paciente selecionado</span>
+            <div id="portaria-visit-patient-name" class="portaria-visit-patient-name">-</div>
+            <div class="portaria-visit-summary-grid">
+              <div class="portaria-visit-summary-item">
+                <span class="portaria-visit-summary-label">Idade</span>
+                <div id="portaria-visit-patient-age" class="portaria-visit-summary-value">-</div>
+              </div>
+              <div class="portaria-visit-summary-item">
+                <span class="portaria-visit-summary-label">Setor</span>
+                <div id="portaria-visit-patient-ward" class="portaria-visit-summary-value">-</div>
+              </div>
+              <div class="portaria-visit-summary-item">
+                <span class="portaria-visit-summary-label">Leito</span>
+                <div id="portaria-visit-patient-bed" class="portaria-visit-summary-value">-</div>
+              </div>
+            </div>
+            <div class="portaria-visit-hero-controls">
+              <div class="portaria-visit-summary-item">
+                <span class="portaria-visit-summary-label">Data da visita</span>
+                <div id="portaria-visit-summary-date" class="portaria-visit-summary-value">-</div>
+              </div>
+              <div class="portaria-visit-summary-item">
+                <span class="portaria-visit-summary-label">Turno</span>
+                <div id="portaria-visit-summary-shift" class="portaria-visit-summary-value">-</div>
+              </div>
+              <div class="portaria-visit-summary-item">
+                <span class="portaria-visit-summary-label">Horario</span>
+                <div id="portaria-visit-summary-time" class="portaria-visit-summary-value">-</div>
+              </div>
+            </div>
+          </div>
+        </section>
         <div class="modal-grid">
-          <div class="modal-static-field">
-            <span class="modal-static-label">Paciente</span>
-            <div id="portaria-visit-patient-name" class="modal-static-value">-</div>
-          </div>
-          <div class="modal-static-field">
-            <span class="modal-static-label">Idade</span>
-            <div id="portaria-visit-patient-age" class="modal-static-value">-</div>
-          </div>
-          <div class="modal-static-field">
-            <span class="modal-static-label">Setor</span>
-            <div id="portaria-visit-patient-ward" class="modal-static-value">-</div>
-          </div>
-          <div class="modal-static-field">
-            <span class="modal-static-label">Leito</span>
-            <div id="portaria-visit-patient-bed" class="modal-static-value">-</div>
-          </div>
+          <label>Codigo de acesso <input id="portaria-visit-access-code" placeholder="Digite o codigo de acesso"></label>
           <label>Nome do visitante <input id="portaria-visit-visitor-name" placeholder="Digite o nome do visitante"></label>
-          <label>Data da visita <input id="portaria-visit-date" type="date"></label>
-          <label>Turno
-            <select id="portaria-visit-shift">
-              <option value="MANHA">MANHA</option>
-              <option value="TARDE">TARDE</option>
-              <option value="NOITE">NOITE</option>
-            </select>
-          </label>
-          <label>Horario <input id="portaria-visit-time" type="time"></label>
+          <label>Grau de parentesco <input id="portaria-visit-kinship" placeholder="Ex: mae, pai, irmao, esposa"></label>
         </div>
+        <input id="portaria-visit-date" type="hidden">
+        <input id="portaria-visit-shift" type="hidden">
+        <input id="portaria-visit-time" type="hidden">
         <label>Observacao
           <textarea id="portaria-visit-note" rows="3" placeholder="Opcional"></textarea>
         </label>
@@ -719,7 +812,7 @@
         <div class="modal-title">Selecionar setor</div>
       </div>
       <div class="modal-body">
-        <div class="hint">Escolha o setor em que você vai trabalhar. Os leitos só aparecem depois dessa seleção.</div>
+        <div class="hint">Escolha o setor em que você vai trabalhar. Ao entrar, o plantão será aberto automaticamente no seu nome.</div>
         <label>Setor
           <select id="modal-start-ward-select"></select>
         </label>
