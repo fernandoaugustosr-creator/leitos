@@ -16,6 +16,7 @@ const supabaseKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.
 const supabaseTable = process.env.SUPABASE_TABLE || "app_state";
 const supabaseStateId = process.env.SUPABASE_STATE_ID || "main";
 const supabaseStateColumns = ["payload", "data"];
+const sessionSecret = String(process.env.SESSION_SECRET || supabaseKey || "controle-de-leitos-session-secret").trim();
 const localStateDir = path.join(__dirname, "..", "data");
 const localStateFile = path.join(localStateDir, "app-state.local.json");
 const HOSPITAL_TRIP_ORIGIN_CITY = "Açailândia";
@@ -150,9 +151,67 @@ function parseCookies(header) {
 }
 
 function createSession(username) {
-  const sid = crypto.randomBytes(24).toString("hex");
-  sessions.set(sid, { username, createdAt: Date.now() });
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + (1000 * 60 * 60 * 12);
+  const payload = Buffer.from(JSON.stringify({ username, issuedAt, expiresAt }), "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+  const signature = crypto
+    .createHmac("sha256", sessionSecret)
+    .update(payload)
+    .digest("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+  const sid = `${payload}.${signature}`;
+  sessions.set(sid, { username, createdAt: issuedAt, expiresAt });
   return sid;
+}
+
+function resolveSession(sid) {
+  if (!sid) return null;
+
+  const inMemory = sessions.get(sid);
+  if (inMemory?.username) {
+    if (inMemory.expiresAt && inMemory.expiresAt < Date.now()) {
+      sessions.delete(sid);
+      return null;
+    }
+    return inMemory;
+  }
+
+  const [payload, signature] = String(sid).split(".");
+  if (!payload || !signature) return null;
+
+  const expectedSignature = crypto
+    .createHmac("sha256", sessionSecret)
+    .update(payload)
+    .digest("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+
+  const receivedBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expectedSignature);
+  if (receivedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)) {
+    return null;
+  }
+
+  try {
+    const normalizedPayload = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const parsed = JSON.parse(Buffer.from(normalizedPayload, "base64").toString("utf8"));
+    if (!parsed?.username) return null;
+    if (parsed.expiresAt && parsed.expiresAt < Date.now()) return null;
+    return {
+      username: parsed.username,
+      createdAt: parsed.issuedAt || Date.now(),
+      expiresAt: parsed.expiresAt || null
+    };
+  } catch {
+    return null;
+  }
 }
 
 function createRecordId() {
@@ -290,7 +349,7 @@ function requireAuth(req, res, next) {
   const cookies = parseCookies(req.headers.cookie);
   const sid = headerSid || cookies.sid;
   if (!sid) return res.status(401).json({ error: "Não autenticado" });
-  const session = sessions.get(sid);
+  const session = resolveSession(sid);
   if (!session) return res.status(401).json({ error: "Sessão inválida" });
   const user = users.find(item => item.username === session.username);
   if (!user) return res.status(401).json({ error: "Usuário não encontrado" });
@@ -1508,7 +1567,7 @@ app.post("/api/login", (req, res) => {
   const user = users.find(u => u.username === username && u.password === password);
   if (!user) return res.status(401).json({ error: "Usuário ou senha inválidos" });
   const sid = createSession(user.username);
-  res.setHeader("Set-Cookie", `sid=${encodeURIComponent(sid)}; HttpOnly; SameSite=Lax; Path=/`);
+  res.setHeader("Set-Cookie", `sid=${encodeURIComponent(sid)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`);
   res.json({ ok: true, username: user.username, sid, user: sanitizeUser(user) });
 });
 
@@ -1525,7 +1584,7 @@ app.get("/api/me", (req, res) => {
   const cookies = parseCookies(req.headers.cookie);
   const headerSid = String(req.headers["x-session-id"] || "").trim();
   const sid = headerSid || cookies.sid;
-  const session = sid ? sessions.get(sid) : null;
+  const session = sid ? resolveSession(sid) : null;
   if (!session) return res.status(401).json({ error: "Não autenticado" });
   const user = users.find(item => item.username === session.username);
   if (!user) return res.status(401).json({ error: "Usuário não encontrado" });

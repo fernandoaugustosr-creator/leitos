@@ -51,6 +51,7 @@ let hospitalTripEntries = [];
 let maranhaoTravelCities = [];
 let maranhaoTravelCitiesLookup = new Set();
 let travelDistanceEstimate = null;
+let authRecoveryInProgress = false;
 
 const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "DRENO DE TORAX"];
 const NO_ENFERMARIA_VALUE = "__SEM_ENFERMARIA__";
@@ -311,6 +312,11 @@ function setPatientFieldsEnabled(enabled) {
   }
 }
 
+function showUnexpectedError(error) {
+  if (error?.isAuthError) return;
+  alert(error?.message || "Erro");
+}
+
 function clearPatientFields() {
   document.getElementById("modal-nome").value = "";
   document.getElementById("modal-admissao").value = "";
@@ -369,6 +375,25 @@ async function api(path, options) {
   }
   if (!res.ok) {
     const msg = String(data?.error || "Erro").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() || "Erro";
+    if (res.status === 401 && !String(path).includes("/api/login")) {
+      sessionId = null;
+      sessionStorage.removeItem("sid");
+      currentWardId = null;
+      ward = null;
+      currentUser = null;
+      lastClosedReport = null;
+      setAppEnabled(false);
+      showOnly("view-login");
+      if (!authRecoveryInProgress) {
+        authRecoveryInProgress = true;
+        window.setTimeout(() => {
+          authRecoveryInProgress = false;
+        }, 1000);
+      }
+      const authError = new Error("Sessão expirada. Entre novamente.");
+      authError.isAuthError = true;
+      throw authError;
+    }
     throw new Error(msg);
   }
   return data;
@@ -3529,12 +3554,14 @@ document.getElementById("btn-dashboard-clear")?.addEventListener("click", async 
 });
 
 async function refreshWards() {
-  const [data, adminData] = await Promise.all([
-    api("/api/wards"),
-    api("/api/wards?includeArchived=true")
-  ]);
+  const isAdmin = isAdminUser();
+  const requests = [api("/api/wards")];
+  if (isAdmin) {
+    requests.push(api("/api/wards?includeArchived=true"));
+  }
+  const [data, adminData] = await Promise.all(requests);
   wards = data.wards || [];
-  allWards = adminData.wards || [];
+  allWards = isAdmin ? (adminData?.wards || []) : [...wards];
   const select = document.getElementById("select-ward");
   const modalStartWard = document.getElementById("modal-start-ward-select");
   const dashboardWard = document.getElementById("dashboard-ward");
@@ -4157,10 +4184,14 @@ async function deletePatientRegistry() {
   }
 }
 
-async function startApp() {
-  await refreshCurrentUser();
-  await refreshStaffSuggestions();
-  await refreshWards();
+async function startApp(options = {}) {
+  if (!options.skipUserRefresh) {
+    await refreshCurrentUser();
+  }
+  await Promise.all([
+    refreshStaffSuggestions(),
+    refreshWards()
+  ]);
   if (currentUser?.activeShift?.wardId) {
     await openSelectedWard(currentUser.activeShift.wardId);
     return;
@@ -4174,7 +4205,7 @@ async function checkAuth() {
   try {
     const data = await api("/api/me");
     currentUser = data.user || null;
-    await startApp();
+    await startApp({ skipUserRefresh: true });
   } catch {
     currentUser = null;
     setAppEnabled(false);
@@ -4197,9 +4228,9 @@ document.getElementById("btn-login").addEventListener("click", async () => {
     }
     currentUser = res.user || null;
     document.getElementById("login-password").value = "";
-    await startApp();
+    await startApp({ skipUserRefresh: true });
   } catch (e) {
-    alert(e.message);
+    showUnexpectedError(e);
   }
 });
 
@@ -4606,7 +4637,7 @@ document.getElementById("btn-criar-ward").addEventListener("click", async () => 
     await refreshWards();
     await refreshCurrentUser();
   } catch (e) {
-    alert(e.message);
+    showUnexpectedError(e);
   }
 });
 
@@ -4690,7 +4721,7 @@ document.getElementById("btn-criar-enf")?.addEventListener("click", async () => 
     syncAdminWardEditorFlow();
     setAdminWardFeedback("Enfermaria criada. Agora voce pode cadastrar os leitos.");
   } catch (e) {
-    alert(e.message);
+    showUnexpectedError(e);
   }
 });
 
@@ -4716,7 +4747,7 @@ document.getElementById("btn-add-beds").addEventListener("click", async () => {
     await refreshCurrentUser();
     setAdminWardFeedback("Leitos cadastrados com sucesso.");
   } catch (e) {
-    alert(e.message);
+    showUnexpectedError(e);
   }
 });
 
@@ -4741,7 +4772,7 @@ document.getElementById("btn-del-beds")?.addEventListener("click", async () => {
     await refreshCurrentUser();
     if (currentWardId === wardId) await load();
   } catch (e) {
-    alert(e.message);
+    showUnexpectedError(e);
   }
 });
 
@@ -4765,7 +4796,7 @@ document.getElementById("btn-del-enf")?.addEventListener("click", async () => {
     syncAdminWardEditorFlow();
     setAdminWardFeedback("Enfermaria excluida com sucesso.");
   } catch (e) {
-    alert(e.message);
+    showUnexpectedError(e);
   }
 });
 
