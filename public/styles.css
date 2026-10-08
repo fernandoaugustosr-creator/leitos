@@ -3073,3 +3073,220 @@ table tbody tr:nth-child(even) td {
     transition-duration: 0.01ms !important;
   }
 }
+
+.psychology-shift-card,
+.psychology-shell,
+.portaria-social-shell,
+.portaria-visitor-shell {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+}
+
+.psychology-shift-card {
+  padding: 22px;
+}
+
+.plantao-card-title {
+  color: #174c50;
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -0.2px;
+}
+
+.psychology-view-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #edf4f3;
+}
+
+.psychology-view-tabs .hero-tab {
+  min-height: 42px;
+  padding: 10px 16px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  box-shadow: none;
+  color: #526b70;
+  font-weight: 700;
+}
+
+.psychology-view-tabs .hero-tab:hover {
+  border-color: #d6e5e3;
+  background: rgba(255, 255, 255, 0.72);
+  color: #174c50;
+}
+
+.psychology-view-tabs .hero-tab.active {
+  border-color: #dce9e7;
+  background: #fff;
+  color: #12645e;
+  box-shadow: 0 2px 8px rgba(28, 55, 64, 0.08);
+}
+
+.psychology-shell,
+.portaria-social-shell,
+.portaria-visitor-shell {
+  padding: 22px;
+}
+
+.psychology-header,
+.portaria-social-header,
+.portaria-visitor-header {
+  align-items: center;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #e8eeee;
+}
+
+.procedimentos-title {
+  color: #214b50;
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -0.2px;
+}
+
+.history-hint {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.psychology-table-wrap,
+.social-service-table-wrap,
+.social-service-age-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.psychology-table th,
+.social-service-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-color: #dfe9e8;
+  background: #edf5f4;
+  color: #315a5d;
+  font-size: 11px;
+  letter-spacing: 0.055em;
+}
+
+.psychology-table td,
+.social-service-table td {
+  border-color: #e7eeee;
+  color: #344d57;
+  line-height: 1.5;
+}
+
+.psychology-table tbody tr:nth-child(even) td,
+.social-service-table tbody tr:nth-child(even) td {
+  background: #f8fbfa;
+}
+
+.psychology-table tbody tr:hover td,
+.social-service-table tbody tr:hover td {
+  background: #eff8f6;
+}
+
+.psychology-table-status-cell,
+.psychology-table-editor-cell,
+.psychology-table-action-cell,
+.social-service-editor-cell,
+.social-service-form-cell,
+.social-service-observation-cell {
+  vertical-align: middle;
+}
+
+.psychology-monthly-toolbar {
+  padding: 14px;
+  border: 1px solid #e6eeee;
+  border-radius: 14px;
+  background: #f8fbfa;
+}
+
+.psychology-monthly-toolbar label {
+  color: #344d57;
+}
+
+.social-service-contact-display,
+.social-service-editor-cell textarea,
+.social-service-editor-cell .social-service-select,
+.psychology-table-editor-cell textarea {
+  border-color: #dce7e6;
+  border-radius: 11px;
+  background: #fbfdfd;
+}
+
+.social-service-editor-cell textarea:focus,
+.social-service-editor-cell .social-service-select:focus,
+.psychology-table-editor-cell textarea:focus {
+  border-color: #65aaa1;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+  background: #fff;
+  transform: none;
+}
+
+.social-service-history-shell {
+  border: 1px solid var(--border);
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+}
+
+.social-service-age-table td:nth-child(2) {
+  color: #176b66;
+}
+
+.psychology-manual-panel .portaria-visitor-form-card,
+.psychology-manual-panel .portaria-visitor-history-card {
+  border-color: #e4eceb;
+  border-radius: 14px;
+  background: #fbfdfd;
+  box-shadow: none;
+}
+
+@media (max-width: 900px) {
+  .psychology-shift-card .plantao-form-grid,
+  .psychology-shift-card .plantao-action-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .app-shell,
+  body.sidebar-collapsed .app-shell {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .psychology-shift-card,
+  .psychology-shell,
+  .portaria-social-shell,
+  .portaria-visitor-shell {
+    padding: 16px;
+  }
+
+  .psychology-header,
+  .portaria-social-header,
+  .portaria-visitor-header {
+    align-items: flex-start;
+  }
+
+  .psychology-view-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .psychology-view-tabs .hero-tab {
+    flex: 0 0 auto;
+  }
+
+  .psychology-shift-card .plantao-form-grid,
+  .psychology-shift-card .plantao-action-grid {
+    grid-template-columns: 1fr;
+  }
+}
