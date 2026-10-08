@@ -3587,3 +3587,385 @@ textarea:focus,
     width: 100%;
   }
 }
+
+:root {
+  --primary: #475569;
+  --primary-hover: #334155;
+  --bg-main: #f1f5f9;
+  --bg-panel: #fff;
+  --text-main: #1e293b;
+  --text-muted: #64748b;
+  --border: #d7dee7;
+  --sidebar: #1e293b;
+  --sidebar-soft: rgba(148, 163, 184, 0.12);
+  --shadow: 0 12px 32px rgba(30, 41, 59, 0.08);
+  --shadow-sm: 0 4px 12px rgba(30, 41, 59, 0.06);
+}
+
+html {
+  font-size: 15px;
+}
+
+body {
+  font-size: 14px;
+  background:
+    radial-gradient(circle at top left, rgba(100, 116, 139, 0.08), transparent 30%),
+    linear-gradient(180deg, #f8fafc 0%, var(--bg-main) 100%);
+}
+
+button,
+input,
+select,
+textarea {
+  font-size: 14px;
+}
+
+.app-shell {
+  grid-template-columns: 252px minmax(0, 1fr);
+  gap: 14px;
+  padding: 10px;
+}
+
+body.sidebar-collapsed .app-shell {
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.sidebar {
+  padding: 14px 12px;
+  border-radius: 22px;
+  background: linear-gradient(180deg, #334155, #1e293b);
+}
+
+.sidebar-brand .brand-kicker,
+.sidebar-card-title,
+.sidebar .sidebar-nav-label {
+  color: #cbd5e1;
+}
+
+.sidebar-brand .brand-title {
+  font-size: 22px;
+}
+
+.sidebar-brand .brand-subtitle {
+  font-size: 12px;
+  color: #cbd5e1;
+}
+
+.sidebar-nav {
+  gap: 7px;
+}
+
+.sidebar-btn {
+  padding: 10px 12px;
+  border-radius: 14px;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.sidebar-btn:not(.ghost) {
+  background: linear-gradient(135deg, #64748b, #475569);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.2);
+}
+
+.sidebar-btn.ghost {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #f8fafc;
+}
+
+.sidebar-btn.ghost:hover {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.sidebar-btn-short,
+.sidebar-badge,
+.sidebar-badge.subtle {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #e2e8f0;
+}
+
+.sidebar-card {
+  gap: 9px;
+  padding: 14px;
+  border-radius: 16px;
+}
+
+.content-shell {
+  gap: 12px;
+  padding: 0 4px 12px 0;
+}
+
+.container {
+  gap: 14px;
+}
+
+.panel {
+  padding: clamp(14px, 1.5vw, 20px);
+  border-radius: 20px;
+}
+
+.panel h2 {
+  margin-bottom: 14px;
+  font-size: 19px;
+}
+
+.panel h3,
+.ward-shift-entry-copy h3 {
+  font-size: 17px;
+}
+
+.hero-title {
+  font-size: 28px;
+}
+
+.hero-subtitle,
+.welcome-text {
+  font-size: 14px;
+}
+
+.welcome-banner {
+  padding: 18px 22px;
+  border-radius: 22px;
+}
+
+.welcome-kicker {
+  font-size: 24px;
+}
+
+.dashboard-grid,
+.dashboard-chart-grid {
+  gap: 12px;
+}
+
+.dashboard-card {
+  min-height: 90px;
+  padding: 14px;
+  border-radius: 16px;
+}
+
+.dashboard-card strong {
+  font-size: 24px;
+}
+
+.row {
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.row label {
+  min-width: 200px;
+  font-size: 13px;
+}
+
+.row input,
+.row select,
+button,
+.row button {
+  padding: 9px 12px;
+  border-radius: 10px;
+}
+
+button,
+.row button {
+  background: linear-gradient(135deg, #64748b, #475569);
+  box-shadow: 0 5px 14px rgba(51, 65, 85, 0.12);
+}
+
+button:hover,
+.row button:hover {
+  background: linear-gradient(135deg, #475569, #334155);
+}
+
+button.ghost,
+.row button.ghost,
+.sidebar-logout {
+  background: #fff;
+  color: var(--primary);
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+button.ghost:hover,
+.row button.ghost:hover,
+.sidebar-logout:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+
+.hero-tab.active,
+.home-ward-grid .hero-tab.active {
+  background: linear-gradient(135deg, #475569, #334155);
+  color: #fff;
+}
+
+.workshift-start-card {
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  border-color: var(--border);
+  background: linear-gradient(135deg, #f8fafc, #fff);
+}
+
+.workshift-start-card .procedimentos-title,
+.panel h3,
+.hero-title,
+.ward-shift-entry-copy h3,
+.header-team-title {
+  color: #334155;
+}
+
+.sidebar-nav-label,
+.hint {
+  font-size: 13px;
+}
+
+.home-ward-shell,
+.ward-detail-toolbar,
+.ward-shift-entry,
+.header-team-panel {
+  padding: 16px;
+  border-radius: 18px;
+}
+
+.home-ward-grid {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.home-ward-grid .hero-tab {
+  min-height: 92px;
+  padding: 14px;
+  border-color: var(--border);
+  background: #fff;
+  color: var(--text-main);
+}
+
+.home-ward-grid .hero-tab::after {
+  color: var(--primary);
+}
+
+.shift-title,
+.shift-status,
+.shift-team-summary-title,
+.plantao-card-title,
+.psychology-shift-card .plantao-card-title,
+.ward-detail-kicker,
+.hero-header .hero-title {
+  color: #334155;
+}
+
+.plantao-control-card,
+.plantao-details-card,
+.shift-card {
+  background: linear-gradient(180deg, #fff, #f1f5f9);
+}
+
+.psychology-view-tabs {
+  border-color: var(--border);
+  background: #f1f5f9;
+}
+
+.psychology-view-tabs .hero-tab,
+.psychology-view-tabs .hero-tab:hover,
+.psychology-view-tabs .hero-tab.active {
+  color: #475569;
+}
+
+.psychology-view-tabs .hero-tab.active {
+  border-color: var(--border);
+  background: #fff;
+}
+
+.dashboard-card {
+  border-top-color: #94a3b8;
+}
+
+.sidebar-logout {
+  color: #fecaca;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.sidebar-logout:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.psychology-table th,
+.social-service-table th,
+.social-service-form-section-title {
+  background: #eef2f6;
+  border-color: #d7dee7;
+  color: #334155;
+}
+
+.psychology-table tbody tr:hover td,
+.social-service-table tbody tr:hover td {
+  background: #f1f5f9;
+}
+
+.psychology-table tbody tr:nth-child(even) td,
+.social-service-table tbody tr:nth-child(even) td {
+  background: #f8fafc;
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+.row input:focus,
+.row select:focus {
+  border-color: #64748b;
+  box-shadow: 0 0 0 3px rgba(100, 116, 139, 0.14);
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+  outline-color: rgba(100, 116, 139, 0.35);
+}
+
+@media (max-width: 900px) {
+  .app-shell,
+  body.sidebar-collapsed .app-shell {
+    grid-template-columns: 1fr;
+    gap: 12px;
+    padding: 10px;
+  }
+
+  .sidebar {
+    padding: 14px;
+  }
+
+  .sidebar-btn,
+  .sidebar-logout {
+    padding: 10px 12px;
+  }
+
+  .content-shell {
+    padding: 0 0 12px;
+  }
+}
+
+@media (max-width: 640px) {
+  .panel {
+    padding: 14px;
+  }
+
+  .panel h2 {
+    font-size: 18px;
+  }
+
+  .row label {
+    min-width: 100%;
+  }
+
+  .home-ward-grid {
+    grid-template-columns: 1fr;
+  }
+}
