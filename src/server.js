@@ -2485,7 +2485,11 @@ function buildShiftReport(user, shift) {
   }
   const shiftWardActions = shiftActions.filter(action => actionBelongsToShiftWard(action));
   const shiftPatients = Array.from(shiftPatientsMap.values())
-    .filter(patient => patient.ativoNoFechamento)
+    .filter(patient => beds.some(bed =>
+      isBedOccupiedByPatient(bed)
+      && getPatientIdentityKey(bed) === getPatientIdentityKey(patient)
+    ))
+    .map(patient => ({ ...patient, ativoNoFechamento: true }))
     .sort((a, b) =>
       String(a.enfermaria || "").localeCompare(String(b.enfermaria || ""), "pt-BR")
       || Number(a.leito || 0) - Number(b.leito || 0)
