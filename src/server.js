@@ -1140,6 +1140,12 @@ function loadStateFromLocalSnapshot() {
 }
 
 async function saveStateSnapshot(pendingSync = false) {
+  if (isServerlessRuntime) {
+    storageStatus.localSnapshotAt = null;
+    storageStatus.pendingLocalSync = false;
+    return true;
+  }
+
   writeLocalStateEnvelope(pendingSync);
   return true;
 }
