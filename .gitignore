@@ -1,3 +1,9 @@
-node_modules/
+.dbg/
+data/
+*.local.json
 .env
-data/app-state.local.json
+.env.local
+debug-browser-runtime-slow.md
+node_modules/
+.DS_Store
+*.log

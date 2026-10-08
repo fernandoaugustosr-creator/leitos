@@ -7,7 +7,36 @@ const port = process.env.PORT || 3000;
 const isServerlessRuntime = Boolean(process.env.VERCEL);
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "..", "public")));
+app.use((req, res, next) => {
+  const requestPath = String(req.path || "").toLowerCase();
+  const shouldDisableCache = requestPath === "/"
+    || requestPath.endsWith(".html")
+    || requestPath.endsWith(".css")
+    || requestPath.endsWith(".js");
+  if (shouldDisableCache) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.setHeader("Surrogate-Control", "no-store");
+  }
+  next();
+});
+app.use(express.static(path.join(__dirname, "..", "public"), {
+  etag: false,
+  lastModified: false
+}));
+
+app.post("/__debug/event", (req, res) => {
+  // #region debug-point A:browser-event-collector
+  appendDebugEvent({
+    hypothesisId: String(req.body?.hypothesisId || "A"),
+    location: String(req.body?.location || "browser"),
+    msg: String(req.body?.msg || "[DEBUG] Browser event"),
+    data: req.body?.data || {}
+  });
+  // #endregion
+  res.json({ ok: true });
+});
 
 const statuses = ["OCUPADO", "LIVRE", "BLOQUEADO", "RESERVADO", "EXTRA"];
 const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "DRENO DE TORAX"];
@@ -19,6 +48,10 @@ const supabaseStateColumns = ["payload", "data"];
 const sessionSecret = String(process.env.SESSION_SECRET || supabaseKey || "controle-de-leitos-session-secret").trim();
 const localStateDir = path.join(__dirname, "..", "data");
 const localStateFile = path.join(localStateDir, "app-state.local.json");
+const debugOutDir = path.join(__dirname, "..", ".dbg");
+const debugSessionId = "browser-runtime-slow";
+const debugLogFile = path.join(debugOutDir, `trae-debug-log-${debugSessionId}.ndjson`);
+const API_STATE_REFRESH_TTL_MS = 15000;
 const HOSPITAL_TRIP_ORIGIN_CITY = "Açailândia";
 const HOSPITAL_TRIP_ORIGIN_LABEL = "Hospital Municipal de Açailândia";
 const HOSPITAL_TRIP_ORIGIN_COORDS = { lat: -4.9533, lon: -47.5054 };
@@ -36,6 +69,10 @@ let maranhaoCitiesCache = null;
 let nextShiftId = 2;
 let nextPatientId = 1;
 const visitorRegistryEntries = [];
+const psychologyManualRequests = [];
+const psychologyAttendanceEntries = [];
+const socialServiceManualRequests = [];
+const socialServiceManualAttendanceEntries = [];
 const hospitalTripEntries = [];
 const users = [{
   id: 1,
@@ -63,6 +100,20 @@ const storageStatus = {
 };
 let storageInitializationPromise = null;
 let usingLocalFallback = false;
+let lastApiStateRefreshAt = 0;
+let apiStateRefreshPromise = null;
+
+function appendDebugEvent(event = {}) {
+  try {
+    fs.mkdirSync(debugOutDir, { recursive: true });
+    fs.appendFileSync(debugLogFile, `${JSON.stringify({
+      sessionId: debugSessionId,
+      runId: "pre-fix",
+      ts: Date.now(),
+      ...event
+    })}\n`, "utf8");
+  } catch {}
+}
 
 function shouldUseLocalFallback() {
   return !isServerlessRuntime && process.env.ALLOW_LOCAL_FALLBACK !== "false";
@@ -170,6 +221,16 @@ function createSession(username) {
   return sid;
 }
 
+function clearSessionsForUsername(username) {
+  const normalized = String(username || "").trim().toLowerCase();
+  if (!normalized) return;
+  for (const [sid, session] of sessions.entries()) {
+    if (String(session?.username || "").trim().toLowerCase() === normalized) {
+      sessions.delete(sid);
+    }
+  }
+}
+
 function resolveSession(sid) {
   if (!sid) return null;
 
@@ -231,16 +292,27 @@ function trimText(value) {
   return String(value || "").trim();
 }
 
+function normalizeCep(value) {
+  return String(value || "").replace(/\D/g, "").slice(0, 8);
+}
+
+function normalizePhone(value) {
+  return String(value || "").replace(/\D/g, "").slice(0, 11);
+}
+
 function buildTravelPerson(person) {
   return {
     fullName: trimText(person?.fullName),
     address: trimText(person?.address),
-    cpf: normalizeCpf(person?.cpf)
+    cpf: normalizeCpf(person?.cpf),
+    birthDate: trimText(person?.birthDate),
+    phone: normalizePhone(person?.phone),
+    cep: normalizeCep(person?.cep)
   };
 }
 
 function hasTravelPersonData(person) {
-  return Boolean(person?.fullName || person?.address || person?.cpf);
+  return Boolean(person?.fullName || person?.address || person?.cpf || person?.birthDate || person?.phone || person?.cep);
 }
 
 function calculateProcedureUnits(distanceKm) {
@@ -427,6 +499,10 @@ function buildStatePayload() {
     users,
     patientRegistry,
     visitorRegistryEntries,
+    psychologyManualRequests,
+    psychologyAttendanceEntries,
+    socialServiceManualRequests,
+    socialServiceManualAttendanceEntries,
     hospitalTripEntries,
     nirDailyReports,
     wards
@@ -442,6 +518,343 @@ function createEmptyTeam() {
     tecnicosNoite: "",
     faltosos: ""
   };
+}
+
+function normalizeSocialRecordStatus(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized || normalized === "Não necessário") return "Pendente";
+  if (normalized === "Disponível") return "Concluído";
+  return normalized;
+}
+
+function buildPatientSocialFormContact(payload = {}) {
+  return {
+    name: String(payload.name || "").trim(),
+    kinship: String(payload.kinship || "").trim(),
+    phone: String(payload.phone || "").trim(),
+    address: String(payload.address || "").trim()
+  };
+}
+
+function buildPatientSocialForm(payload = {}) {
+  const familyContacts = (Array.isArray(payload.familyContacts) ? payload.familyContacts : [])
+    .map(buildPatientSocialFormContact)
+    .filter(contact => contact.name || contact.kinship || contact.phone || contact.address)
+    .slice(0, 5);
+
+  return {
+    admissionDate: String(payload.admissionDate || "").trim(),
+    admissionTime: String(payload.admissionTime || "").trim(),
+    admissionSector: String(payload.admissionSector || "").trim(),
+    bed: String(payload.bed || "").trim(),
+    admissionReason: String(payload.admissionReason || "").trim(),
+    fullName: String(payload.fullName || "").trim(),
+    socialName: String(payload.socialName || "").trim(),
+    affiliation: String(payload.affiliation || "").trim(),
+    birthDate: String(payload.birthDate || "").trim(),
+    ageLabel: String(payload.ageLabel || "").trim(),
+    cns: String(payload.cns || "").trim(),
+    cpf: String(payload.cpf || "").trim(),
+    raceColor: String(payload.raceColor || "").trim(),
+    sex: String(payload.sex || "").trim(),
+    religion: String(payload.religion || "").trim(),
+    birthplace: String(payload.birthplace || "").trim(),
+    income: String(payload.income || "").trim(),
+    occupation: String(payload.occupation || "").trim(),
+    address: String(payload.address || "").trim(),
+    hasDisability: String(payload.hasDisability || "").trim(),
+    disabilityDescription: String(payload.disabilityDescription || "").trim(),
+    familyContacts,
+    maritalStatus: String(payload.maritalStatus || "").trim(),
+    partnerName: String(payload.partnerName || "").trim(),
+    educationLevel: String(payload.educationLevel || "").trim(),
+    benefits: (Array.isArray(payload.benefits) ? payload.benefits : [])
+      .map(item => String(item || "").trim())
+      .filter(Boolean)
+      .slice(0, 12),
+    benefitsOther: String(payload.benefitsOther || "").trim(),
+    previdenciaBond: String(payload.previdenciaBond || "").trim(),
+    previdenciaNature: String(payload.previdenciaNature || "").trim(),
+    previdenciaSituation: String(payload.previdenciaSituation || "").trim(),
+    companionName: String(payload.companionName || "").trim(),
+    companionPhone: String(payload.companionPhone || "").trim(),
+    companionKinship: String(payload.companionKinship || "").trim(),
+    companionAddress: String(payload.companionAddress || "").trim(),
+    profileTags: (Array.isArray(payload.profileTags) ? payload.profileTags : [])
+      .map(item => String(item || "").trim())
+      .filter(Boolean)
+      .slice(0, 12),
+    funeralPlan: String(payload.funeralPlan || "").trim(),
+    familyRelationship: String(payload.familyRelationship || "").trim(),
+    familyRelationshipNotes: String(payload.familyRelationshipNotes || "").trim(),
+    socialEvolution: String(payload.socialEvolution || "").trim(),
+    filledAt: String(payload.filledAt || "").trim(),
+    filledBy: String(payload.filledBy || "").trim(),
+    updatedAt: String(payload.updatedAt || "").trim(),
+    updatedBy: String(payload.updatedBy || "").trim()
+  };
+}
+
+function hasPatientSocialFormData(payload = {}) {
+  const form = buildPatientSocialForm(payload);
+  return Boolean(
+    form.admissionDate
+    || form.admissionTime
+    || form.admissionSector
+    || form.bed
+    || form.admissionReason
+    || form.fullName
+    || form.socialName
+    || form.affiliation
+    || form.birthDate
+    || form.ageLabel
+    || form.cns
+    || form.cpf
+    || form.raceColor
+    || form.sex
+    || form.religion
+    || form.birthplace
+    || form.income
+    || form.occupation
+    || form.address
+    || form.hasDisability
+    || form.disabilityDescription
+    || form.maritalStatus
+    || form.partnerName
+    || form.educationLevel
+    || form.benefits.length
+    || form.benefitsOther
+    || form.previdenciaBond
+    || form.previdenciaNature
+    || form.previdenciaSituation
+    || form.companionName
+    || form.companionPhone
+    || form.companionKinship
+    || form.companionAddress
+    || form.profileTags.length
+    || form.funeralPlan
+    || form.familyRelationship
+    || form.familyRelationshipNotes
+    || form.socialEvolution
+    || form.familyContacts.length
+  );
+}
+
+function buildPatientSocialSupport(payload = {}) {
+  return {
+    contacts: String(payload.contacts || "").trim(),
+    admissionNotes: String(payload.admissionNotes || "").trim(),
+    socialRecord: normalizeSocialRecordStatus(payload.socialRecord),
+    observation: String(payload.observation || "").trim(),
+    socialForm: buildPatientSocialForm(payload.socialForm),
+    socialRecordUpdatedAt: String(payload.socialRecordUpdatedAt || "").trim(),
+    socialRecordUpdatedBy: String(payload.socialRecordUpdatedBy || "").trim(),
+    dischargePending: Boolean(payload.dischargePending),
+    dischargeNote: String(payload.dischargeNote || "").trim(),
+    dischargeAt: String(payload.dischargeAt || "").trim(),
+    dischargeBy: String(payload.dischargeBy || "").trim(),
+    updatedAt: String(payload.updatedAt || "").trim(),
+    updatedBy: String(payload.updatedBy || "").trim()
+  };
+}
+
+function socialServiceAttendanceEntryForClient(entry = {}) {
+  const normalizedEntryType = String(entry.entryType || "baixa").trim();
+  const normalizedEntryLabel = String(entry.entryLabel || "").trim()
+    || (normalizedEntryType === "observacao_plantao" ? "Observação do plantão" : "Baixa do atendimento");
+  return {
+    id: entry.id || createRecordId(),
+    patientId: Number(entry.patientId) || null,
+    patientName: String(entry.patientName || "").trim(),
+    patientBirthDate: String(entry.patientBirthDate || "").trim(),
+    patientAgeLabel: String(entry.patientAgeLabel || entry.age || "").trim(),
+    wardId: Number(entry.wardId) || null,
+    wardName: String(entry.wardName || "").trim(),
+    bedId: Number(entry.bedId) || null,
+    contacts: String(entry.contacts || "").trim(),
+    admissionDate: String(entry.admissionDate || "").trim(),
+    socialRecord: normalizeSocialRecordStatus(entry.socialRecord || "Concluído"),
+    observation: String(entry.observation || "").trim(),
+    closedAt: String(entry.closedAt || entry.createdAt || "").trim(),
+    closedBy: String(entry.closedBy || entry.createdBy || "").trim(),
+    shiftId: Number(entry.shiftId) || null,
+    shiftDate: String(entry.shiftDate || "").trim(),
+    shiftLength: String(entry.shiftLength || "").trim(),
+    shiftPeriod: String(entry.shiftPeriod || "").trim(),
+    entryType: normalizedEntryType,
+    entryLabel: normalizedEntryLabel
+  };
+}
+
+function buildPatientSocialSupportHistory(items = []) {
+  return (Array.isArray(items) ? items : []).map(socialServiceAttendanceEntryForClient);
+}
+
+function findSocialServiceCoordinatorUser() {
+  return users.find(user => {
+    const identity = normalizePersonName(`${user?.nome || ""} ${user?.username || ""}`);
+    return identity.includes("FERNANDO")
+      && (identity.includes("AUGUSTO") || identity.includes("AGUSTO") || String(user?.username || "").trim().toLowerCase() === "admin");
+  }) || null;
+}
+
+function deleteSocialServiceAttendanceEntryById(entryId = "") {
+  const normalizedEntryId = String(entryId || "").trim();
+  if (!normalizedEntryId) return false;
+  let removed = false;
+
+  for (const patient of patientRegistry) {
+    if (!Array.isArray(patient?.socialSupportHistory)) continue;
+    const nextHistory = patient.socialSupportHistory.filter(item => String(item?.id || "").trim() !== normalizedEntryId);
+    if (nextHistory.length !== patient.socialSupportHistory.length) {
+      patient.socialSupportHistory = nextHistory;
+      patient.updatedAt = new Date().toISOString();
+      removed = true;
+    }
+  }
+
+  for (const user of users) {
+    for (const shift of Array.isArray(user?.shifts) ? user.shifts : []) {
+      if (Array.isArray(shift.socialServiceAttendances)) {
+        const nextAttendances = shift.socialServiceAttendances.filter(item => String(item?.id || "").trim() !== normalizedEntryId);
+        if (nextAttendances.length !== shift.socialServiceAttendances.length) {
+          shift.socialServiceAttendances = nextAttendances;
+          removed = true;
+        }
+      }
+
+      if (Array.isArray(shift.socialServiceSnapshot)) {
+        const nextSnapshot = shift.socialServiceSnapshot.filter((item, index) => {
+          const snapshotId = String(item?.socialHistoryId || `shift-${shift.id || "0"}-${index}`).trim();
+          return snapshotId !== normalizedEntryId;
+        });
+        if (nextSnapshot.length !== shift.socialServiceSnapshot.length) {
+          shift.socialServiceSnapshot = nextSnapshot;
+          removed = true;
+        }
+      }
+    }
+  }
+
+  const nextManualAttendances = socialServiceManualAttendanceEntries.filter(item => String(item?.id || "").trim() !== normalizedEntryId);
+  if (nextManualAttendances.length !== socialServiceManualAttendanceEntries.length) {
+    socialServiceManualAttendanceEntries.length = 0;
+    socialServiceManualAttendanceEntries.push(...nextManualAttendances);
+    removed = true;
+  }
+
+  return removed;
+}
+
+function buildSocialServiceShiftHistoryEntries(shift = {}, owner = {}) {
+  const shiftServiceType = String(shift.serviceType || "").trim().toUpperCase();
+  if (shiftServiceType !== "SERVICO_SOCIAL") return [];
+
+  const ownerName = String(owner?.nome || shift.ownerName || shift.ownerUsername || "").trim();
+  const shiftDate = String(shift.shiftDate || (shift.closedAt ? String(shift.closedAt).slice(0, 10) : "")).trim();
+  const items = [];
+
+  for (const rawEntry of Array.isArray(shift.socialServiceAttendances) ? shift.socialServiceAttendances : []) {
+    const entry = socialServiceAttendanceEntryForClient({
+      ...rawEntry,
+      entryType: rawEntry?.entryType || "baixa",
+      entryLabel: rawEntry?.entryLabel || "Baixa do atendimento"
+    });
+    items.push(entry);
+  }
+
+  for (const [index, snapshot] of (Array.isArray(shift.socialServiceSnapshot) ? shift.socialServiceSnapshot : []).entries()) {
+    const observation = String(snapshot?.observation || "").trim();
+    const updatedAt = String(snapshot?.updatedAt || shift.closedAt || "").trim();
+    const updatedBy = String(snapshot?.updatedBy || ownerName).trim();
+    if (!observation && !updatedAt) continue;
+    items.push(socialServiceAttendanceEntryForClient({
+      id: snapshot?.socialHistoryId || `shift-${shift.id || "0"}-${index}`,
+      patientName: snapshot?.patient || "",
+      patientBirthDate: snapshot?.patientBirthDate || "",
+      patientAgeLabel: snapshot?.age || "",
+      wardName: snapshot?.sector || shift.wardNome || "",
+      bedId: Number(snapshot?.bed) || null,
+      contacts: snapshot?.contacts || "",
+      admissionDate: snapshot?.admission || "",
+      socialRecord: snapshot?.socialRecord || "Pendente",
+      observation,
+      closedAt: updatedAt,
+      closedBy: updatedBy,
+      shiftId: shift.id || null,
+      shiftDate,
+      shiftLength: shift.shiftLength || "",
+      shiftPeriod: shift.shiftPeriod || "",
+      entryType: "observacao_plantao",
+      entryLabel: "Observação do plantão"
+    }));
+  }
+
+  return items;
+}
+
+function buildPatientPsychologySupport(payload = {}) {
+  return {
+    interventions: String(payload.interventions || "").trim(),
+    observation: String(payload.observation || "").trim(),
+    dischargePending: Boolean(payload.dischargePending),
+    dischargeNote: String(payload.dischargeNote || "").trim(),
+    dischargeAt: String(payload.dischargeAt || "").trim(),
+    dischargeBy: String(payload.dischargeBy || "").trim(),
+    updatedAt: String(payload.updatedAt || "").trim(),
+    updatedBy: String(payload.updatedBy || "").trim()
+  };
+}
+
+function psychologyAttendanceEntryForClient(entry) {
+  return {
+    id: entry.id || createRecordId(),
+    patientId: Number(entry.patientId) || null,
+    patientName: String(entry.patientName || "").trim(),
+    wardId: Number(entry.wardId) || null,
+    wardName: String(entry.wardName || "").trim(),
+    bedId: Number(entry.bedId) || null,
+    status: String(entry.status || "").trim().toUpperCase(),
+    interventions: String(entry.interventions || "").trim(),
+    observation: String(entry.observation || "").trim(),
+    createdAt: String(entry.createdAt || "").trim(),
+    createdBy: String(entry.createdBy || "").trim()
+  };
+}
+
+function getPsychologyAttendanceKey(entry = {}) {
+  return [
+    Number(entry.patientId) || "",
+    String(entry.createdAt || "").trim(),
+    String(entry.createdBy || "").trim(),
+    String(entry.status || "").trim().toUpperCase(),
+    String(entry.interventions || "").trim(),
+    String(entry.observation || "").trim()
+  ].join("|");
+}
+
+function buildPsychologyAttendanceFromPatient(patient = {}) {
+  const support = buildPatientPsychologySupport(patient?.psychologySupport);
+  if (!support.updatedAt) return null;
+
+  const lastAdmission = patient?.currentAdmission
+    || (Array.isArray(patient?.admissionHistory) ? patient.admissionHistory[0] : null)
+    || null;
+  const request = lastAdmission?.psychologyRequest || {};
+
+  return psychologyAttendanceEntryForClient({
+    id: `patient-${patient?.id || createRecordId()}-${support.updatedAt}`,
+    patientId: patient?.id || null,
+    patientName: patient?.nome || "",
+    wardId: lastAdmission?.wardId || null,
+    wardName: lastAdmission?.wardNome || "",
+    bedId: lastAdmission?.bedId || null,
+    status: request?.status || "",
+    interventions: support.interventions,
+    observation: support.observation,
+    createdAt: support.updatedAt,
+    createdBy: support.updatedBy
+  });
 }
 
 function ensureWardTeam(ward) {
@@ -479,6 +892,7 @@ function applyStatePayload(payload) {
         nome: patient.nome || "",
         cpf: normalizeCpf(patient.cpf),
         birthDate: patient.birthDate || "",
+        phone: normalizePhone(patient.phone),
         diagnostico: patient.diagnostico || "",
         nir: patient.nir || "",
         cil: patient.cil || "",
@@ -487,12 +901,25 @@ function applyStatePayload(payload) {
         nirLastUpdateAt: patient.nirLastUpdateAt || "",
         nirLastUpdateBy: patient.nirLastUpdateBy || "",
         nirUpdateChannels: Array.isArray(patient.nirUpdateChannels) ? patient.nirUpdateChannels : [],
+        nirWorkflowStatus: patient.nirWorkflowStatus || "",
+        nirAcceptedLocation: patient.nirAcceptedLocation || "",
+        nirActionReason: patient.nirActionReason || "",
+        nirStatusUpdatedAt: patient.nirStatusUpdatedAt || "",
+        nirStatusUpdatedBy: patient.nirStatusUpdatedBy || "",
+        nirDischargePending: Boolean(patient.nirDischargePending),
+        nirDischargeNote: patient.nirDischargeNote || "",
+        nirDischargeAt: patient.nirDischargeAt || "",
+        nirDischargeBy: patient.nirDischargeBy || "",
+        nirHistory: Array.isArray(patient.nirHistory) ? patient.nirHistory : [],
         createdAt: patient.createdAt || new Date().toISOString(),
         updatedAt: patient.updatedAt || new Date().toISOString(),
         deletedAt: patient.deletedAt || null,
         currentAdmission: patient.currentAdmission || null,
         admissionHistory: Array.isArray(patient.admissionHistory) ? patient.admissionHistory : [],
-        visitHistory: Array.isArray(patient.visitHistory) ? patient.visitHistory : []
+        visitHistory: Array.isArray(patient.visitHistory) ? patient.visitHistory : [],
+        socialSupportHistory: buildPatientSocialSupportHistory(patient.socialSupportHistory),
+        socialSupport: buildPatientSocialSupport(patient.socialSupport),
+        psychologySupport: buildPatientPsychologySupport(patient.psychologySupport)
       });
     }
   }
@@ -507,6 +934,61 @@ function applyStatePayload(payload) {
         createdAt: entry.createdAt || new Date().toISOString(),
         createdBy: entry.createdBy || ""
       });
+    }
+  }
+  psychologyManualRequests.length = 0;
+  if (Array.isArray(payload.psychologyManualRequests)) {
+    for (const entry of payload.psychologyManualRequests) {
+      psychologyManualRequests.push({
+        id: entry.id || createRecordId(),
+        patientName: String(entry.patientName || "").trim(),
+        sectorOrReason: String(entry.sectorOrReason || "").trim(),
+        notes: String(entry.notes || "").trim(),
+        contacts: String(entry.contacts || "").trim(),
+        socialRecord: normalizeSocialRecordStatus(entry.socialRecord || "Pendente"),
+        observation: String(entry.observation || "").trim(),
+        interventions: String(entry.interventions || "").trim(),
+        status: String(entry.status || "SOLICITADO").trim().toUpperCase(),
+        createdAt: entry.createdAt || new Date().toISOString(),
+        createdBy: entry.createdBy || "",
+        updatedAt: entry.updatedAt || "",
+        updatedBy: entry.updatedBy || "",
+        closedAt: entry.closedAt || "",
+        closedBy: entry.closedBy || ""
+      });
+    }
+  }
+  socialServiceManualRequests.length = 0;
+  if (Array.isArray(payload.socialServiceManualRequests)) {
+    for (const entry of payload.socialServiceManualRequests) {
+      socialServiceManualRequests.push({
+        id: entry.id || createRecordId(),
+        patientName: String(entry.patientName || "").trim(),
+        sectorOrReason: String(entry.sectorOrReason || "").trim(),
+        notes: String(entry.notes || "").trim(),
+        contacts: String(entry.contacts || "").trim(),
+        socialRecord: normalizeSocialRecordStatus(entry.socialRecord || "Pendente"),
+        observation: String(entry.observation || "").trim(),
+        status: String(entry.status || "SOLICITADO").trim().toUpperCase(),
+        createdAt: entry.createdAt || new Date().toISOString(),
+        createdBy: entry.createdBy || "",
+        updatedAt: entry.updatedAt || "",
+        updatedBy: entry.updatedBy || "",
+        closedAt: entry.closedAt || "",
+        closedBy: entry.closedBy || ""
+      });
+    }
+  }
+  psychologyAttendanceEntries.length = 0;
+  if (Array.isArray(payload.psychologyAttendanceEntries)) {
+    for (const entry of payload.psychologyAttendanceEntries) {
+      psychologyAttendanceEntries.push(psychologyAttendanceEntryForClient(entry));
+    }
+  }
+  socialServiceManualAttendanceEntries.length = 0;
+  if (Array.isArray(payload.socialServiceManualAttendanceEntries)) {
+    for (const entry of payload.socialServiceManualAttendanceEntries) {
+      socialServiceManualAttendanceEntries.push(socialServiceAttendanceEntryForClient(entry));
     }
   }
   hospitalTripEntries.length = 0;
@@ -561,6 +1043,7 @@ function applyStatePayload(payload) {
   if (!patientRegistry.length) {
     rebuildPatientRegistryFromWards();
   }
+  reconcileDuplicateOccupiedBeds();
   return true;
 }
 
@@ -772,16 +1255,66 @@ async function refreshStateFromSupabase() {
   }
 }
 
+async function refreshStateFromSupabaseThrottled() {
+  if (usingLocalFallback) {
+    return tryRecoverSupabaseSync();
+  }
+
+  const now = Date.now();
+  if ((now - lastApiStateRefreshAt) < API_STATE_REFRESH_TTL_MS) {
+    return false;
+  }
+  if (apiStateRefreshPromise) {
+    return apiStateRefreshPromise;
+  }
+
+  apiStateRefreshPromise = (async () => {
+    try {
+      return await refreshStateFromSupabase();
+    } finally {
+      lastApiStateRefreshAt = Date.now();
+      apiStateRefreshPromise = null;
+    }
+  })();
+
+  return apiStateRefreshPromise;
+}
+
 app.use("/api", async (req, res, next) => {
+  const startedAt = Date.now();
+  // #region debug-point B:api-sync-start
+  appendDebugEvent({
+    hypothesisId: "B",
+    location: "src/server.js:/api-middleware:start",
+    msg: "[DEBUG] API middleware start",
+    data: { method: req.method, path: req.path, usingLocalFallback }
+  });
+  // #endregion
   try {
     await ensureStorageInitialized();
     if (usingLocalFallback) {
       await tryRecoverSupabaseSync();
     } else {
-      await refreshStateFromSupabase();
+      await refreshStateFromSupabaseThrottled();
     }
+    // #region debug-point B:api-sync-success
+    appendDebugEvent({
+      hypothesisId: "B",
+      location: "src/server.js:/api-middleware:success",
+      msg: "[DEBUG] API middleware success",
+      data: { method: req.method, path: req.path, usingLocalFallback, durationMs: Date.now() - startedAt }
+    });
+    // #endregion
     next();
   } catch (error) {
+    // #region debug-point B:api-sync-error
+    appendDebugEvent({
+      hypothesisId: "B",
+      location: "src/server.js:/api-middleware:error",
+      msg: "[DEBUG] API middleware error",
+      data: { method: req.method, path: req.path, usingLocalFallback, durationMs: Date.now() - startedAt, error: error.message }
+    });
+    // #endregion
     res.status(503).json({ error: "Falha na sincronização com o Supabase", detail: error.message });
   }
 });
@@ -800,6 +1333,26 @@ function wardSummaryForClient(ward) {
     bedsCount: Array.isArray(ward.beds) ? ward.beds.length : 0,
     enfermariasCount: Array.isArray(ward.enfermarias) ? ward.enfermarias.length : 0
   };
+}
+
+function findActiveShiftOwnerForDay(wardId, shiftDate = getCurrentIsoDate(), serviceType = "") {
+  const normalizedServiceType = String(serviceType || "").trim().toUpperCase();
+  const isStandaloneService = ["PSICOLOGIA", "SERVICO_SOCIAL"].includes(normalizedServiceType);
+  return users.find(user =>
+    user?.activeShift
+    && String(user.activeShift.serviceType || "").trim().toUpperCase() === normalizedServiceType
+    && (isStandaloneService
+      ? true
+      : Number(user.activeShift.wardId) === Number(wardId))
+    && String(user.activeShift.shiftDate || "") === String(shiftDate || "")
+  ) || null;
+}
+
+function getServiceShiftLabel(serviceType = "") {
+  const normalized = String(serviceType || "").trim().toUpperCase();
+  if (normalized === "PSICOLOGIA") return "Psicologia";
+  if (normalized === "SERVICO_SOCIAL") return "Serviço Social";
+  return "";
 }
 
 function getWardOr404(req, res, options = {}) {
@@ -885,8 +1438,31 @@ function getOperationalDayKey(baseValue = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
+function getPatientAgeLabel(birthDate) {
+  if (!birthDate) return "";
+  const date = new Date(`${birthDate}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  let age = today.getFullYear() - date.getFullYear();
+  const monthDiff = today.getMonth() - date.getMonth();
+  const dayDiff = today.getDate() - date.getDate();
+  if (monthDiff < 0 || (monthDiff === 0 && dayDiff < 0)) {
+    age -= 1;
+  }
+  if (age < 0) return "";
+  return `${age} anos`;
+}
+
 function isBedOccupiedByPatient(bed) {
   return String(bed?.status || "").toUpperCase() === "OCUPADO" && Boolean(String(bed?.nome || "").trim());
+}
+
+function getPatientIdentityKey(identity = {}) {
+  const cpf = normalizeCpf(identity?.cpf);
+  if (cpf) return `cpf:${cpf}`;
+  const nome = normalizePersonName(identity?.nome);
+  if (!nome) return "";
+  return `name:${nome}|birth:${String(identity?.birthDate || "").trim()}`;
 }
 
 function isSamePatientIdentity(a, b) {
@@ -904,6 +1480,67 @@ function findPatientByCurrentLocation(wardId, bedId) {
     && Number(patient.currentAdmission.wardId) === Number(wardId)
     && Number(patient.currentAdmission.bedId) === Number(bedId)
   ) || null;
+}
+
+function findOtherOccupiedBedByIdentity(identity = {}, excludeWardId = null, excludeBedId = null) {
+  const identityKey = getPatientIdentityKey(identity);
+  if (!identityKey) return null;
+  for (const ward of wards) {
+    for (const bed of ward.beds || []) {
+      normalizeBedData(bed);
+      if (!isBedOccupiedByPatient(bed)) continue;
+      if (Number(ward.id) === Number(excludeWardId) && Number(bed.id) === Number(excludeBedId)) continue;
+      if (getPatientIdentityKey(bed) !== identityKey) continue;
+      return { ward, bed };
+    }
+  }
+  return null;
+}
+
+function chooseCanonicalOccupiedBed(entries = []) {
+  if (!Array.isArray(entries) || !entries.length) return null;
+  const patient = findPatientRegistryEntry(entries[0]?.bed || {});
+  if (patient?.currentAdmission) {
+    const matched = entries.find(entry =>
+      Number(entry?.ward?.id) === Number(patient.currentAdmission?.wardId)
+      && Number(entry?.bed?.id) === Number(patient.currentAdmission?.bedId)
+    );
+    if (matched) return matched;
+  }
+  return [...entries].sort((a, b) => {
+    const admissionA = Date.parse(String(a?.bed?.admissao || ""));
+    const admissionB = Date.parse(String(b?.bed?.admissao || ""));
+    return (Number.isFinite(admissionB) ? admissionB : 0) - (Number.isFinite(admissionA) ? admissionA : 0);
+  })[0];
+}
+
+function reconcileDuplicateOccupiedBeds() {
+  const groups = new Map();
+  for (const ward of wards) {
+    for (const bed of ward.beds || []) {
+      normalizeBedData(bed);
+      if (!isBedOccupiedByPatient(bed)) continue;
+      const identityKey = getPatientIdentityKey(bed);
+      if (!identityKey) continue;
+      if (!groups.has(identityKey)) groups.set(identityKey, []);
+      groups.get(identityKey).push({ ward, bed });
+    }
+  }
+
+  let changed = false;
+  for (const entries of groups.values()) {
+    if (entries.length <= 1) continue;
+    const canonical = chooseCanonicalOccupiedBed(entries);
+    if (!canonical) continue;
+    const patient = ensurePatientRecordFromBed(canonical.bed);
+    ensurePatientAdmissionRecord(patient, canonical.ward, canonical.bed, "Sistema");
+    for (const entry of entries) {
+      if (entry === canonical) continue;
+      clearBedPatientData(entry.bed, "LIVRE");
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function findPatientRegistryEntry(identity = {}) {
@@ -931,6 +1568,7 @@ function createPatientRecordFromBed(bed) {
     nome: bed.nome || "",
     cpf: normalizeCpf(bed.cpf),
     birthDate: bed.birthDate || "",
+    phone: normalizePhone(bed.phone),
     diagnostico: bed.diagnostico || "",
     nir: bed.nir || "",
     cil: bed.cil || "",
@@ -939,12 +1577,25 @@ function createPatientRecordFromBed(bed) {
     nirLastUpdateAt: "",
     nirLastUpdateBy: "",
     nirUpdateChannels: [],
+    nirWorkflowStatus: "",
+    nirAcceptedLocation: "",
+    nirActionReason: "",
+    nirStatusUpdatedAt: "",
+    nirStatusUpdatedBy: "",
+    nirDischargePending: false,
+    nirDischargeNote: "",
+    nirDischargeAt: "",
+    nirDischargeBy: "",
+    nirHistory: [],
     createdAt: now,
     updatedAt: now,
     deletedAt: null,
     currentAdmission: null,
     admissionHistory: [],
-    visitHistory: []
+    visitHistory: [],
+    socialSupportHistory: [],
+    socialSupport: buildPatientSocialSupport(),
+    psychologySupport: buildPatientPsychologySupport()
   };
 }
 
@@ -955,6 +1606,7 @@ function createEmptyPatientRecord(payload = {}) {
     nome: String(payload.nome || "").trim(),
     cpf: normalizeCpf(payload.cpf),
     birthDate: String(payload.birthDate || "").trim(),
+    phone: normalizePhone(payload.phone),
     diagnostico: String(payload.diagnostico || "").trim(),
     nir: String(payload.nir || "").trim(),
     cil: String(payload.cil || "").trim(),
@@ -963,12 +1615,25 @@ function createEmptyPatientRecord(payload = {}) {
     nirLastUpdateAt: String(payload.nirLastUpdateAt || "").trim(),
     nirLastUpdateBy: String(payload.nirLastUpdateBy || "").trim(),
     nirUpdateChannels: Array.isArray(payload.nirUpdateChannels) ? payload.nirUpdateChannels : [],
+    nirWorkflowStatus: String(payload.nirWorkflowStatus || "").trim(),
+    nirAcceptedLocation: String(payload.nirAcceptedLocation || "").trim(),
+    nirActionReason: String(payload.nirActionReason || "").trim(),
+    nirStatusUpdatedAt: String(payload.nirStatusUpdatedAt || "").trim(),
+    nirStatusUpdatedBy: String(payload.nirStatusUpdatedBy || "").trim(),
+    nirDischargePending: Boolean(payload.nirDischargePending),
+    nirDischargeNote: String(payload.nirDischargeNote || "").trim(),
+    nirDischargeAt: String(payload.nirDischargeAt || "").trim(),
+    nirDischargeBy: String(payload.nirDischargeBy || "").trim(),
+    nirHistory: Array.isArray(payload.nirHistory) ? payload.nirHistory : [],
     createdAt: now,
     updatedAt: now,
     deletedAt: null,
     currentAdmission: null,
     admissionHistory: [],
-    visitHistory: []
+    visitHistory: [],
+    socialSupportHistory: buildPatientSocialSupportHistory(payload.socialSupportHistory),
+    socialSupport: buildPatientSocialSupport(payload.socialSupport),
+    psychologySupport: buildPatientPsychologySupport(payload.psychologySupport)
   };
 }
 
@@ -981,10 +1646,14 @@ function ensurePatientRecordFromBed(bed) {
   patient.nome = bed.nome || patient.nome || "";
   patient.cpf = normalizeCpf(bed.cpf) || patient.cpf || "";
   patient.birthDate = bed.birthDate || patient.birthDate || "";
+  patient.phone = normalizePhone(patient.phone);
   patient.diagnostico = bed.diagnostico || "";
   patient.nir = bed.nir || "";
   patient.cil = bed.cil || "";
   patient.deletedAt = null;
+  patient.socialSupportHistory = buildPatientSocialSupportHistory(patient.socialSupportHistory);
+  patient.socialSupport = buildPatientSocialSupport(patient.socialSupport);
+  patient.psychologySupport = buildPatientPsychologySupport(patient.psychologySupport);
   patient.updatedAt = new Date().toISOString();
   return patient;
 }
@@ -1029,13 +1698,39 @@ function ensurePatientAdmissionRecord(patient, ward, bed, actor) {
 function closePatientAdmissionByBedSnapshot(bed, ward, outcome, actor, reason = "") {
   const patient = findPatientByCurrentLocation(ward.id, bed.id) || findPatientRegistryEntry(bed);
   if (!patient || !patient.currentAdmission) return null;
-  patient.currentAdmission.dischargedAt = new Date().toISOString();
+  const dischargeAt = new Date().toISOString();
+  patient.currentAdmission.dischargedAt = dischargeAt;
   patient.currentAdmission.outcome = outcome || "ENCERRADA";
-  patient.currentAdmission.updatedAt = new Date().toISOString();
+  patient.currentAdmission.updatedAt = dischargeAt;
   patient.currentAdmission.updatedBy = actor;
   if (reason) patient.currentAdmission.closeReason = reason;
+  const dischargeNote = `${ward?.nome || patient.currentAdmission.wardNome || "Setor"} deu ${String(outcome || "alta").toLowerCase()} em ${new Date(dischargeAt).toLocaleString("pt-BR")}. Finalize o acompanhamento no módulo responsável.`;
+  if (String(patient.nirWorkflowStatus || "").trim().toUpperCase() === "EM_ACOMPANHAMENTO" || patient.regulationAcceptedAt) {
+    patient.nirDischargePending = true;
+    patient.nirDischargeAt = dischargeAt;
+    patient.nirDischargeBy = actor;
+    patient.nirDischargeNote = dischargeNote;
+  }
+  if (patient.socialSupport?.updatedAt || patient.socialSupport?.observation || patient.socialSupport?.socialRecord === "Concluído") {
+    patient.socialSupport = buildPatientSocialSupport({
+      ...patient.socialSupport,
+      dischargePending: true,
+      dischargeNote,
+      dischargeAt,
+      dischargeBy: actor
+    });
+  }
+  if (patient.psychologySupport?.updatedAt || patient.psychologySupport?.observation || patient.psychologySupport?.interventions) {
+    patient.psychologySupport = buildPatientPsychologySupport({
+      ...patient.psychologySupport,
+      dischargePending: true,
+      dischargeNote,
+      dischargeAt,
+      dischargeBy: actor
+    });
+  }
   patient.currentAdmission = null;
-  patient.updatedAt = new Date().toISOString();
+  patient.updatedAt = dischargeAt;
   return patient;
 }
 
@@ -1111,16 +1806,37 @@ function findPatientOr404(req, res) {
 }
 
 function patientForClient(patient) {
-  const currentAdmission = patient.currentAdmission ? {
+  let currentAdmission = patient.currentAdmission ? {
     ...patient.currentAdmission,
     active: true
   } : null;
+  if (currentAdmission) {
+    const ward = wards.find(item => Number(item.id) === Number(currentAdmission.wardId));
+    const bed = ward?.beds?.find(item => Number(item.id) === Number(currentAdmission.bedId));
+    if (bed) {
+      normalizeBedData(bed);
+      currentAdmission = {
+        ...currentAdmission,
+        nirRequest: buildBedRequestState(bed.nirRequest),
+        serviceSocialRequest: buildBedRequestState(bed.serviceSocialRequest),
+        psychologyRequest: buildBedRequestState(bed.psychologyRequest)
+      };
+    } else {
+      currentAdmission = {
+        ...currentAdmission,
+        nirRequest: buildBedRequestState(),
+        serviceSocialRequest: buildBedRequestState(),
+        psychologyRequest: buildBedRequestState()
+      };
+    }
+  }
   const lastAdmission = patient.currentAdmission || (Array.isArray(patient.admissionHistory) ? patient.admissionHistory[0] : null) || null;
   return {
     id: patient.id,
     nome: patient.nome || "",
     cpf: patient.cpf || "",
     birthDate: patient.birthDate || "",
+    phone: patient.phone || "",
     diagnostico: patient.diagnostico || "",
     nir: patient.nir || "",
     cil: patient.cil || "",
@@ -1129,13 +1845,26 @@ function patientForClient(patient) {
     nirLastUpdateAt: patient.nirLastUpdateAt || "",
     nirLastUpdateBy: patient.nirLastUpdateBy || "",
     nirUpdateChannels: Array.isArray(patient.nirUpdateChannels) ? patient.nirUpdateChannels : [],
+    nirWorkflowStatus: patient.nirWorkflowStatus || "",
+    nirAcceptedLocation: patient.nirAcceptedLocation || "",
+    nirActionReason: patient.nirActionReason || "",
+    nirStatusUpdatedAt: patient.nirStatusUpdatedAt || "",
+    nirStatusUpdatedBy: patient.nirStatusUpdatedBy || "",
+    nirDischargePending: Boolean(patient.nirDischargePending),
+    nirDischargeNote: patient.nirDischargeNote || "",
+    nirDischargeAt: patient.nirDischargeAt || "",
+    nirDischargeBy: patient.nirDischargeBy || "",
+    nirHistory: Array.isArray(patient.nirHistory) ? patient.nirHistory : [],
     createdAt: patient.createdAt || "",
     updatedAt: patient.updatedAt || "",
     active: Boolean(patient.currentAdmission),
     currentAdmission,
     admissionCount: Array.isArray(patient.admissionHistory) ? patient.admissionHistory.length : 0,
     lastAdmission,
-    visitHistory: Array.isArray(patient.visitHistory) ? patient.visitHistory : []
+    visitHistory: Array.isArray(patient.visitHistory) ? patient.visitHistory : [],
+    socialSupportHistory: buildPatientSocialSupportHistory(patient.socialSupportHistory),
+    socialSupport: buildPatientSocialSupport(patient.socialSupport),
+    psychologySupport: buildPatientPsychologySupport(patient.psychologySupport)
   };
 }
 
@@ -1147,6 +1876,45 @@ function visitorRegistryEntryForClient(entry) {
     sectorOrReason: String(entry.sectorOrReason || "").trim(),
     createdAt: entry.createdAt || "",
     createdBy: entry.createdBy || ""
+  };
+}
+
+function psychologyManualRequestForClient(entry) {
+  return {
+    id: entry.id,
+    patientName: String(entry.patientName || "").trim(),
+    sectorOrReason: String(entry.sectorOrReason || "").trim(),
+    notes: String(entry.notes || "").trim(),
+    contacts: String(entry.contacts || "").trim(),
+    socialRecord: normalizeSocialRecordStatus(entry.socialRecord || "Pendente"),
+    observation: String(entry.observation || "").trim(),
+    interventions: String(entry.interventions || "").trim(),
+    status: String(entry.status || "SOLICITADO").trim().toUpperCase(),
+    createdAt: entry.createdAt || "",
+    createdBy: entry.createdBy || "",
+    updatedAt: entry.updatedAt || "",
+    updatedBy: entry.updatedBy || "",
+    closedAt: entry.closedAt || "",
+    closedBy: entry.closedBy || ""
+  };
+}
+
+function socialServiceManualRequestForClient(entry) {
+  return {
+    id: entry.id,
+    patientName: String(entry.patientName || "").trim(),
+    sectorOrReason: String(entry.sectorOrReason || "").trim(),
+    notes: String(entry.notes || "").trim(),
+    contacts: String(entry.contacts || "").trim(),
+    socialRecord: normalizeSocialRecordStatus(entry.socialRecord || "Pendente"),
+    observation: String(entry.observation || "").trim(),
+    status: String(entry.status || "SOLICITADO").trim().toUpperCase(),
+    createdAt: entry.createdAt || "",
+    createdBy: entry.createdBy || "",
+    updatedAt: entry.updatedAt || "",
+    updatedBy: entry.updatedBy || "",
+    closedAt: entry.closedAt || "",
+    closedBy: entry.closedBy || ""
   };
 }
 
@@ -1194,6 +1962,7 @@ function sanitizeUser(user) {
     recentShifts: (user.shifts || []).slice(0, 20).map(shift => ({
       id: shift.id,
       shiftDate: shift.shiftDate || (shift.openedAt ? String(shift.openedAt).slice(0, 10) : ""),
+      serviceType: shift.serviceType || "",
       wardId: shift.wardId,
       wardNome: shift.wardNome || "",
       ownerUsername: shift.ownerUsername || "",
@@ -1239,6 +2008,194 @@ function addUserAction(user, type, description, meta = {}) {
   return entry;
 }
 
+function buildBedRequestState(value = {}) {
+  const requestedAt = String(value.requestedAt || "").trim();
+  const viewedAt = String(value.viewedAt || "").trim();
+  const startedAt = String(value.startedAt || viewedAt || "").trim();
+  const startedBy = String(value.startedBy || value.viewedBy || "").trim();
+  const closedAt = String(value.closedAt || "").trim();
+  const closedBy = String(value.closedBy || "").trim();
+  const observation = String(value.observation || "").trim();
+  let status = String(value.status || "").trim().toUpperCase();
+  if (!["SOLICITADO", "EM_ACOMPANHAMENTO", "BAIXA"].includes(status)) {
+    if (closedAt) status = "BAIXA";
+    else if (startedAt) status = "EM_ACOMPANHAMENTO";
+    else if (Boolean(value.requested || requestedAt || viewedAt)) status = "SOLICITADO";
+    else status = "";
+  }
+  const requested = status === "SOLICITADO" || status === "EM_ACOMPANHAMENTO";
+  return {
+    requested,
+    requestedAt,
+    requestedBy: String(value.requestedBy || "").trim(),
+    viewedAt,
+    viewedBy: String(value.viewedBy || "").trim(),
+    startedAt,
+    startedBy,
+    closedAt,
+    closedBy,
+    observation,
+    status
+  };
+}
+
+function buildStartedBedRequestState(value = {}, actor = "", now = new Date().toISOString()) {
+  const current = buildBedRequestState(value);
+  if (current.status === "BAIXA") {
+    return current;
+  }
+  return buildBedRequestState({
+    ...current,
+    requested: true,
+    requestedAt: current.requestedAt || now,
+    requestedBy: current.requestedBy || actor,
+    viewedAt: current.viewedAt || now,
+    viewedBy: current.viewedBy || actor,
+    startedAt: current.startedAt || now,
+    startedBy: current.startedBy || actor,
+    closedAt: "",
+    closedBy: "",
+    status: "EM_ACOMPANHAMENTO"
+  });
+}
+
+function hasActiveServiceSocialRequest(value = {}) {
+  const request = buildBedRequestState(value);
+  if (request.closedAt || request.status === "BAIXA") return false;
+  return Boolean(request.requested || request.requestedAt || request.viewedAt || request.startedAt);
+}
+
+function buildSocialServiceSnapshotRows() {
+  const patientsByLocation = new Map(
+    patientRegistry
+      .filter(patient => !patient?.deletedAt && patient?.currentAdmission)
+      .map(patient => [`${patient.currentAdmission.wardId}:${patient.currentAdmission.bedId}`, patient])
+  );
+  const rows = [];
+
+  for (const ward of wards) {
+    for (const rawBed of ward.beds || []) {
+      const bed = normalizeBedData({ ...rawBed });
+      if (!String(bed.nome || "").trim()) continue;
+      if (!hasActiveServiceSocialRequest(bed.serviceSocialRequest)) continue;
+      const patient = patientsByLocation.get(`${ward.id}:${bed.id}`) || findPatientRegistryEntry(bed) || null;
+      const socialSupport = buildPatientSocialSupport(patient?.socialSupport);
+      rows.push({
+        socialHistoryId: createRecordId(),
+        bed: String(bed.id || "-"),
+        sector: ward.nome || "",
+        patient: patient?.nome || bed.nome || "",
+        patientBirthDate: patient?.birthDate || bed.birthDate || "",
+        age: getPatientAgeLabel(patient?.birthDate || bed.birthDate || "") || "-",
+        contacts: String(socialSupport.contacts || patient?.phone || "").trim(),
+        admission: bed.admissao || "",
+        socialRecord: socialSupport.socialRecord || "Pendente",
+        socialRecordMeta: socialSupport.socialRecord === "Concluído" && socialSupport.socialRecordUpdatedAt
+          ? `Concluído por ${socialSupport.socialRecordUpdatedBy || "-"} em ${new Date(socialSupport.socialRecordUpdatedAt).toLocaleString("pt-BR") || "-"}`
+          : "",
+        observation: socialSupport.observation || "",
+        updatedAt: socialSupport.updatedAt || "",
+        updatedBy: socialSupport.updatedBy || ""
+      });
+    }
+  }
+
+  return rows;
+}
+
+function buildSocialServiceShiftRows(shift = {}) {
+  const shiftId = Number(shift.id) || null;
+  const openedAtMs = shift.openedAt ? new Date(shift.openedAt).getTime() : 0;
+  const closedAtMs = shift.closedAt ? new Date(shift.closedAt).getTime() : Date.now();
+  const rows = [];
+
+  for (const item of Array.isArray(shift.socialServiceAttendances) ? shift.socialServiceAttendances : []) {
+    const attendance = socialServiceAttendanceEntryForClient(item);
+    rows.push({
+      bed: String(attendance.bedId || "-"),
+      sector: attendance.wardName || "-",
+      patient: attendance.patientName || "-",
+      age: getPatientAgeLabel(attendance.patientBirthDate) || "-",
+      contacts: attendance.contacts || "",
+      admission: attendance.admissionDate || "",
+      socialRecord: attendance.socialRecord || "Concluído",
+      socialRecordMeta: attendance.closedAt
+        ? `Baixa por ${attendance.closedBy || "-"} em ${new Date(attendance.closedAt).toLocaleString("pt-BR") || "-"}`
+        : "",
+      observation: attendance.observation || "",
+      updatedAt: attendance.closedAt || "",
+      updatedBy: attendance.closedBy || ""
+    });
+  }
+
+  const activeRows = Array.isArray(shift.socialServiceSnapshot) ? shift.socialServiceSnapshot : [];
+  for (const item of activeRows) {
+    rows.push({
+      bed: String(item.bed || "-"),
+      sector: String(item.sector || "-"),
+      patient: String(item.patient || "-"),
+      age: String(item.age || "-"),
+      contacts: String(item.contacts || "").trim(),
+      admission: String(item.admission || "").trim(),
+      socialRecord: normalizeSocialRecordStatus(item.socialRecord || "Pendente"),
+      socialRecordMeta: String(item.socialRecordMeta || "").trim(),
+      observation: String(item.observation || "").trim(),
+      updatedAt: String(item.updatedAt || "").trim(),
+      updatedBy: String(item.updatedBy || "").trim()
+    });
+  }
+
+  return rows
+    .filter(item => String(item.patient || "").trim())
+    .sort((a, b) =>
+      String(a.sector || "").localeCompare(String(b.sector || ""), "pt-BR")
+      || Number(a.bed || 0) - Number(b.bed || 0)
+      || String(a.patient || "").localeCompare(String(b.patient || ""), "pt-BR")
+    );
+}
+
+function getSocialServiceAttendancesForShift(shift = {}) {
+  const shiftId = Number(shift.id) || null;
+  const openedAtMs = shift.openedAt ? new Date(shift.openedAt).getTime() : 0;
+  const closedAtMs = shift.closedAt ? new Date(shift.closedAt).getTime() : Date.now();
+  const items = [];
+
+  for (const patient of patientRegistry) {
+    for (const rawEntry of buildPatientSocialSupportHistory(patient?.socialSupportHistory)) {
+      const entry = socialServiceAttendanceEntryForClient(rawEntry);
+      const closedAtMsEntry = entry.closedAt ? new Date(entry.closedAt).getTime() : 0;
+      const sameShift = shiftId && entry.shiftId && Number(entry.shiftId) === shiftId;
+      const withinPeriod = closedAtMsEntry >= openedAtMs && closedAtMsEntry <= closedAtMs;
+      if (!sameShift && !withinPeriod) continue;
+      items.push(entry);
+    }
+  }
+
+  return items.sort((a, b) =>
+    String(b.closedAt || "").localeCompare(String(a.closedAt || ""), "pt-BR")
+    || String(a.patientName || "").localeCompare(String(b.patientName || ""), "pt-BR")
+  );
+}
+
+function clearActiveSocialServiceShiftDrafts() {
+  const now = new Date().toISOString();
+  for (const patient of patientRegistry) {
+    if (!patient?.currentAdmission) continue;
+    const ward = wards.find(item => Number(item.id) === Number(patient.currentAdmission.wardId));
+    const bed = ward?.beds?.find(item => Number(item.id) === Number(patient.currentAdmission.bedId));
+    const request = buildBedRequestState(bed?.serviceSocialRequest || patient.currentAdmission.serviceSocialRequest);
+    if (!hasActiveServiceSocialRequest(request)) continue;
+    const current = buildPatientSocialSupport(patient.socialSupport);
+    patient.socialSupport = buildPatientSocialSupport({
+      ...current,
+      observation: "",
+      updatedAt: "",
+      updatedBy: ""
+    });
+    patient.updatedAt = now;
+  }
+}
+
 function addShiftSolvedPendings(user, wardId, items) {
   if (!user?.activeShift || user.activeShift.wardId !== wardId || !Array.isArray(items) || !items.length) return;
   if (!Array.isArray(user.activeShift.pendenciasFinalizadas)) {
@@ -1272,9 +2229,405 @@ function buildShiftReport(user, shift) {
       nir: bed.nir || "",
       procedimentos: Array.isArray(bed.procedimentos) ? bed.procedimentos : []
     }));
+  const openedAtMs = shift.openedAt ? new Date(shift.openedAt).getTime() : 0;
+  const closedAtMs = shift.closedAt ? new Date(shift.closedAt).getTime() : Date.now();
+  const overlapsShiftWindow = (startAt, endAt = "") => {
+    const startMs = startAt ? new Date(startAt).getTime() : 0;
+    const endMs = endAt ? new Date(endAt).getTime() : Date.now();
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return false;
+    return startMs <= closedAtMs && endMs >= openedAtMs;
+  };
+  const isWithinShiftWindow = value => {
+    const timeMs = value ? new Date(value).getTime() : Number.NaN;
+    return Number.isFinite(timeMs) && timeMs >= openedAtMs && timeMs <= closedAtMs;
+  };
+  const buildAdmissionSegments = admission => {
+    if (!admission) return [];
+    const transfers = Array.isArray(admission.transferHistory)
+      ? admission.transferHistory.slice().sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
+      : [];
+    const segments = [];
+    let currentSegment = {
+      wardId: admission.wardId,
+      wardNome: admission.wardNome || "",
+      bedId: admission.bedId,
+      enfermaria: admission.enfermaria || "",
+      startedAt: admission.admittedAt || "",
+      endedAt: admission.dischargedAt || ""
+    };
 
-  const altas = (shift.actions || []).filter(action => action.type === "ALTA").length;
-  const obitos = (shift.actions || []).filter(action => action.type === "OBITO").length;
+    for (const transfer of transfers) {
+      const transferAt = String(transfer.at || "").trim();
+      segments.push({
+        ...currentSegment,
+        endedAt: transferAt || currentSegment.endedAt || ""
+      });
+      currentSegment = {
+        wardId: transfer.toWardId,
+        wardNome: transfer.toWardNome || "",
+        bedId: transfer.toBedId,
+        enfermaria: transfer.toEnfermaria || "",
+        startedAt: transferAt || currentSegment.startedAt || "",
+        endedAt: admission.dischargedAt || ""
+      };
+    }
+
+    segments.push(currentSegment);
+    return segments;
+  };
+  const getRequestStatusLabel = value => {
+    const request = buildBedRequestState(value);
+    if (request.status === "EM_ACOMPANHAMENTO") return "Em acompanhamento";
+    if (request.status === "SOLICITADO" && request.viewedAt) return "Visualizada";
+    if (request.status === "SOLICITADO") return "Solicitado";
+    if (request.status === "BAIXA") return "Baixa";
+    return "Inativo";
+  };
+  const resolveReportValue = (primary, secondary) => {
+    if (Array.isArray(primary)) return primary.length ? primary : (Array.isArray(secondary) ? secondary : []);
+    if (primary === false) return false;
+    return primary !== undefined && primary !== null && primary !== "" ? primary : secondary;
+  };
+  const getShiftPatientKey = (patient = {}, fallback = {}) => {
+    const patientId = Number(patient?.id || fallback?.id);
+    if (patientId) return `patient:${patientId}`;
+    const cpf = normalizeCpf(patient?.cpf || fallback?.cpf);
+    if (cpf) return `cpf:${cpf}`;
+    const nome = normalizePersonName(patient?.nome || fallback?.nome || fallback?.patientName);
+    if (!nome) return "";
+    return `name:${nome}|birth:${String(patient?.birthDate || fallback?.birthDate || "").trim()}|bed:${String(fallback?.bedId || "").trim()}`;
+  };
+  const mergeShiftPatientRecord = (current = {}, incoming = {}) => ({
+    id: resolveReportValue(current.id, incoming.id) || null,
+    leito: resolveReportValue(current.leito, incoming.leito) || "",
+    enfermaria: resolveReportValue(current.enfermaria, incoming.enfermaria) || "",
+    nome: resolveReportValue(current.nome, incoming.nome) || "",
+    cpf: resolveReportValue(current.cpf, incoming.cpf) || "",
+    birthDate: resolveReportValue(current.birthDate, incoming.birthDate) || "",
+    idade: resolveReportValue(current.idade, incoming.idade) || "",
+    telefone: resolveReportValue(current.telefone, incoming.telefone) || "",
+    admissao: resolveReportValue(current.admissao, incoming.admissao) || "",
+    alta: resolveReportValue(current.alta, incoming.alta) || "",
+    diagnostico: resolveReportValue(current.diagnostico, incoming.diagnostico) || "",
+    nir: resolveReportValue(current.nir, incoming.nir) || "",
+    cil: resolveReportValue(current.cil, incoming.cil) || "",
+    nirStatus: resolveReportValue(current.nirStatus, incoming.nirStatus) || "Inativo",
+    socialStatus: resolveReportValue(current.socialStatus, incoming.socialStatus) || "Inativo",
+    psychologyStatus: resolveReportValue(current.psychologyStatus, incoming.psychologyStatus) || "Inativo",
+    pendencias: resolveReportValue(current.pendencias, incoming.pendencias) || "",
+    procedimentos: Array.from(new Set([
+      ...(Array.isArray(current.procedimentos) ? current.procedimentos : []),
+      ...(Array.isArray(incoming.procedimentos) ? incoming.procedimentos : [])
+    ].filter(Boolean))),
+    ativoNoFechamento: Boolean(current.ativoNoFechamento || incoming.ativoNoFechamento)
+  });
+  const getPatientNirStatus = patient => patient?.regulationAcceptedAt
+    ? "Aceito"
+    : (patient?.nirLastUpdateAt || patient?.nir || patient?.cil || (Array.isArray(patient?.regulationChannels) && patient.regulationChannels.length)
+      ? "Ativo"
+      : "Inativo");
+  const resolveActionLocation = meta => {
+    const shiftWardId = Number(shift.wardId);
+    const shiftWardName = normalizePersonName(shift.wardNome);
+    if (Number(meta?.wardId) === shiftWardId || normalizePersonName(meta?.wardNome) === shiftWardName) {
+      return {
+        bedId: meta?.bedId || "",
+        enfermaria: meta?.enfermaria || meta?.wardNome || ""
+      };
+    }
+    if (Number(meta?.toWardId) === shiftWardId || normalizePersonName(meta?.toWardNome) === shiftWardName) {
+      return {
+        bedId: meta?.toBedId || "",
+        enfermaria: meta?.toEnfermaria || meta?.toWardNome || ""
+      };
+    }
+    if (Number(meta?.fromWardId) === shiftWardId || normalizePersonName(meta?.fromWardNome) === shiftWardName) {
+      return {
+        bedId: meta?.fromBedId || "",
+        enfermaria: meta?.fromEnfermaria || meta?.fromWardNome || ""
+      };
+    }
+    return {
+      bedId: meta?.bedId || meta?.toBedId || meta?.fromBedId || "",
+      enfermaria: meta?.enfermaria || meta?.toEnfermaria || meta?.fromEnfermaria || meta?.wardNome || meta?.toWardNome || meta?.fromWardNome || ""
+    };
+  };
+  const actionBelongsToShiftWard = action => {
+    const meta = action?.meta || {};
+    const shiftWardId = Number(shift.wardId);
+    const shiftWardName = normalizePersonName(shift.wardNome);
+    if ([meta.wardId, meta.toWardId, meta.fromWardId].some(value => Number(value) === shiftWardId)) {
+      return true;
+    }
+    return [
+      meta.wardNome,
+      meta.toWardNome,
+      meta.fromWardNome
+    ].some(value => normalizePersonName(value) === shiftWardName);
+  };
+  const findPatientFromAction = meta => {
+    const patientId = Number(meta?.patientId);
+    if (patientId) {
+      return patientRegistry.find(patient => !patient?.deletedAt && Number(patient.id) === patientId) || null;
+    }
+    const patientName = normalizePersonName(meta?.patientName || meta?.patient || meta?.visitedPersonName);
+    if (!patientName) return null;
+    return patientRegistry.find(patient => !patient?.deletedAt && normalizePersonName(patient.nome) === patientName) || null;
+  };
+  const getMergedPatientAdmissions = patient => {
+    const admissions = Array.isArray(patient?.admissionHistory) ? patient.admissionHistory.slice() : [];
+    if (patient?.currentAdmission) {
+      const currentAdmissionId = String(patient.currentAdmission?.id || "").trim();
+      const currentAdmissionIndex = currentAdmissionId
+        ? admissions.findIndex(admission => String(admission?.id || "").trim() === currentAdmissionId)
+        : -1;
+      if (currentAdmissionIndex >= 0) {
+        admissions[currentAdmissionIndex] = {
+          ...admissions[currentAdmissionIndex],
+          ...patient.currentAdmission
+        };
+      } else {
+        const hasCurrentAdmission = admissions.some(admission =>
+          Number(admission?.wardId) === Number(patient.currentAdmission?.wardId)
+          && Number(admission?.bedId) === Number(patient.currentAdmission?.bedId)
+          && String(admission?.admittedAt || "").trim() === String(patient.currentAdmission?.admittedAt || "").trim()
+        );
+        if (!hasCurrentAdmission) admissions.push(patient.currentAdmission);
+      }
+    }
+    return admissions;
+  };
+  const buildMovementEntry = ({
+    kind = "",
+    patient = null,
+    patientName = "",
+    bedId = "",
+    enfermaria = "",
+    at = "",
+    detail = "",
+    source = "",
+    destination = ""
+  } = {}) => ({
+    kind,
+    patientId: patient?.id || null,
+    patientName: patient?.nome || patientName || "",
+    bedId: bedId || patient?.currentAdmission?.bedId || "",
+    enfermaria: enfermaria || patient?.currentAdmission?.enfermaria || "",
+    at,
+    detail,
+    source,
+    destination
+  });
+  const shiftPatientsMap = new Map();
+
+  for (const patient of patientRegistry) {
+    if (patient?.deletedAt) continue;
+    const admissions = getMergedPatientAdmissions(patient);
+    for (const admission of admissions) {
+      const segments = buildAdmissionSegments(admission).filter(segment =>
+        Number(segment.wardId) === Number(shift.wardId) && overlapsShiftWindow(segment.startedAt, segment.endedAt)
+      );
+      if (!segments.length) continue;
+
+      const latestSegment = segments[segments.length - 1];
+      const currentBed = beds.find(bed =>
+        Number(bed.id) === Number(latestSegment.bedId) && String(bed.enfermaria || "") === String(latestSegment.enfermaria || "")
+      ) || null;
+      const socialSupport = buildPatientSocialSupport(patient.socialSupport);
+      const socialFormDone = hasPatientSocialFormData(socialSupport.socialForm);
+      const activeAdmission = patient.currentAdmission && Number(patient.currentAdmission.wardId) === Number(shift.wardId)
+        ? patient.currentAdmission
+        : null;
+      const entry = {
+        id: patient.id || null,
+        leito: latestSegment.bedId || "",
+        enfermaria: latestSegment.enfermaria || latestSegment.wardNome || "",
+        nome: patient.nome || "",
+        cpf: patient.cpf || "",
+        birthDate: patient.birthDate || "",
+        idade: getPatientAgeLabel(patient.birthDate || "") || "",
+        telefone: patient.phone || "",
+        admissao: admission.admittedAt || latestSegment.startedAt || "",
+        alta: admission.dischargedAt || "",
+        diagnostico: patient.diagnostico || "",
+        nir: patient.nir || "",
+        cil: patient.cil || "",
+        nirStatus: getPatientNirStatus(patient),
+        socialStatus: socialFormDone
+          ? "Concluído"
+          : getRequestStatusLabel(activeAdmission?.serviceSocialRequest || currentBed?.serviceSocialRequest),
+        psychologyStatus: getRequestStatusLabel(activeAdmission?.psychologyRequest || currentBed?.psychologyRequest),
+        pendencias: currentBed?.pendencias || "",
+        procedimentos: Array.isArray(currentBed?.procedimentos) ? currentBed.procedimentos : [],
+        ativoNoFechamento: Boolean(activeAdmission)
+      };
+      const patientKey = getShiftPatientKey(patient, { bedId: latestSegment.bedId });
+      if (!patientKey) continue;
+      shiftPatientsMap.set(patientKey, mergeShiftPatientRecord(shiftPatientsMap.get(patientKey), entry));
+    }
+  }
+
+  for (const action of shift.actions || []) {
+    if (!actionBelongsToShiftWard(action)) continue;
+    const meta = action.meta || {};
+    const patientName = String(meta.patientName || meta.patient || meta.visitedPersonName || "").trim();
+    const matchedPatient = findPatientFromAction(meta);
+    if (!matchedPatient && !patientName) continue;
+
+    const location = resolveActionLocation(meta);
+    const currentBed = beds.find(bed =>
+      Number(bed.id) === Number(location.bedId)
+      && (!String(location.enfermaria || "").trim() || String(bed.enfermaria || "") === String(location.enfermaria || ""))
+    ) || null;
+    const activeAdmission = matchedPatient?.currentAdmission && Number(matchedPatient.currentAdmission.wardId) === Number(shift.wardId)
+      ? matchedPatient.currentAdmission
+      : null;
+    const socialSupport = buildPatientSocialSupport(matchedPatient?.socialSupport);
+    const socialFormDone = hasPatientSocialFormData(socialSupport.socialForm);
+    const fallbackBirthDate = String(meta.patientBirthDate || meta.birthDate || "").trim();
+    const entry = {
+      id: matchedPatient?.id || Number(meta.patientId) || null,
+      leito: location.bedId || activeAdmission?.bedId || "",
+      enfermaria: location.enfermaria || activeAdmission?.enfermaria || currentBed?.enfermaria || "",
+      nome: matchedPatient?.nome || patientName,
+      cpf: matchedPatient?.cpf || normalizeCpf(meta.patientCpf || meta.cpf),
+      birthDate: matchedPatient?.birthDate || fallbackBirthDate,
+      idade: getPatientAgeLabel(matchedPatient?.birthDate || fallbackBirthDate) || "",
+      telefone: matchedPatient?.phone || normalizePhone(meta.patientPhone || meta.phone),
+      admissao: activeAdmission?.admittedAt || String(meta.admittedAt || meta.admissionDate || "").trim(),
+      alta: activeAdmission?.dischargedAt || String(meta.dischargedAt || "").trim(),
+      diagnostico: matchedPatient?.diagnostico || String(meta.diagnostico || "").trim(),
+      nir: matchedPatient?.nir || String(meta.nir || "").trim(),
+      cil: matchedPatient?.cil || String(meta.cil || "").trim(),
+      nirStatus: matchedPatient ? getPatientNirStatus(matchedPatient) : "Inativo",
+      socialStatus: socialFormDone
+        ? "Concluído"
+        : getRequestStatusLabel(activeAdmission?.serviceSocialRequest || currentBed?.serviceSocialRequest || meta.serviceSocialRequest),
+      psychologyStatus: getRequestStatusLabel(activeAdmission?.psychologyRequest || currentBed?.psychologyRequest || meta.psychologyRequest),
+      pendencias: currentBed?.pendencias || "",
+      procedimentos: Array.from(new Set([
+        ...(Array.isArray(currentBed?.procedimentos) ? currentBed.procedimentos : []),
+        ...(Array.isArray(meta.procedimentos) ? meta.procedimentos : [])
+      ].filter(Boolean))),
+      ativoNoFechamento: Boolean(activeAdmission)
+    };
+    const patientKey = getShiftPatientKey(matchedPatient, {
+      id: entry.id,
+      cpf: entry.cpf,
+      nome: entry.nome,
+      birthDate: entry.birthDate,
+      bedId: entry.leito
+    });
+    if (!patientKey) continue;
+    shiftPatientsMap.set(patientKey, mergeShiftPatientRecord(shiftPatientsMap.get(patientKey), entry));
+  }
+  const shiftPatients = Array.from(shiftPatientsMap.values())
+    .sort((a, b) =>
+      String(a.enfermaria || "").localeCompare(String(b.enfermaria || ""), "pt-BR")
+      || Number(a.leito || 0) - Number(b.leito || 0)
+      || String(a.nome || "").localeCompare(String(b.nome || ""), "pt-BR")
+    );
+  const movementSummary = {
+    admissions: [],
+    internalTransfers: [],
+    externalTransfers: [],
+    altas: [],
+    obitos: [],
+    evasoes: []
+  };
+
+  for (const patient of patientRegistry) {
+    if (patient?.deletedAt) continue;
+    const admissions = getMergedPatientAdmissions(patient);
+    for (const admission of admissions) {
+      if (Number(admission?.wardId) === Number(shift.wardId) && isWithinShiftWindow(admission?.admittedAt)) {
+        movementSummary.admissions.push(buildMovementEntry({
+          kind: "ADMISSAO",
+          patient,
+          bedId: admission?.bedId || "",
+          enfermaria: admission?.enfermaria || "",
+          at: admission?.admittedAt || "",
+          detail: admission?.closeReason || patient?.diagnostico || ""
+        }));
+      }
+
+      for (const transfer of Array.isArray(admission?.transferHistory) ? admission.transferHistory : []) {
+        if (!isWithinShiftWindow(transfer?.at)) continue;
+        if (Number(transfer?.fromWardId) !== Number(shift.wardId) && Number(transfer?.toWardId) !== Number(shift.wardId)) continue;
+        const isLeavingShiftWard = Number(transfer?.fromWardId) === Number(shift.wardId);
+        movementSummary.internalTransfers.push(buildMovementEntry({
+          kind: "TRANSFERENCIA_INTERNA",
+          patient,
+          bedId: isLeavingShiftWard ? transfer?.fromBedId : transfer?.toBedId,
+          enfermaria: isLeavingShiftWard ? transfer?.fromEnfermaria : transfer?.toEnfermaria,
+          at: transfer?.at || "",
+          source: `${transfer?.fromWardNome || "-"} / Leito ${transfer?.fromBedId || "-"}`,
+          destination: `${transfer?.toWardNome || "-"} / Leito ${transfer?.toBedId || "-"}`,
+          detail: isLeavingShiftWard
+            ? `Saiu para ${transfer?.toWardNome || "-"}`
+            : `Recebido de ${transfer?.fromWardNome || "-"}`
+        }));
+      }
+    }
+  }
+
+  for (const action of shift.actions || []) {
+    const patient = findPatientFromAction(action.meta || {});
+    const patientName = String(action.meta?.patientName || action.meta?.patient || "").trim();
+    const bedId = action.meta?.bedId || action.meta?.fromBedId || action.meta?.toBedId || "";
+    const enfermaria = action.meta?.enfermaria || action.meta?.fromEnfermaria || action.meta?.toEnfermaria || "";
+    if (action.type === "ALTA") {
+      movementSummary.altas.push(buildMovementEntry({
+        kind: "ALTA",
+        patient,
+        patientName,
+        bedId,
+        enfermaria,
+        at: action.at,
+        detail: String(action.meta?.note || "").trim()
+      }));
+    } else if (action.type === "OBITO") {
+      movementSummary.obitos.push(buildMovementEntry({
+        kind: "OBITO",
+        patient,
+        patientName,
+        bedId,
+        enfermaria,
+        at: action.at,
+        detail: String(action.meta?.note || "").trim()
+      }));
+    } else if (action.type === "TRANSFERENCIA_EXTERNA") {
+      movementSummary.externalTransfers.push(buildMovementEntry({
+        kind: "TRANSFERENCIA_EXTERNA",
+        patient,
+        patientName,
+        bedId,
+        enfermaria,
+        at: action.at,
+        detail: String(action.meta?.note || "").trim()
+      }));
+    } else if (action.type === "EVASAO") {
+      movementSummary.evasoes.push(buildMovementEntry({
+        kind: "EVASAO",
+        patient,
+        patientName,
+        bedId,
+        enfermaria,
+        at: action.at,
+        detail: String(action.meta?.note || "").trim()
+      }));
+    }
+  }
+
+  for (const key of Object.keys(movementSummary)) {
+    movementSummary[key].sort((a, b) =>
+      new Date(a.at || 0).getTime() - new Date(b.at || 0).getTime()
+      || String(a.patientName || "").localeCompare(String(b.patientName || ""), "pt-BR")
+    );
+  }
+
+  const altas = movementSummary.altas.length;
+  const obitos = movementSummary.obitos.length;
   const dispositivos = {};
 
   for (const patient of occupiedBeds) {
@@ -1293,8 +2646,6 @@ function buildShiftReport(user, shift) {
   const activePendingMap = new Map();
   const solvedPendencias = [];
   const solvedKeys = new Set();
-  const openedAtMs = shift.openedAt ? new Date(shift.openedAt).getTime() : 0;
-  const closedAtMs = shift.closedAt ? new Date(shift.closedAt).getTime() : Date.now();
   const pendingKey = item => `${item.leito}:${item.id || item.texto || ""}`;
   const addActivePending = item => {
     activePendingMap.set(pendingKey(item), { ...item });
@@ -1389,30 +2740,44 @@ function buildShiftReport(user, shift) {
       id: shift.id,
       openedAt: shift.openedAt,
       closedAt: shift.closedAt,
+      shiftDate: shift.shiftDate || "",
       wardId: shift.wardId,
       wardNome: shift.wardNome,
+      serviceType: shift.serviceType || "",
       shiftLength: shift.shiftLength || "12H",
       shiftPeriod: shift.shiftPeriod || "DIA",
       team: shift.team || null,
       username: shift.ownerUsername || user.username,
       nome: shift.ownerName || user.nome,
+      nursingReport: String(shift.nursingReport || "").trim(),
+      nursingReportUpdatedAt: String(shift.nursingReportUpdatedAt || "").trim(),
+      nursingReportUpdatedBy: String(shift.nursingReportUpdatedBy || "").trim(),
       teamUpdatedAt: shift.teamUpdatedAt || "",
       teamUpdatedBy: shift.teamUpdatedBy || ""
     },
     summary: {
+      pacientesNoPeriodo: shiftPatients.length,
       pacientesAtivos: occupiedBeds.length,
       altas,
       obitos,
+      admissoes: movementSummary.admissions.length,
+      transferenciasInternas: movementSummary.internalTransfers.length,
+      transferenciasExternas: movementSummary.externalTransfers.length,
+      evasoes: movementSummary.evasoes.length,
       dispositivos: topEntries(dispositivos, 20),
       pendenciasAtivas: activePendencias.length,
       pendenciasSolucionadas: solvedPendencias.length,
       totalAlteracoes: (shift.actions || []).length
     },
-    patients: occupiedBeds,
+    patients: shiftPatients,
+    movements: movementSummary,
     pending: {
       active: activePendencias,
       solved: solvedPendencias
     },
+    socialServiceRows: String(shift.serviceType || "").trim().toUpperCase() === "SERVICO_SOCIAL"
+      ? buildSocialServiceShiftRows(shift)
+      : [],
     actions: (shift.actions || []).slice().reverse().map(action => ({
       id: action.id,
       at: action.at,
@@ -1428,6 +2793,17 @@ function buildShiftReport(user, shift) {
 function normalizeBedData(bed) {
   bed.cpf = String(bed.cpf || "").replace(/\D/g, "");
   bed.birthDate = bed.birthDate || "";
+  bed.nirRequest = buildBedRequestState(bed.nirRequest);
+  bed.serviceSocialRequest = buildBedRequestState(bed.serviceSocialRequest);
+  bed.psychologyRequest = buildBedRequestState(bed.psychologyRequest);
+  const hasPatientOccupyingBed = String(bed.status || "").toUpperCase() === "OCUPADO" && Boolean(String(bed.nome || "").trim());
+  if (!hasPatientOccupyingBed) {
+    bed.nir = "";
+    bed.cil = "";
+    bed.nirRequest = buildBedRequestState();
+    bed.serviceSocialRequest = buildBedRequestState();
+    bed.psychologyRequest = buildBedRequestState();
+  }
   if (!Array.isArray(bed.pendenciasHistorico)) {
     const text = String(bed.pendencias || "").trim();
     bed.pendenciasHistorico = text ? [{
@@ -1472,6 +2848,9 @@ function clearBedPatientData(bed, nextStatus = "LIVRE") {
   bed.procedimentos = [];
   bed.pendenciasHistorico = [];
   bed.procedimentosHistorico = [];
+  bed.nirRequest = buildBedRequestState();
+  bed.serviceSocialRequest = buildBedRequestState();
+  bed.psychologyRequest = buildBedRequestState();
   return bed;
 }
 
@@ -1489,7 +2868,10 @@ function clonePatientPayload(bed) {
     cil: bed.cil || "",
     procedimentos: Array.isArray(bed.procedimentos) ? [...bed.procedimentos] : [],
     pendenciasHistorico: Array.isArray(bed.pendenciasHistorico) ? JSON.parse(JSON.stringify(bed.pendenciasHistorico)) : [],
-    procedimentosHistorico: Array.isArray(bed.procedimentosHistorico) ? JSON.parse(JSON.stringify(bed.procedimentosHistorico)) : []
+    procedimentosHistorico: Array.isArray(bed.procedimentosHistorico) ? JSON.parse(JSON.stringify(bed.procedimentosHistorico)) : [],
+    nirRequest: buildBedRequestState(bed.nirRequest),
+    serviceSocialRequest: buildBedRequestState(bed.serviceSocialRequest),
+    psychologyRequest: buildBedRequestState(bed.psychologyRequest)
   };
 }
 
@@ -1566,6 +2948,7 @@ app.post("/api/login", (req, res) => {
   const { username, password } = req.body || {};
   const user = users.find(u => u.username === username && u.password === password);
   if (!user) return res.status(401).json({ error: "Usuário ou senha inválidos" });
+  clearSessionsForUsername(user.username);
   const sid = createSession(user.username);
   res.setHeader("Set-Cookie", `sid=${encodeURIComponent(sid)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`);
   res.json({ ok: true, username: user.username, sid, user: sanitizeUser(user) });
@@ -1750,6 +3133,288 @@ app.get("/api/portaria/visitors", requireAuth, (req, res) => {
   res.json({ visitors: items.map(visitorRegistryEntryForClient) });
 });
 
+app.get("/api/psychology/requests/manual", requireAuth, (req, res) => {
+  const items = psychologyManualRequests
+    .slice()
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+
+  res.json({ requests: items.map(psychologyManualRequestForClient) });
+});
+
+app.patch("/api/psychology/requests/manual/:requestId", requireAuth, async (req, res) => {
+  const requestId = String(req.params?.requestId || "").trim();
+  const entry = psychologyManualRequests.find(item => String(item.id || "").trim() === requestId);
+  if (!entry) {
+    return res.status(404).json({ error: "Solicitacao avulsa da Psicologia nao encontrada." });
+  }
+
+  const now = new Date().toISOString();
+  const actor = req.user.nome || req.user.username || "";
+  const nextStatus = String(req.body?.status || entry.status || "EM_ACOMPANHAMENTO").trim().toUpperCase();
+  const finalStatus = nextStatus === "BAIXA" ? "BAIXA" : "EM_ACOMPANHAMENTO";
+
+  entry.interventions = String(req.body?.interventions || "").trim();
+  entry.observation = String(req.body?.observation || "").trim();
+  entry.notes = req.body?.notes === undefined ? String(entry.notes || "").trim() : String(req.body?.notes || "").trim();
+  entry.status = finalStatus;
+  entry.updatedAt = now;
+  entry.updatedBy = actor;
+  entry.closedAt = finalStatus === "BAIXA" ? now : "";
+  entry.closedBy = finalStatus === "BAIXA" ? actor : "";
+
+  psychologyAttendanceEntries.unshift(psychologyAttendanceEntryForClient({
+    id: createRecordId(),
+    patientId: null,
+    patientName: entry.patientName || "",
+    wardId: null,
+    wardName: entry.sectorOrReason || "",
+    bedId: null,
+    status: finalStatus,
+    interventions: entry.interventions,
+    observation: entry.observation || entry.notes || "",
+    createdAt: now,
+    createdBy: actor
+  }));
+  psychologyAttendanceEntries.splice(3000);
+
+  addUserAction(req.user, "PSYCHOLOGY_MANUAL_REQUEST_UPDATE", `Atualizou solicitacao avulsa da Psicologia para ${entry.patientName}`, {
+    requestId: entry.id,
+    patientName: entry.patientName,
+    status: entry.status
+  });
+
+  await persistState();
+  res.json({ ok: true, request: psychologyManualRequestForClient(entry) });
+});
+
+app.get("/api/psychology/attendances", requireAuth, (req, res) => {
+  const month = String(req.query?.month || "").trim();
+  const showAll = month.toLowerCase() === "all";
+  if (month && !showAll && !/^\d{4}-\d{2}$/.test(month)) {
+    return res.status(400).json({ error: "Mês inválido" });
+  }
+
+  const selectedMonth = showAll ? "all" : (month || new Date().toISOString().slice(0, 7));
+  const itemsMap = new Map();
+
+  for (const entry of psychologyAttendanceEntries) {
+    const normalized = psychologyAttendanceEntryForClient(entry);
+    if (!showAll && String(normalized.createdAt || "").slice(0, 7) !== selectedMonth) continue;
+    itemsMap.set(getPsychologyAttendanceKey(normalized), normalized);
+  }
+
+  for (const patient of patientRegistry) {
+    if (patient?.deletedAt) continue;
+    const fallbackEntry = buildPsychologyAttendanceFromPatient(patient);
+    if (!fallbackEntry) continue;
+    if (!showAll && String(fallbackEntry.createdAt || "").slice(0, 7) !== selectedMonth) continue;
+    itemsMap.set(getPsychologyAttendanceKey(fallbackEntry), fallbackEntry);
+  }
+
+  const items = Array.from(itemsMap.values())
+    .sort((a, b) =>
+      String(b.createdAt || "").localeCompare(String(a.createdAt || ""), "pt-BR")
+      || String(a.createdBy || "").localeCompare(String(b.createdBy || ""), "pt-BR")
+      || String(a.patientName || "").localeCompare(String(b.patientName || ""), "pt-BR")
+    );
+
+  res.json({
+    month: selectedMonth,
+    attendances: items
+  });
+});
+
+app.get("/api/social-service/attendances", requireAuth, (req, res) => {
+  const month = String(req.query?.month || "").trim();
+  const showAll = month.toLowerCase() === "all";
+  if (month && !showAll && !/^\d{4}-\d{2}$/.test(month)) {
+    return res.status(400).json({ error: "Mês inválido" });
+  }
+
+  const selectedMonth = showAll ? "all" : (month || new Date().toISOString().slice(0, 7));
+  const itemsMap = new Map();
+
+  const includeItem = rawEntry => {
+    const entry = socialServiceAttendanceEntryForClient(rawEntry);
+    const entryMonth = String(entry.closedAt || entry.shiftDate || "").slice(0, 7);
+    if (!showAll && entryMonth !== selectedMonth) return;
+    const key = [
+      entry.entryType || "",
+      entry.shiftId || "",
+      entry.patientId || "",
+      entry.patientName || "",
+      entry.bedId || "",
+      entry.closedAt || "",
+      entry.observation || ""
+    ].join("|");
+    itemsMap.set(key, entry);
+  };
+
+  for (const patient of patientRegistry) {
+    if (patient?.deletedAt) continue;
+    for (const rawEntry of buildPatientSocialSupportHistory(patient.socialSupportHistory)) {
+      includeItem(rawEntry);
+    }
+  }
+
+  for (const user of users) {
+    for (const shift of Array.isArray(user?.shifts) ? user.shifts : []) {
+      for (const entry of buildSocialServiceShiftHistoryEntries(shift, user)) {
+        includeItem(entry);
+      }
+    }
+  }
+
+  for (const entry of socialServiceManualAttendanceEntries) {
+    includeItem(entry);
+  }
+
+  const items = Array.from(itemsMap.values()).sort((a, b) =>
+    String(b.closedAt || "").localeCompare(String(a.closedAt || ""), "pt-BR")
+    || String(a.closedBy || "").localeCompare(String(b.closedBy || ""), "pt-BR")
+    || String(a.patientName || "").localeCompare(String(b.patientName || ""), "pt-BR")
+  );
+
+  res.json({
+    month: selectedMonth,
+    attendances: items
+  });
+});
+
+app.get("/api/social-service/requests/manual", requireAuth, (req, res) => {
+  const items = socialServiceManualRequests
+    .slice()
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+
+  res.json({ requests: items.map(socialServiceManualRequestForClient) });
+});
+
+app.post("/api/social-service/requests/manual", requireAuth, async (req, res) => {
+  const patientName = String(req.body?.patientName || "").trim();
+  const sectorOrReason = String(req.body?.sectorOrReason || "").trim();
+  const notes = String(req.body?.notes || "").trim();
+
+  if (!patientName) return res.status(400).json({ error: "Informe o nome da pessoa ou paciente" });
+  if (!sectorOrReason) return res.status(400).json({ error: "Informe o setor ou motivo" });
+
+  const now = new Date().toISOString();
+  const entry = {
+    id: createRecordId(),
+    patientName,
+    sectorOrReason,
+    notes,
+    contacts: "",
+    socialRecord: "Pendente",
+    observation: "",
+    status: "SOLICITADO",
+    createdAt: now,
+    createdBy: req.user.nome || req.user.username || "",
+    updatedAt: "",
+    updatedBy: "",
+    closedAt: "",
+    closedBy: ""
+  };
+
+  socialServiceManualRequests.unshift(entry);
+
+  addUserAction(req.user, "SOCIAL_SERVICE_MANUAL_REQUEST_CREATE", `Registrou solicitacao avulsa para ${patientName}`, {
+    patientName,
+    sectorOrReason,
+    notes
+  });
+
+  await persistState();
+  res.json({ ok: true, request: socialServiceManualRequestForClient(entry) });
+});
+
+app.patch("/api/social-service/requests/manual/:requestId", requireAuth, async (req, res) => {
+  const requestId = String(req.params?.requestId || "").trim();
+  const entry = socialServiceManualRequests.find(item => String(item.id || "").trim() === requestId);
+  if (!entry) {
+    return res.status(404).json({ error: "Solicitacao avulsa do Serviço Social nao encontrada." });
+  }
+
+  const now = new Date().toISOString();
+  const actor = req.user.nome || req.user.username || "";
+  const nextStatus = String(req.body?.status || entry.status || "EM_ACOMPANHAMENTO").trim().toUpperCase();
+  const finalStatus = nextStatus === "BAIXA" ? "BAIXA" : "EM_ACOMPANHAMENTO";
+
+  entry.contacts = String(req.body?.contacts || "").trim();
+  entry.socialRecord = normalizeSocialRecordStatus(req.body?.socialRecord || entry.socialRecord || "Pendente");
+  entry.observation = String(req.body?.observation || "").trim();
+  entry.notes = req.body?.notes === undefined ? String(entry.notes || "").trim() : String(req.body?.notes || "").trim();
+  entry.status = finalStatus;
+  entry.updatedAt = now;
+  entry.updatedBy = actor;
+  entry.closedAt = finalStatus === "BAIXA" ? now : "";
+  entry.closedBy = finalStatus === "BAIXA" ? actor : "";
+
+  socialServiceManualAttendanceEntries.unshift(socialServiceAttendanceEntryForClient({
+    id: createRecordId(),
+    patientId: null,
+    patientName: entry.patientName || "",
+    patientBirthDate: "",
+    patientAgeLabel: "",
+    wardId: null,
+    wardName: entry.sectorOrReason || "",
+    bedId: null,
+    contacts: entry.contacts || "",
+    admissionDate: entry.createdAt || "",
+    socialRecord: entry.socialRecord || "Pendente",
+    observation: entry.observation || entry.notes || "",
+    closedAt: now,
+    closedBy: actor,
+    shiftId: null,
+    shiftDate: getOperationalDayKey(now),
+    shiftLength: "",
+    shiftPeriod: "",
+    entryType: finalStatus === "BAIXA" ? "baixa" : "observacao_plantao",
+    entryLabel: finalStatus === "BAIXA" ? "Baixa do atendimento" : "Observação do plantão"
+  }));
+  socialServiceManualAttendanceEntries.splice(3000);
+
+  addUserAction(req.user, "SOCIAL_SERVICE_MANUAL_REQUEST_UPDATE", `Atualizou solicitacao avulsa do Serviço Social para ${entry.patientName}`, {
+    requestId: entry.id,
+    patientName: entry.patientName,
+    status: entry.status
+  });
+
+  await persistState();
+  res.json({ ok: true, request: socialServiceManualRequestForClient(entry) });
+});
+
+app.delete("/api/social-service/attendances/:entryId", requireAuth, async (req, res) => {
+  const entryId = String(req.params?.entryId || "").trim();
+  const coordinatorPassword = String(req.body?.coordinatorPassword || "").trim();
+  if (!entryId) {
+    return res.status(400).json({ error: "Registro inválido" });
+  }
+  if (!coordinatorPassword) {
+    return res.status(400).json({ error: "Digite a senha do coordenador Fernando Augusto para apagar." });
+  }
+
+  const coordinator = findSocialServiceCoordinatorUser();
+  if (!coordinator) {
+    return res.status(404).json({ error: "Coordenador Fernando Augusto não encontrado." });
+  }
+  if (String(coordinator.password || "") !== coordinatorPassword) {
+    return res.status(403).json({ error: "Senha do coordenador inválida." });
+  }
+
+  const removed = deleteSocialServiceAttendanceEntryById(entryId);
+  if (!removed) {
+    return res.status(404).json({ error: "Registro do Serviço Social não encontrado." });
+  }
+
+  addUserAction(req.user, "SOCIAL_SERVICE_ATTENDANCE_DELETE", "Apagou um registro do histórico do Serviço Social", {
+    entryId,
+    authorizedBy: coordinator.nome || coordinator.username || "Fernando Augusto"
+  });
+
+  await persistState();
+  res.json({ ok: true });
+});
+
 app.get("/api/hospital-trips", requireAuth, (req, res) => {
   const items = hospitalTripEntries
     .slice()
@@ -1819,6 +3484,45 @@ app.post("/api/portaria/visitors", requireAuth, async (req, res) => {
   res.json({ ok: true, visitor: visitorRegistryEntryForClient(entry) });
 });
 
+app.post("/api/psychology/requests/manual", requireAuth, async (req, res) => {
+  const patientName = String(req.body?.patientName || "").trim();
+  const sectorOrReason = String(req.body?.sectorOrReason || "").trim();
+  const notes = String(req.body?.notes || "").trim();
+
+  if (!patientName) return res.status(400).json({ error: "Informe o nome da pessoa ou paciente" });
+  if (!sectorOrReason) return res.status(400).json({ error: "Informe o setor ou motivo" });
+
+  const now = new Date().toISOString();
+  const entry = {
+    id: createRecordId(),
+    patientName,
+    sectorOrReason,
+    notes,
+    contacts: "",
+    socialRecord: "Pendente",
+    observation: "",
+    interventions: "",
+    status: "SOLICITADO",
+    createdAt: now,
+    createdBy: req.user.nome || req.user.username || "",
+    updatedAt: "",
+    updatedBy: "",
+    closedAt: "",
+    closedBy: ""
+  };
+
+  psychologyManualRequests.unshift(entry);
+
+  addUserAction(req.user, "PSYCHOLOGY_MANUAL_REQUEST_CREATE", `Registrou solicitação avulsa para ${patientName}`, {
+    patientName,
+    sectorOrReason,
+    notes
+  });
+
+  await persistState();
+  res.json({ ok: true, request: psychologyManualRequestForClient(entry) });
+});
+
 app.post("/api/hospital-trips", requireAuth, async (req, res) => {
   const origin = String(req.body?.origin || HOSPITAL_TRIP_ORIGIN_LABEL).trim();
   const destination = String(req.body?.destination || "").trim();
@@ -1882,6 +3586,7 @@ app.post("/api/patients", requireAuth, async (req, res) => {
   const nome = String(req.body?.nome || "").trim();
   const cpf = normalizeCpf(req.body?.cpf);
   const birthDate = String(req.body?.birthDate || "").trim();
+  const phone = normalizePhone(req.body?.phone);
   const nir = String(req.body?.nir || "").trim();
   const cil = String(req.body?.cil || "").trim();
   const regulationChannels = Array.isArray(req.body?.regulationChannels)
@@ -1901,7 +3606,7 @@ app.post("/api/patients", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Já existe paciente com esse CPF" });
   }
 
-  const patient = createEmptyPatientRecord({ nome, cpf, birthDate, nir, cil, regulationChannels, regulationAcceptedAt });
+  const patient = createEmptyPatientRecord({ nome, cpf, birthDate, phone, nir, cil, regulationChannels, regulationAcceptedAt });
   patientRegistry.push(patient);
 
   addUserAction(req.user, "PATIENT_CREATE", `Cadastrou o paciente ${patient.nome}`, {
@@ -1968,17 +3673,252 @@ app.post("/api/patients/:patientId/visits", requireAuth, async (req, res) => {
   res.json({ ok: true, visit, patient: patientForClient(patient) });
 });
 
+app.patch("/api/patients/:patientId/social-support", requireAuth, async (req, res) => {
+  const patient = findPatientOr404(req, res);
+  if (!patient) return;
+
+  const now = new Date().toISOString();
+  const previousSupport = buildPatientSocialSupport(patient.socialSupport);
+  const actor = req.user.nome || req.user.username || "";
+  const nextSocialRecord = normalizeSocialRecordStatus(req.body?.socialRecord);
+  const socialRecordUpdatedAt = nextSocialRecord === "Concluído"
+    ? (previousSupport.socialRecord === "Concluído" && previousSupport.socialRecordUpdatedAt ? previousSupport.socialRecordUpdatedAt : now)
+    : "";
+  const socialRecordUpdatedBy = nextSocialRecord === "Concluído"
+    ? (previousSupport.socialRecord === "Concluído" && previousSupport.socialRecordUpdatedBy ? previousSupport.socialRecordUpdatedBy : actor)
+    : "";
+  const shouldUpdateSocialForm = req.body?.socialForm && typeof req.body.socialForm === "object";
+  const previousSocialForm = buildPatientSocialForm(previousSupport.socialForm);
+  const mergedSocialForm = buildPatientSocialForm(shouldUpdateSocialForm
+    ? {
+      ...previousSocialForm,
+      ...req.body.socialForm,
+      familyContacts: Array.isArray(req.body.socialForm?.familyContacts)
+        ? req.body.socialForm.familyContacts
+        : previousSocialForm.familyContacts,
+      benefits: Array.isArray(req.body.socialForm?.benefits)
+        ? req.body.socialForm.benefits
+        : previousSocialForm.benefits,
+      profileTags: Array.isArray(req.body.socialForm?.profileTags)
+        ? req.body.socialForm.profileTags
+        : previousSocialForm.profileTags
+    }
+    : previousSocialForm);
+  const hasPreviousSocialForm = hasPatientSocialFormData(previousSocialForm);
+  const hasCurrentSocialForm = hasPatientSocialFormData(mergedSocialForm);
+  patient.socialSupport = buildPatientSocialSupport({
+    contacts: req.body?.contacts,
+    admissionNotes: req.body?.admissionNotes,
+    socialRecord: nextSocialRecord,
+    observation: req.body?.observation,
+    socialForm: {
+      ...mergedSocialForm,
+      filledAt: hasCurrentSocialForm
+        ? (hasPreviousSocialForm && previousSocialForm.filledAt ? previousSocialForm.filledAt : now)
+        : "",
+      filledBy: hasCurrentSocialForm
+        ? (hasPreviousSocialForm && previousSocialForm.filledBy ? previousSocialForm.filledBy : actor)
+        : "",
+      updatedAt: hasCurrentSocialForm ? now : "",
+      updatedBy: hasCurrentSocialForm ? actor : ""
+    },
+    dischargePending: previousSupport.dischargePending,
+    dischargeNote: previousSupport.dischargeNote,
+    dischargeAt: previousSupport.dischargeAt,
+    dischargeBy: previousSupport.dischargeBy,
+    socialRecordUpdatedAt,
+    socialRecordUpdatedBy,
+    updatedAt: now,
+    updatedBy: actor
+  });
+  if (patient.currentAdmission) {
+    const startedRequest = buildStartedBedRequestState(patient.currentAdmission.serviceSocialRequest, actor, now);
+    patient.currentAdmission.serviceSocialRequest = startedRequest;
+    const ward = wards.find(item => Number(item.id) === Number(patient.currentAdmission?.wardId));
+    const bed = ward?.beds?.find(item => Number(item.id) === Number(patient.currentAdmission?.bedId)) || null;
+    if (bed) {
+      normalizeBedData(bed);
+      bed.serviceSocialRequest = startedRequest;
+    }
+  }
+  patient.updatedAt = now;
+
+  addUserAction(req.user, "PATIENT_SOCIAL_SUPPORT_UPDATE", `Atualizou o acompanhamento social do paciente ${patient.nome}`, {
+    patientId: patient.id,
+    patientName: patient.nome,
+    active: Boolean(patient.currentAdmission)
+  });
+
+  await persistState();
+  res.json({ ok: true, patient: patientForClient(patient) });
+});
+
+app.post("/api/patients/:patientId/social-support/close", requireAuth, async (req, res) => {
+  const patient = findPatientOr404(req, res);
+  if (!patient) return;
+  const activeOrLastAdmission = patient.currentAdmission || (Array.isArray(patient.admissionHistory) ? patient.admissionHistory[0] : null);
+  if (!activeOrLastAdmission) {
+    return res.status(400).json({ error: "O paciente nao possui internacao registrada para finalizar o acompanhamento." });
+  }
+
+  const now = new Date().toISOString();
+  const actor = req.user.nome || req.user.username || "";
+  const previousSupport = buildPatientSocialSupport(patient.socialSupport);
+  const activeShift = String(req.user.activeShift?.serviceType || "").trim().toUpperCase() === "SERVICO_SOCIAL"
+    ? req.user.activeShift
+    : null;
+  const ward = wards.find(item => Number(item.id) === Number(activeOrLastAdmission?.wardId));
+  const bed = ward?.beds?.find(item => Number(item.id) === Number(activeOrLastAdmission?.bedId)) || null;
+  if (bed) normalizeBedData(bed);
+
+  const attendance = socialServiceAttendanceEntryForClient({
+    id: createRecordId(),
+    patientId: patient.id,
+    patientName: patient.nome || "",
+    patientBirthDate: patient.birthDate || "",
+    wardId: activeOrLastAdmission?.wardId || null,
+    wardName: activeOrLastAdmission?.wardNome || ward?.nome || "",
+    bedId: activeOrLastAdmission?.bedId || null,
+    contacts: req.body?.contacts || previousSupport.contacts || patient.phone || "",
+    admissionDate: activeOrLastAdmission?.admittedAt || "",
+    socialRecord: "Concluído",
+    observation: req.body?.observation || previousSupport.observation || "",
+    closedAt: now,
+    closedBy: actor,
+    shiftId: activeShift?.id || null,
+    shiftDate: activeShift?.shiftDate || getOperationalDayKey(now),
+    shiftLength: activeShift?.shiftLength || "",
+    shiftPeriod: activeShift?.shiftPeriod || ""
+  });
+
+  if (!Array.isArray(patient.socialSupportHistory)) patient.socialSupportHistory = [];
+  patient.socialSupportHistory.unshift(attendance);
+  patient.socialSupportHistory = patient.socialSupportHistory.slice(0, 300);
+
+  const closedRequest = buildBedRequestState({
+    ...(bed?.serviceSocialRequest || patient.currentAdmission?.serviceSocialRequest || {}),
+    requested: false,
+    closedAt: now,
+    closedBy: actor,
+    status: "BAIXA",
+    observation: attendance.observation
+  });
+
+  if (bed) {
+    bed.serviceSocialRequest = closedRequest;
+  }
+
+  if (patient.currentAdmission) {
+    patient.currentAdmission.serviceSocialRequest = closedRequest;
+  }
+
+  patient.socialSupport = buildPatientSocialSupport({
+    dischargePending: false,
+    dischargeNote: "",
+    dischargeAt: "",
+    dischargeBy: ""
+  });
+  patient.updatedAt = now;
+
+  addUserAction(req.user, "PATIENT_SOCIAL_SUPPORT_CLOSE", `Deu baixa no atendimento social do paciente ${patient.nome}`, {
+    patientId: patient.id,
+    patientName: patient.nome,
+    attendanceId: attendance.id,
+    shiftId: attendance.shiftId
+  });
+
+  await persistState();
+  res.json({ ok: true, patient: patientForClient(patient), attendance });
+});
+
+app.patch("/api/patients/:patientId/psychology-support", requireAuth, async (req, res) => {
+  const patient = findPatientOr404(req, res);
+  if (!patient) return;
+
+  const previousSupport = buildPatientPsychologySupport(patient.psychologySupport);
+  const now = new Date().toISOString();
+  const actor = req.user.nome || req.user.username || "";
+  const normalizedStatus = String(req.body?.status || patient.currentAdmission?.psychologyRequest?.status || "").trim().toUpperCase();
+  const finalStatus = normalizedStatus === "BAIXA" ? "BAIXA" : "EM_ACOMPANHAMENTO";
+  patient.psychologySupport = buildPatientPsychologySupport({
+    interventions: req.body?.interventions,
+    observation: req.body?.observation,
+    dischargePending: finalStatus === "BAIXA" ? false : previousSupport.dischargePending,
+    dischargeNote: finalStatus === "BAIXA" ? "" : previousSupport.dischargeNote,
+    dischargeAt: finalStatus === "BAIXA" ? "" : previousSupport.dischargeAt,
+    dischargeBy: finalStatus === "BAIXA" ? "" : previousSupport.dischargeBy,
+    updatedAt: now,
+    updatedBy: actor
+  });
+  if (patient.currentAdmission) {
+    const ward = wards.find(item => Number(item.id) === Number(patient.currentAdmission?.wardId));
+    const bed = ward?.beds?.find(item => Number(item.id) === Number(patient.currentAdmission?.bedId)) || null;
+    const nextRequest = finalStatus === "BAIXA"
+      ? buildBedRequestState({
+        ...(bed?.psychologyRequest || patient.currentAdmission.psychologyRequest || {}),
+        requested: false,
+        closedAt: now,
+        closedBy: actor,
+        observation: patient.psychologySupport.observation || "",
+        status: "BAIXA"
+      })
+      : buildStartedBedRequestState(bed?.psychologyRequest || patient.currentAdmission.psychologyRequest, actor, now);
+    patient.currentAdmission.psychologyRequest = nextRequest;
+    if (bed) {
+      normalizeBedData(bed);
+      bed.psychologyRequest = nextRequest;
+    }
+  }
+  patient.updatedAt = now;
+  psychologyAttendanceEntries.unshift(psychologyAttendanceEntryForClient({
+    id: createRecordId(),
+    patientId: patient.id,
+    patientName: patient.nome || "",
+    wardId: patient.currentAdmission?.wardId || null,
+    wardName: patient.currentAdmission?.wardNome || "",
+    bedId: patient.currentAdmission?.bedId || null,
+    status: finalStatus,
+    interventions: patient.psychologySupport.interventions,
+    observation: patient.psychologySupport.observation,
+    createdAt: now,
+    createdBy: actor
+  }));
+  psychologyAttendanceEntries.splice(3000);
+
+  addUserAction(req.user, "PATIENT_PSYCHOLOGY_SUPPORT_UPDATE", `Atualizou o acompanhamento psicológico do paciente ${patient.nome}`, {
+    patientId: patient.id,
+    patientName: patient.nome,
+    active: Boolean(patient.currentAdmission)
+  });
+
+  await persistState();
+  res.json({ ok: true, patient: patientForClient(patient) });
+});
+
 app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
   const patient = findPatientOr404(req, res);
   if (!patient) return;
 
-  const nome = String(req.body?.nome || "").trim();
-  const cpf = normalizeCpf(req.body?.cpf);
-  const birthDate = String(req.body?.birthDate || "").trim();
+  const nome = req.body?.nome === undefined
+    ? String(patient.nome || "").trim()
+    : String(req.body?.nome || "").trim();
+  const cpf = req.body?.cpf === undefined
+    ? normalizeCpf(patient.cpf)
+    : normalizeCpf(req.body?.cpf);
+  const currentCpf = normalizeCpf(patient.cpf);
+  const birthDate = req.body?.birthDate === undefined
+    ? String(patient.birthDate || "").trim()
+    : String(req.body?.birthDate || "").trim();
+  const currentBirthDate = String(patient.birthDate || "").trim();
+  const phone = req.body?.phone === undefined
+    ? normalizePhone(patient.phone)
+    : normalizePhone(req.body?.phone);
   const diagnostico = req.body?.diagnostico === undefined
     ? String(patient.diagnostico || "").trim()
     : String(req.body?.diagnostico || "").trim();
-  const nir = String(req.body?.nir || "").trim();
+  const nir = req.body?.nir === undefined
+    ? String(patient.nir || "").trim()
+    : String(req.body?.nir || "").trim();
   const cil = req.body?.cil === undefined
     ? String(patient.cil || "").trim()
     : String(req.body?.cil || "").trim();
@@ -2001,20 +3941,57 @@ app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
   const regulationAcceptedAt = req.body?.regulationAcceptedAt === undefined
     ? String(patient.regulationAcceptedAt || "").trim()
     : String(req.body?.regulationAcceptedAt || "").trim();
+  const nirWorkflowStatus = req.body?.nirWorkflowStatus === undefined
+    ? String(patient.nirWorkflowStatus || "").trim()
+    : String(req.body?.nirWorkflowStatus || "").trim();
+  const nirAcceptedLocation = req.body?.nirAcceptedLocation === undefined
+    ? String(patient.nirAcceptedLocation || "").trim()
+    : String(req.body?.nirAcceptedLocation || "").trim();
+  const nirActionReason = req.body?.nirActionReason === undefined
+    ? String(patient.nirActionReason || "").trim()
+    : String(req.body?.nirActionReason || "").trim();
+  const nirStatusUpdatedAt = req.body?.nirStatusUpdatedAt === undefined
+    ? String(patient.nirStatusUpdatedAt || "").trim()
+    : String(req.body?.nirStatusUpdatedAt || "").trim();
+  const nirStatusUpdatedBy = req.body?.nirStatusUpdatedBy === undefined
+    ? String(patient.nirStatusUpdatedBy || "").trim()
+    : String(req.body?.nirStatusUpdatedBy || "").trim();
+  const nirHistory = Array.isArray(req.body?.nirHistory)
+    ? req.body.nirHistory
+    : (Array.isArray(patient.nirHistory) ? patient.nirHistory : []);
+  const nirDischargePending = req.body?.nirDischargePending === undefined
+    ? Boolean(patient.nirDischargePending)
+    : Boolean(req.body?.nirDischargePending);
+  const nirDischargeNote = req.body?.nirDischargeNote === undefined
+    ? String(patient.nirDischargeNote || "").trim()
+    : String(req.body?.nirDischargeNote || "").trim();
+  const nirDischargeAt = req.body?.nirDischargeAt === undefined
+    ? String(patient.nirDischargeAt || "").trim()
+    : String(req.body?.nirDischargeAt || "").trim();
+  const nirDischargeBy = req.body?.nirDischargeBy === undefined
+    ? String(patient.nirDischargeBy || "").trim()
+    : String(req.body?.nirDischargeBy || "").trim();
 
   if (!nome) return res.status(400).json({ error: "Nome é obrigatório" });
-  if (!cpf || cpf.length !== 11) return res.status(400).json({ error: "CPF deve ter 11 dígitos" });
-  if (!birthDate) return res.status(400).json({ error: "Data de nascimento é obrigatória" });
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) {
+  const allowBlankCpf = !currentCpf && !cpf;
+  if (!allowBlankCpf && (!cpf || cpf.length !== 11)) {
+    return res.status(400).json({ error: "CPF deve ter 11 dígitos" });
+  }
+  const allowBlankBirthDate = !currentBirthDate && !birthDate;
+  if (!allowBlankBirthDate && !birthDate) {
+    return res.status(400).json({ error: "Data de nascimento é obrigatória" });
+  }
+  if (birthDate && !/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) {
     return res.status(400).json({ error: "Data de nascimento inválida" });
   }
-  if (patientRegistry.some(item => item.id !== patient.id && !item.deletedAt && normalizeCpf(item.cpf) === cpf)) {
+  if (cpf && patientRegistry.some(item => item.id !== patient.id && !item.deletedAt && normalizeCpf(item.cpf) === cpf)) {
     return res.status(400).json({ error: "Já existe outro paciente com esse CPF" });
   }
 
   patient.nome = nome;
   patient.cpf = cpf;
   patient.birthDate = birthDate;
+  patient.phone = phone;
   patient.diagnostico = diagnostico;
   patient.nir = nir;
   patient.cil = cil;
@@ -2023,6 +4000,16 @@ app.patch("/api/patients/:patientId", requireAuth, async (req, res) => {
   patient.nirLastUpdateAt = nirLastUpdateAt;
   patient.nirLastUpdateBy = nirLastUpdateBy;
   patient.nirUpdateChannels = Array.from(new Set(nirUpdateChannels));
+  patient.nirWorkflowStatus = nirWorkflowStatus;
+  patient.nirAcceptedLocation = nirAcceptedLocation;
+  patient.nirActionReason = nirActionReason;
+  patient.nirStatusUpdatedAt = nirStatusUpdatedAt;
+  patient.nirStatusUpdatedBy = nirStatusUpdatedBy;
+  patient.nirDischargePending = nirDischargePending;
+  patient.nirDischargeNote = nirDischargeNote;
+  patient.nirDischargeAt = nirDischargeAt;
+  patient.nirDischargeBy = nirDischargeBy;
+  patient.nirHistory = Array.isArray(nirHistory) ? nirHistory : [];
   patient.updatedAt = new Date().toISOString();
 
   if (patient.currentAdmission) {
@@ -2058,21 +4045,37 @@ app.post("/api/patients/:patientId/nir-update", requireAuth, async (req, res) =>
       .map(item => String(item || "").trim().toUpperCase())
       .filter(item => item === "CIL" || item === "EMAIL")
     : [];
+  const cil = req.body?.cil === undefined
+    ? String(patient.cil || "").trim()
+    : String(req.body?.cil || "").trim();
 
-  if (!channels.length) {
-    return res.status(400).json({ error: "Informe ao menos uma atualização: CIL ou EMAIL." });
+  if (!channels.length && req.body?.cil === undefined) {
+    return res.status(400).json({ error: "Informe ao menos uma atualização: SIREL ou EMAIL." });
   }
 
   const now = new Date().toISOString();
+  patient.cil = cil;
   patient.nirLastUpdateAt = now;
   patient.nirLastUpdateBy = req.user.nome || req.user.username || "";
-  patient.nirUpdateChannels = Array.from(new Set(channels));
+  patient.nirUpdateChannels = channels.length
+    ? Array.from(new Set(channels))
+    : (Array.isArray(patient.nirUpdateChannels) ? patient.nirUpdateChannels : []);
   patient.updatedAt = now;
+
+  if (patient.currentAdmission) {
+    const ward = wards.find(item => item.id === patient.currentAdmission.wardId);
+    const bed = ward?.beds?.find(item => item.id === patient.currentAdmission.bedId);
+    if (bed) {
+      bed.cil = cil;
+      normalizeBedData(bed);
+    }
+  }
 
   addUserAction(req.user, "PATIENT_NIR_UPDATE", `Atualizou o NIR do paciente ${patient.nome}`, {
     patientId: patient.id,
     patientName: patient.nome,
-    channels: patient.nirUpdateChannels
+    channels: patient.nirUpdateChannels,
+    cil: patient.cil
   });
 
   await persistState();
@@ -2163,9 +4166,21 @@ app.delete("/api/patients/:patientId", requireAuth, async (req, res) => {
 
 app.post("/api/shifts/open", requireAuth, async (req, res) => {
   if (req.user.activeShift) return res.status(400).json({ error: "Já existe um plantão aberto para este usuário" });
+  const serviceType = String(req.body?.serviceType || "").trim().toUpperCase();
+  const serviceLabel = getServiceShiftLabel(serviceType);
+  const isStandaloneService = ["PSICOLOGIA", "SERVICO_SOCIAL"].includes(serviceType);
   const wardId = parseInt(req.body?.wardId, 10);
-  const ward = wards.find(item => item.id === wardId);
-  if (!ward) return res.status(400).json({ error: "Selecione um setor válido para abrir o plantão" });
+  const ward = isStandaloneService ? null : wards.find(item => item.id === wardId);
+  if (!isStandaloneService && !ward) return res.status(400).json({ error: "Selecione um setor válido para abrir o plantão" });
+  const shiftDate = getCurrentIsoDate();
+  const activeShiftOwner = findActiveShiftOwnerForDay(isStandaloneService ? null : ward.id, shiftDate, serviceType);
+  if (activeShiftOwner) {
+    return res.status(409).json({
+      error: isStandaloneService
+        ? `O plantão de hoje de ${serviceLabel} já foi aberto por ${activeShiftOwner.nome || activeShiftOwner.username}. Somente esse acesso pode continuar no dia.`
+        : `O plantão de hoje no setor ${ward.nome} já foi aberto por ${activeShiftOwner.nome || activeShiftOwner.username}. Somente esse acesso pode continuar no dia.`
+    });
+  }
   const shiftLength = String(req.body?.shiftLength || "").trim().toUpperCase() === "24H" ? "24H" : "12H";
   let shiftPeriod = String(req.body?.shiftPeriod || "").trim().toUpperCase();
   if (shiftLength === "24H") shiftPeriod = "COMPLETO";
@@ -2176,11 +4191,12 @@ app.post("/api/shifts/open", requireAuth, async (req, res) => {
 
   req.user.activeShift = {
     id: nextShiftId++,
-    shiftDate: getCurrentIsoDate(),
+    serviceType,
+    shiftDate,
     openedAt: new Date().toISOString(),
     closedAt: null,
-    wardId: ward.id,
-    wardNome: ward.nome,
+    wardId: isStandaloneService ? null : ward.id,
+    wardNome: isStandaloneService ? serviceLabel : ward.nome,
     ownerUsername: req.user.username,
     ownerName,
     shiftLength,
@@ -2195,12 +4211,19 @@ app.post("/api/shifts/open", requireAuth, async (req, res) => {
     },
     teamUpdatedAt: "",
     teamUpdatedBy: "",
+    nursingReport: "",
+    nursingReportUpdatedAt: "",
+    nursingReportUpdatedBy: "",
     actions: [],
     pendenciasFinalizadas: []
   };
-  addUserAction(req.user, "SHIFT_OPEN", `Abriu plantão no setor ${ward.nome}`, {
-    wardId: ward.id,
-    wardNome: ward.nome,
+  if (serviceType === "SERVICO_SOCIAL") {
+    clearActiveSocialServiceShiftDrafts();
+  }
+  addUserAction(req.user, "SHIFT_OPEN", isStandaloneService ? `Abriu plantão de ${serviceLabel}` : `Abriu plantão no setor ${ward.nome}`, {
+    serviceType,
+    wardId: isStandaloneService ? null : ward.id,
+    wardNome: isStandaloneService ? serviceLabel : ward.nome,
     shiftLength,
     shiftPeriod
   });
@@ -2227,7 +4250,10 @@ app.patch("/api/shifts/team", requireAuth, async (req, res) => {
   }
   req.user.activeShift.teamUpdatedAt = new Date().toISOString();
   req.user.activeShift.teamUpdatedBy = req.user.nome || req.user.username;
-  addUserAction(req.user, "SHIFT_TEAM_UPDATE", `Atualizou a equipe do plantao no setor ${req.user.activeShift.wardNome}`, {
+  addUserAction(req.user, "SHIFT_TEAM_UPDATE", getServiceShiftLabel(req.user.activeShift.serviceType || "")
+    ? `Atualizou a equipe do plantão de ${getServiceShiftLabel(req.user.activeShift.serviceType || "")}`
+    : `Atualizou a equipe do plantao no setor ${req.user.activeShift.wardNome}`, {
+    serviceType: req.user.activeShift.serviceType || "",
     wardId: req.user.activeShift.wardId,
     wardNome: req.user.activeShift.wardNome,
     shiftId: req.user.activeShift.id
@@ -2236,15 +4262,51 @@ app.patch("/api/shifts/team", requireAuth, async (req, res) => {
   res.json({ ok: true, team: req.user.activeShift.team, user: sanitizeUser(req.user) });
 });
 
+app.patch("/api/shifts/nursing-report", requireAuth, async (req, res) => {
+  if (!req.user.activeShift) return res.status(400).json({ error: "Nao ha plantao aberto para este usuario" });
+  req.user.activeShift.nursingReport = String(req.body?.nursingReport || "").trim();
+  if (req.user.activeShift.nursingReport) {
+    req.user.activeShift.nursingReportUpdatedAt = new Date().toISOString();
+    req.user.activeShift.nursingReportUpdatedBy = req.user.nome || req.user.username;
+  } else {
+    req.user.activeShift.nursingReportUpdatedAt = "";
+    req.user.activeShift.nursingReportUpdatedBy = "";
+  }
+  await persistState();
+  res.json({
+    ok: true,
+    nursingReport: req.user.activeShift.nursingReport,
+    user: sanitizeUser(req.user)
+  });
+});
+
 app.post("/api/shifts/close", requireAuth, async (req, res) => {
   if (!req.user.activeShift) return res.status(400).json({ error: "Não há plantão aberto para este usuário" });
+  req.user.activeShift.nursingReport = String(req.body?.nursingReport || req.user.activeShift.nursingReport || "").trim();
+  if (req.user.activeShift.nursingReport) {
+    req.user.activeShift.nursingReportUpdatedAt = new Date().toISOString();
+    req.user.activeShift.nursingReportUpdatedBy = req.user.nome || req.user.username;
+  } else {
+    req.user.activeShift.nursingReportUpdatedAt = "";
+    req.user.activeShift.nursingReportUpdatedBy = "";
+  }
   req.user.activeShift.closedAt = new Date().toISOString();
   const closingShift = req.user.activeShift;
-  addUserAction(req.user, "SHIFT_CLOSE", `Fechou plantão no setor ${closingShift.wardNome}`, {
+  if (String(closingShift.serviceType || "").trim().toUpperCase() === "SERVICO_SOCIAL") {
+    closingShift.socialServiceAttendances = getSocialServiceAttendancesForShift(closingShift);
+    closingShift.socialServiceSnapshot = buildSocialServiceSnapshotRows();
+  }
+  addUserAction(req.user, "SHIFT_CLOSE", getServiceShiftLabel(closingShift.serviceType || "")
+    ? `Fechou plantão de ${getServiceShiftLabel(closingShift.serviceType || "")}`
+    : `Fechou plantão no setor ${closingShift.wardNome}`, {
+    serviceType: closingShift.serviceType || "",
     wardId: closingShift.wardId,
     wardNome: closingShift.wardNome
   });
   const report = buildShiftReport(req.user, closingShift);
+  if (String(closingShift.serviceType || "").trim().toUpperCase() === "SERVICO_SOCIAL") {
+    clearActiveSocialServiceShiftDrafts();
+  }
   if (!Array.isArray(req.user.shifts)) req.user.shifts = [];
   req.user.shifts.unshift(closingShift);
   req.user.shifts = req.user.shifts.slice(0, 100);
@@ -2710,6 +4772,16 @@ app.patch("/api/wards/:wardId/beds/:bedId", requireAuth, async (req, res) => {
   if (payload.procedimentos && !Array.isArray(payload.procedimentos)) return res.status(400).json({ error: "Procedimentos inválidos" });
   if (payload.pendenciasStatus && !Array.isArray(payload.pendenciasStatus)) return res.status(400).json({ error: "Pendências inválidas" });
   if (payload.cpf !== undefined) payload.cpf = String(payload.cpf || "").replace(/\D/g, "");
+
+  const nextBedState = normalizeBedData({ ...bed, ...payload });
+  if (isBedOccupiedByPatient(nextBedState)) {
+    const conflict = findOtherOccupiedBedByIdentity(nextBedState, ward.id, bed.id);
+    if (conflict) {
+      return res.status(400).json({
+        error: `Paciente já internado em ${conflict.ward.nome || "outro setor"}, leito ${conflict.bed.id}. Use a transferência de setor/leito.`
+      });
+    }
+  }
 
   if (Array.isArray(payload.procedimentos)) {
     const createdBy = req.user.nome || req.user.username;
