@@ -2915,7 +2915,7 @@ function topEntries(record, limit = 6) {
     .map(([label, value]) => ({ label, value }));
 }
 
-app.post("/api/login", (req, res) => {
+/*app.post("/api/login", (req, res) => {
   const { username, password } = req.body || {};
   const user = users.find(u => u.username === username && u.password === password);
   if (!user) return res.status(401).json({ error: "Usuário ou senha inválidos" });
@@ -2923,6 +2923,62 @@ app.post("/api/login", (req, res) => {
   const sid = createSession(user.username);
   res.setHeader("Set-Cookie", `sid=${encodeURIComponent(sid)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`);
   res.json({ ok: true, username: user.username, sid, user: sanitizeUser(user) });
+});*/
+
+app.post("/api/login", (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+
+    if (!username || !password) {
+      return res.status(400).json({
+        error: "Informe usuário e senha"
+      });
+    }
+
+    if (!Array.isArray(users)) {
+      console.error("LOGIN: lista de usuários indisponível");
+      return res.status(503).json({
+        error: "Serviço de autenticação indisponível"
+      });
+    }
+
+    const user = users.find(
+      u => u.username === username &&
+           u.password === password
+    );
+
+    if (!user) {
+      return res.status(401).json({
+        error: "Usuário ou senha inválidos"
+      });
+    }
+
+    clearSessionsForUsername(user.username);
+
+    const sid = createSession(user.username);
+
+    res.cookie("sid", sid, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 43200000
+    });
+
+    return res.json({
+      ok: true,
+      username: user.username,
+      sid,
+      user: sanitizeUser(user)
+    });
+
+  } catch (error) {
+    console.error("ERRO NA API DE LOGIN:", error);
+
+    return res.status(500).json({
+      error: "Erro interno ao realizar login"
+    });
+  }
 });
 
 app.post("/api/logout", (req, res) => {
