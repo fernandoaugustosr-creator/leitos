@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Controle de Leitos - Posto 2</title>
-  <link rel="stylesheet" href="/styles.css?v=20261007-3">
+  <link rel="stylesheet" href="/styles.css?v=20261008-3">
 </head>
 <body>
   <div class="app-shell">
@@ -21,44 +21,46 @@
       </div>
 
       <div class="sidebar-badge-strip">
-        <span class="sidebar-badge">HMA Blue</span>
-        <span class="sidebar-badge subtle">Online</span>
+        <span class="sidebar-badge">Controle de Leitos</span>
+        <span class="sidebar-badge subtle">Banco central Supabase</span>
       </div>
 
       <nav class="sidebar-nav">
-        <button id="nav-dashboard" class="nav-btn sidebar-btn">
+        <div id="nav-workspace-label" class="sidebar-nav-label">ÁREA DO PLANTÃO</div>
+        <button id="nav-dashboard" data-work-area="ward" class="nav-btn sidebar-btn">
           <span class="sidebar-btn-short" aria-hidden="true">D</span>
           <span class="sidebar-btn-label">Dashboard</span>
         </button>
-        <button id="nav-home" class="nav-btn ghost sidebar-btn">
+        <button id="nav-home" data-work-area="ward" class="nav-btn ghost sidebar-btn">
           <span class="sidebar-btn-short" aria-hidden="true">S</span>
           <span class="sidebar-btn-label">Setores</span>
         </button>
-        <button id="nav-psychology" class="nav-btn ghost sidebar-btn">
+        <button id="nav-psychology" data-work-area="PSICOLOGIA" class="nav-btn ghost sidebar-btn">
           <span class="sidebar-btn-short" aria-hidden="true">P</span>
           <span class="sidebar-btn-label">Psicologia</span>
         </button>
-        <button id="nav-social-service" class="nav-btn ghost sidebar-btn">
+        <button id="nav-social-service" data-work-area="SERVICO_SOCIAL" class="nav-btn ghost sidebar-btn">
           <span class="sidebar-btn-short" aria-hidden="true">SS</span>
           <span class="sidebar-btn-label">Serv. Social</span>
         </button>
-        <button id="nav-portaria" class="nav-btn ghost sidebar-btn">
+        <div id="nav-general-label" class="sidebar-nav-label">ACESSO GERAL</div>
+        <button id="nav-portaria" data-work-area="general" class="nav-btn ghost sidebar-btn">
           <span class="sidebar-btn-short" aria-hidden="true">PO</span>
           <span class="sidebar-btn-label">Portaria</span>
         </button>
-        <button id="nav-travel" class="nav-btn ghost sidebar-btn">
+        <button id="nav-travel" data-work-area="general" class="nav-btn ghost sidebar-btn">
           <span class="sidebar-btn-short" aria-hidden="true">V</span>
           <span class="sidebar-btn-label">Viagens</span>
         </button>
-        <button id="nav-patients" class="nav-btn ghost sidebar-btn">
+        <button id="nav-patients" data-work-area="general" class="nav-btn ghost sidebar-btn">
           <span class="sidebar-btn-short" aria-hidden="true">PA</span>
           <span class="sidebar-btn-label">Pacientes</span>
         </button>
-        <button id="nav-nir" class="nav-btn ghost sidebar-btn">
+        <button id="nav-nir" data-work-area="general" class="nav-btn ghost sidebar-btn">
           <span class="sidebar-btn-short" aria-hidden="true">N</span>
           <span class="sidebar-btn-label">NIR</span>
         </button>
-        <button id="nav-gerenciar" class="nav-btn ghost sidebar-btn">
+        <button id="nav-gerenciar" data-work-area="admin" class="nav-btn ghost sidebar-btn">
           <span class="sidebar-btn-short" aria-hidden="true">C</span>
           <span class="sidebar-btn-label">Cadastro</span>
         </button>
@@ -93,6 +95,7 @@
         <button id="btn-login" type="button">Entrar</button>
       </div>
       <div class="hint">Padrão: admin / admin</div>
+      <div id="login-feedback" class="hint error-text hidden" role="alert"></div>
     </section>
 
     <section id="view-dashboard" class="panel hidden">
@@ -149,6 +152,13 @@
     </section>
 
     <section id="view-home" class="panel hidden">
+      <div id="workshift-start-card" class="workshift-start-card hidden">
+        <div>
+          <div class="procedimentos-title">Comece pelo plantão</div>
+          <div class="history-hint">Escolha sua área de trabalho para abrir o plantão e acessar os menus correspondentes.</div>
+        </div>
+        <button id="btn-start-workshift" type="button">Iniciar plantão</button>
+      </div>
       <h2>Setores</h2>
       <div class="hint">Clique em um setor para abrir a tela do setor, visualizar os leitos e controlar o plantão.</div>
       <div class="home-ward-shell">
@@ -1187,22 +1197,45 @@
   </dialog>
 
   <dialog id="modal-start-ward" class="modal">
-    <form method="dialog" class="modal-content">
+    <div class="modal-content startup-shift-content">
       <div class="modal-header">
-        <div class="modal-title">Selecionar setor</div>
+        <div class="modal-title">Iniciar plantão</div>
       </div>
       <div class="modal-body">
-        <div class="hint">Escolha o setor em que você vai trabalhar. Ao entrar, o plantão será aberto automaticamente no seu nome.</div>
-        <label>Setor
-          <select id="modal-start-ward-select"></select>
-        </label>
+        <div class="hint startup-shift-intro">Escolha sua área de trabalho. O sistema abre o plantão e mostra os menus correspondentes.</div>
+        <div class="startup-shift-fields">
+          <label>Área de trabalho
+            <select id="modal-start-service-select">
+              <option value="ward">Enfermagem por setor</option>
+              <option value="PSICOLOGIA">Psicologia</option>
+              <option value="SERVICO_SOCIAL">Serviço Social</option>
+            </select>
+          </label>
+          <label id="modal-start-ward-field">Setor
+            <select id="modal-start-ward-select"></select>
+          </label>
+          <label>Tipo do plantão
+            <select id="modal-start-shift-length">
+              <option value="12H">12 horas</option>
+              <option value="24H">24 horas</option>
+            </select>
+          </label>
+          <label id="modal-start-period-field">Período
+            <select id="modal-start-shift-period">
+              <option value="DIA">Dia</option>
+              <option value="NOITE">Noite</option>
+              <option value="COMPLETO">Completo</option>
+            </select>
+          </label>
+        </div>
+        <div id="modal-start-shift-feedback" class="hint error-text hidden" role="alert"></div>
       </div>
       <div class="modal-actions">
-        <button id="btn-confirm-start-ward" value="default">Entrar no setor</button>
+        <button id="btn-confirm-start-ward" type="button">Abrir plantão e continuar</button>
       </div>
-    </form>
+    </div>
   </dialog>
 
-  <script src="/app.js"></script>
+  <script src="/app.js?v=20261008-3"></script>
 </body>
 </html>

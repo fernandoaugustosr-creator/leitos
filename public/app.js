@@ -443,6 +443,13 @@ function showUnexpectedError(error) {
   alert(error?.message || "Erro");
 }
 
+function setLoginFeedback(message) {
+  const feedback = document.getElementById("login-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+}
+
 function clearPatientFields() {
   document.getElementById("modal-nome").value = "";
   document.getElementById("modal-admissao").value = "";
@@ -478,6 +485,31 @@ function showOnly(viewId) {
     document.getElementById(id)?.classList.toggle("ghost", navMap[viewId] !== id);
   }
   document.body.classList.toggle("login-only", viewId === "view-login");
+}
+
+function syncWorkAreaNavigation() {
+  const activeShift = currentUser?.activeShift || null;
+  const serviceType = String(activeShift?.serviceType || "").trim().toUpperCase();
+  const hasWardShift = Boolean(activeShift && !serviceType && Number(activeShift.wardId));
+  const isAdmin = isAdminUser();
+  const visibility = {
+    ward: isAdmin || hasWardShift,
+    PSICOLOGIA: isAdmin || serviceType === "PSICOLOGIA",
+    SERVICO_SOCIAL: isAdmin || serviceType === "SERVICO_SOCIAL",
+    general: true,
+    admin: isAdmin
+  };
+
+  for (const item of document.querySelectorAll("[data-work-area]")) {
+    const area = item.dataset.workArea;
+    item.classList.toggle("hidden", !visibility[area]);
+  }
+  document.getElementById("nav-workspace-label")?.classList.toggle(
+    "hidden",
+    !visibility.ward && !visibility.PSICOLOGIA && !visibility.SERVICO_SOCIAL
+  );
+  document.getElementById("nav-general-label")?.classList.toggle("hidden", false);
+  document.getElementById("workshift-start-card")?.classList.toggle("hidden", Boolean(activeShift));
 }
 
 function setWardPanelsEnabled(enabled, options = {}) {
@@ -545,7 +577,11 @@ async function api(path, options) {
       authError.isAuthError = true;
       throw authError;
     }
-    throw new Error(msg);
+    const apiError = new Error(res.status === 503
+      ? "Banco central indisponível. A operação foi bloqueada; reconecte-se e tente novamente."
+      : msg);
+    apiError.status = res.status;
+    throw apiError;
   }
   // #region debug-point A:frontend-api-success
   reportDebugEvent("A", "public/app.js:api:success", "[DEBUG] Frontend API success", {
@@ -1380,6 +1416,7 @@ function syncAdminAccess() {
   document.getElementById("nav-gerenciar")?.classList.toggle("hidden", !isAdmin);
   document.getElementById("btn-gerenciar")?.classList.toggle("hidden", !isAdmin);
   document.getElementById("admin-users-section")?.classList.toggle("hidden", !isAdmin);
+  syncWorkAreaNavigation();
 }
 
 function renderHeaderWardTabs() {
@@ -7821,6 +7858,31 @@ function syncStartupWardModalOptions() {
   }
 }
 
+function syncStartupShiftForm() {
+  const serviceSelect = document.getElementById("modal-start-service-select");
+  const shiftLength = document.getElementById("modal-start-shift-length");
+  const wardField = document.getElementById("modal-start-ward-field");
+  const periodField = document.getElementById("modal-start-period-field");
+  const isWardShift = serviceSelect?.value === "ward";
+  wardField?.classList.toggle("hidden", !isWardShift);
+  periodField?.classList.toggle("hidden", !isWardShift);
+
+  const fullDay = shiftLength?.value === "24H";
+  const periodSelect = document.getElementById("modal-start-shift-period");
+  if (periodSelect) {
+    if (fullDay) periodSelect.value = "COMPLETO";
+    periodSelect.disabled = !isWardShift || fullDay;
+  }
+}
+
+function setStartupShiftFeedback(message, isError = false) {
+  const feedback = document.getElementById("modal-start-shift-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", isError);
+}
+
 async function openSelectedWard(wardId) {
   if (!wardId) return;
   currentWardId = wardId;
@@ -7863,8 +7925,10 @@ async function openWardInsideHome(wardId) {
 
 function maybeOpenStartWardModal() {
   const modal = document.getElementById("modal-start-ward");
-  if (!modal || currentUser?.activeShift || !wards.length) return;
+  if (!modal || currentUser?.activeShift) return;
   syncStartupWardModalOptions();
+  syncStartupShiftForm();
+  setStartupShiftFeedback("");
   if (!modal.open) {
     modal.showModal();
   }
@@ -8000,8 +8064,19 @@ async function startApp(options = {}) {
     refreshStaffSuggestions(),
     refreshWards()
   ]);
-  if (currentUser?.activeShift?.wardId) {
-    await openSelectedWard(currentUser.activeShift.wardId);
+  renderCurrentUser();
+  const activeShift = currentUser?.activeShift || null;
+  const activeServiceType = String(activeShift?.serviceType || "").trim().toUpperCase();
+  if (activeServiceType === "PSICOLOGIA") {
+    await openPsychologyView();
+    return;
+  }
+  if (activeServiceType === "SERVICO_SOCIAL") {
+    await openSocialServiceView();
+    return;
+  }
+  if (activeShift?.wardId) {
+    await openSelectedWard(activeShift.wardId);
     return;
   }
   setAppEnabled(false);
@@ -8022,19 +8097,23 @@ async function checkAuth() {
       user: currentUser?.username || currentUser?.nome || ""
     });
     // #endregion
-  } catch {
+  } catch (error) {
     // #region debug-point E:check-auth-failure
     reportDebugEvent("E", "public/app.js:checkAuth:failure", "[DEBUG] Auth check failure");
     // #endregion
     currentUser = null;
     setAppEnabled(false);
     showOnly("view-login");
+    setLoginFeedback(error?.isAuthError
+      ? ""
+      : "Banco central indisponível. O acesso e as gravações ficam bloqueados até a conexão voltar.");
   }
 }
 
 document.getElementById("btn-login").addEventListener("click", async () => {
   const username = document.getElementById("login-username").value.trim();
   const password = document.getElementById("login-password").value;
+  setLoginFeedback("");
   try {
     const res = await api("/api/login", {
       method: "POST",
@@ -8047,9 +8126,12 @@ document.getElementById("btn-login").addEventListener("click", async () => {
     }
     currentUser = res.user || null;
     document.getElementById("login-password").value = "";
+    setLoginFeedback("");
     await startApp({ skipUserRefresh: true });
   } catch (e) {
-    showUnexpectedError(e);
+    setLoginFeedback(e?.status === 401
+      ? e.message
+      : "Banco central indisponível. O acesso e as gravações ficam bloqueados até a conexão voltar.");
   }
 });
 
@@ -8548,6 +8630,8 @@ document.getElementById("btn-back-to-sectors-inline")?.addEventListener("click",
   closeSidebarOnMobile();
 });
 
+document.getElementById("btn-start-workshift")?.addEventListener("click", maybeOpenStartWardModal);
+
 document.getElementById("btn-assume-ward-shift")?.addEventListener("click", () => {
   wardShiftPanelRequested = true;
   syncWardShiftEntryState();
@@ -8560,7 +8644,7 @@ async function openShiftForSelectedWard(wardId, options = {}) {
   const shiftPeriod = normalizeShiftPeriod(document.getElementById("shift-period")?.value, shiftLength);
   if (!wardId) {
     setShiftFeedback("Selecione um setor para abrir o plantão.", true);
-    return;
+    return false;
   }
   try {
     const res = await api("/api/shifts/open", {
@@ -8575,8 +8659,10 @@ async function openShiftForSelectedWard(wardId, options = {}) {
     renderCurrentUser();
     setShiftFeedback(feedbackMessage);
     if (openTeamModal) openShiftTeamModal();
+    return true;
   } catch (error) {
     setShiftFeedback(error.message || "Nao foi possivel abrir o plantao.", true);
+    return false;
   }
 }
 
@@ -8584,7 +8670,7 @@ async function openPsychologyShift() {
   if (currentUser?.activeShift) {
     const activeLabel = currentUser.activeShift.wardNome || "outro setor";
     setPsychologyShiftFeedback(`Ja existe um plantao aberto em ${activeLabel}. Feche o plantao atual para abrir o da Psicologia.`, true);
-    return;
+    return false;
   }
 
   const shiftLength = normalizeShiftLength(document.getElementById("psychology-shift-length")?.value);
@@ -8603,11 +8689,13 @@ async function openPsychologyShift() {
     currentUser = res.user || currentUser;
     renderCurrentUser();
     setPsychologyShiftFeedback("Plantão da Psicologia aberto com sucesso.");
+    return true;
   } catch (error) {
     const message = String(error?.message || "").includes("setor válido")
       ? "Nao foi possivel abrir o plantao da Psicologia."
       : (error.message || "Nao foi possivel abrir o plantao da Psicologia.");
     setPsychologyShiftFeedback(message, true);
+    return false;
   }
 }
 
@@ -8615,7 +8703,7 @@ async function openSocialServiceShift() {
   if (currentUser?.activeShift) {
     const activeLabel = currentUser.activeShift.wardNome || "outro setor";
     setSocialServiceShiftFeedback(`Ja existe um plantao aberto em ${activeLabel}. Feche o plantao atual para abrir o do Servico Social.`, true);
-    return;
+    return false;
   }
 
   const shiftLength = normalizeShiftLength(document.getElementById("social-service-shift-length")?.value);
@@ -8640,11 +8728,13 @@ async function openSocialServiceShift() {
     } catch {}
     renderCurrentUser();
     setSocialServiceShiftFeedback("Plantão do Serviço Social aberto com sucesso.");
+    return true;
   } catch (error) {
     const message = String(error?.message || "").includes("setor válido")
       ? "Nao foi possivel abrir o plantao do Serviço Social."
       : (error.message || "Nao foi possivel abrir o plantao do Serviço Social.");
     setSocialServiceShiftFeedback(message, true);
+    return false;
   }
 }
 
@@ -8725,6 +8815,9 @@ async function closeActiveShift(options = {}) {
     } else {
       printShiftReport(lastClosedReport);
     }
+    setAppEnabled(false);
+    showOnly("view-home");
+    window.setTimeout(maybeOpenStartWardModal, 250);
   } catch (error) {
     feedback(error.message || "Nao foi possivel fechar o plantao.", true);
   }
@@ -8787,14 +8880,75 @@ document.getElementById("btn-close-shift-team")?.addEventListener("click", () =>
   document.getElementById("modal-shift-team")?.close();
 });
 
+document.getElementById("modal-start-service-select")?.addEventListener("change", syncStartupShiftForm);
+document.getElementById("modal-start-shift-length")?.addEventListener("change", syncStartupShiftForm);
+
 document.getElementById("btn-confirm-start-ward")?.addEventListener("click", async event => {
   event.preventDefault();
-  const wardId = parseInt(document.getElementById("modal-start-ward-select")?.value, 10);
-  if (!wardId) return;
-  document.getElementById("modal-start-ward")?.close();
-  await openShiftForSelectedWard(wardId, {
-    feedbackMessage: "Plantão aberto no seu nome com sucesso."
-  });
+  const modal = document.getElementById("modal-start-ward");
+  const button = event.currentTarget;
+  const serviceType = document.getElementById("modal-start-service-select")?.value || "ward";
+  const shiftLength = normalizeShiftLength(document.getElementById("modal-start-shift-length")?.value);
+  let opened = false;
+  let failureMessage = "Não foi possível abrir o plantão. Confira os dados e tente novamente.";
+
+  if (serviceType === "ward") {
+    const wardId = parseInt(document.getElementById("modal-start-ward-select")?.value, 10);
+    if (!wardId) {
+      setStartupShiftFeedback("Selecione o setor onde você vai trabalhar.", true);
+      return;
+    }
+    const shiftPeriod = normalizeShiftPeriod(
+      document.getElementById("modal-start-shift-period")?.value,
+      shiftLength
+    );
+    const wardField = document.getElementById("shift-ward");
+    const wardLength = document.getElementById("shift-length");
+    const wardPeriod = document.getElementById("shift-period");
+    if (wardField) wardField.value = String(wardId);
+    if (wardLength) wardLength.value = shiftLength;
+    if (wardPeriod) wardPeriod.value = shiftPeriod;
+  } else if (serviceType === "PSICOLOGIA") {
+    const lengthField = document.getElementById("psychology-shift-length");
+    if (lengthField) lengthField.value = shiftLength;
+  } else if (serviceType === "SERVICO_SOCIAL") {
+    const lengthField = document.getElementById("social-service-shift-length");
+    if (lengthField) lengthField.value = shiftLength;
+  }
+
+  button.disabled = true;
+  button.textContent = "Abrindo plantão...";
+  setStartupShiftFeedback("");
+  modal?.close();
+
+  try {
+    if (serviceType === "ward") {
+      const wardId = parseInt(document.getElementById("modal-start-ward-select")?.value, 10);
+      opened = await openShiftForSelectedWard(wardId, {
+        feedbackMessage: "Plantão aberto no seu nome com sucesso."
+      });
+      failureMessage = document.getElementById("shift-feedback")?.textContent || failureMessage;
+    } else if (serviceType === "PSICOLOGIA") {
+      opened = await openPsychologyShift();
+      failureMessage = document.getElementById("psychology-shift-feedback")?.textContent || failureMessage;
+      if (opened) await openPsychologyView();
+    } else if (serviceType === "SERVICO_SOCIAL") {
+      opened = await openSocialServiceShift();
+      failureMessage = document.getElementById("social-service-shift-feedback")?.textContent || failureMessage;
+      if (opened) await openSocialServiceView();
+    }
+  } catch (error) {
+    failureMessage = error.message || failureMessage;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Abrir plantão e continuar";
+  }
+
+  if (!opened) {
+    modal?.showModal();
+    syncStartupShiftForm();
+    setStartupShiftFeedback(failureMessage, true);
+  }
 });
 
 document.getElementById("shift-length")?.addEventListener("change", syncShiftFormVisibility);

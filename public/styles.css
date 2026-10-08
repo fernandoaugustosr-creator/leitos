@@ -1,18 +1,18 @@
 :root {
-  --red: #ef4444;
+  --red: #b42318;
   --green: #22c55e;
   --yellow: #f59e0b;
   --black: #0f172a;
   --gray: #94a3b8;
-  --primary: #2563eb;
-  --primary-hover: #1d4ed8;
-  --bg-main: #f3f7fb;
+  --primary: #b42318;
+  --primary-hover: #8f1d18;
+  --bg-main: #fff5f4;
   --bg-panel: rgba(255, 255, 255, 0.88);
   --text-main: #0f172a;
   --text-muted: #64748b;
   --border: rgba(148, 163, 184, 0.22);
-  --sidebar: #0f172a;
-  --sidebar-soft: rgba(37, 99, 235, 0.08);
+  --sidebar: #5f1515;
+  --sidebar-soft: rgba(180, 35, 24, 0.08);
   --shadow: 0 18px 45px rgba(15, 23, 42, 0.10);
   --shadow-sm: 0 10px 26px rgba(15, 23, 42, 0.08);
   --radius: 24px;
@@ -2687,17 +2687,17 @@ tbody tr:hover { background: var(--bg-main); }
 }
 
 :root {
-  --primary: #0f766e;
-  --primary-hover: #115e59;
-  --bg-main: #f3f7f7;
+  --primary: #b42318;
+  --primary-hover: #8f1d18;
+  --bg-main: #fff5f4;
   --bg-panel: #fff;
   --text-main: #172b3a;
   --text-muted: #647783;
   --border: #dce6e7;
-  --sidebar: #12313b;
-  --sidebar-soft: rgba(45, 212, 191, 0.12);
-  --shadow: 0 16px 40px rgba(28, 55, 64, 0.08);
-  --shadow-sm: 0 4px 14px rgba(28, 55, 64, 0.06);
+  --sidebar: #5f1515;
+  --sidebar-soft: rgba(180, 35, 24, 0.12);
+  --shadow: 0 16px 40px rgba(82, 23, 18, 0.08);
+  --shadow-sm: 0 4px 14px rgba(82, 23, 18, 0.06);
   --radius: 20px;
 }
 
@@ -3288,5 +3288,302 @@ table tbody tr:nth-child(even) td {
   .psychology-shift-card .plantao-form-grid,
   .psychology-shift-card .plantao-action-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+.sidebar-nav-label {
+  grid-column: 1 / -1;
+  padding: 8px 10px 0;
+  color: #8eaaad;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.9px;
+}
+
+.startup-shift-content {
+  width: min(580px, calc(100vw - 24px));
+}
+
+.startup-shift-intro {
+  margin-top: 0;
+  font-size: 14px;
+}
+
+.startup-shift-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.startup-shift-fields label {
+  display: grid;
+  gap: 8px;
+  color: #344d57;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.startup-shift-fields select {
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fbfdfd;
+  color: var(--text-main);
+  font: inherit;
+}
+
+#modal-start-shift-feedback {
+  margin-top: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(220, 38, 38, 0.18);
+  border-radius: 10px;
+  background: #fff7f7;
+}
+
+#login-feedback {
+  margin-top: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(180, 35, 24, 0.2);
+  border-radius: 10px;
+  background: #fff1ef;
+}
+
+#modal-start-shift-feedback.hidden {
+  display: none;
+}
+
+body.sidebar-collapsed .sidebar-nav-label {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .startup-shift-content {
+    padding: 18px;
+  }
+
+  .startup-shift-fields {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .startup-shift-content .modal-actions,
+  .startup-shift-content .modal-actions button {
+    width: 100%;
+  }
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+html {
+  font-size: 16px;
+}
+
+body {
+  font-size: 15px;
+  background:
+    radial-gradient(circle at top left, rgba(180, 35, 24, 0.08), transparent 30%),
+    linear-gradient(180deg, #fffafa 0%, var(--bg-main) 100%);
+}
+
+.app-shell {
+  height: 100dvh;
+  min-height: 0;
+  padding: 12px;
+  gap: 18px;
+  overflow: hidden;
+}
+
+.sidebar {
+  top: 0;
+  height: calc(100dvh - 24px);
+  overflow-y: auto;
+  background: linear-gradient(180deg, #761f1b 0%, #501513 100%);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.sidebar-brand .brand-kicker,
+.sidebar-card-title,
+.sidebar .sidebar-nav-label {
+  color: #ffc9c4;
+}
+
+.sidebar-brand .brand-title,
+.sidebar-brand .brand-subtitle {
+  color: #fff;
+}
+
+.sidebar-btn:not(.ghost) {
+  background: linear-gradient(135deg, #c9362b, #9f211b);
+  box-shadow: 0 12px 26px rgba(70, 13, 13, 0.3);
+}
+
+.sidebar-btn.ghost {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.sidebar-btn.ghost:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.sidebar-btn-short,
+.sidebar-badge {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: #ffe3e0;
+}
+
+.sidebar-badge.subtle {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #ffe3e0;
+}
+
+.content-shell {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 8px;
+}
+
+.container,
+.layout-grid,
+.panel {
+  min-width: 0;
+}
+
+.panel {
+  padding: clamp(16px, 2vw, 26px);
+}
+
+.panel h3,
+.hero-title,
+.ward-shift-entry-copy h3,
+.header-team-title {
+  color: var(--primary);
+}
+
+.sidebar-nav-label,
+.hint {
+  font-size: 14px;
+}
+
+button,
+.row button,
+.sidebar-btn:not(.ghost) {
+  background: linear-gradient(135deg, var(--primary), #d34b3f);
+  box-shadow: 0 8px 20px rgba(180, 35, 24, 0.16);
+}
+
+button:hover,
+.row button:hover {
+  background: linear-gradient(135deg, var(--primary-hover), #a92d23);
+}
+
+button.ghost,
+.row button.ghost,
+.sidebar-logout {
+  background: #fff;
+  color: var(--primary);
+  border-color: rgba(180, 35, 24, 0.28);
+  box-shadow: none;
+}
+
+button.ghost:hover,
+.row button.ghost:hover,
+.sidebar-logout:hover {
+  background: #fff1ef;
+  border-color: rgba(180, 35, 24, 0.42);
+}
+
+.hero-tab.active,
+.home-ward-grid .hero-tab.active {
+  background: linear-gradient(135deg, #b42318, #7f1d1d);
+  border-color: transparent;
+  color: #fff;
+}
+
+.dashboard-card {
+  border-top-color: rgba(180, 35, 24, 0.68);
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+.row input:focus,
+.row select:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(180, 35, 24, 0.14);
+}
+
+.psychology-table th,
+.social-service-table th,
+.social-service-form-section-title {
+  background: #fff0ee;
+  border-color: #f0c6c1;
+  color: #84221b;
+}
+
+.psychology-table tbody tr:hover td,
+.social-service-table tbody tr:hover td {
+  background: #fff4f2;
+}
+
+.workshift-start-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding: 18px 20px;
+  border: 1px solid rgba(180, 35, 24, 0.2);
+  border-radius: 18px;
+  background: linear-gradient(135deg, #fff6f4, #fff);
+  box-shadow: var(--shadow-sm);
+}
+
+.workshift-start-card .procedimentos-title {
+  color: var(--primary);
+}
+
+@media (max-width: 900px) {
+  .app-shell,
+  body.sidebar-collapsed .app-shell {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
+  .sidebar {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .content-shell {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .workshift-start-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workshift-start-card button {
+    width: 100%;
   }
 }

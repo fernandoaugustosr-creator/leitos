@@ -46,8 +46,6 @@ const supabaseTable = process.env.SUPABASE_TABLE || "app_state";
 const supabaseStateId = process.env.SUPABASE_STATE_ID || "main";
 const supabaseStateColumns = ["payload", "data"];
 const sessionSecret = String(process.env.SESSION_SECRET || supabaseKey || "controle-de-leitos-session-secret").trim();
-const localStateDir = path.join(__dirname, "..", "data");
-const localStateFile = path.join(localStateDir, "app-state.local.json");
 const debugOutDir = path.join(__dirname, "..", ".dbg");
 const debugSessionId = "browser-runtime-slow";
 const debugLogFile = path.join(debugOutDir, `trae-debug-log-${debugSessionId}.ndjson`);
@@ -99,7 +97,6 @@ const storageStatus = {
   localSnapshotAt: null
 };
 let storageInitializationPromise = null;
-let usingLocalFallback = false;
 let lastApiStateRefreshAt = 0;
 let apiStateRefreshPromise = null;
 
@@ -115,59 +112,6 @@ function appendDebugEvent(event = {}) {
   } catch {}
 }
 
-function shouldUseLocalFallback() {
-  return !isServerlessRuntime && process.env.ALLOW_LOCAL_FALLBACK !== "false";
-}
-
-function enableLocalFallback(error) {
-  usingLocalFallback = true;
-  storageStatus.provider = "local";
-  storageStatus.synced = true;
-  storageStatus.lastSyncAt = new Date().toISOString();
-  storageStatus.lastError = error?.message || null;
-}
-
-function disableLocalFallback() {
-  usingLocalFallback = false;
-  storageStatus.provider = "supabase";
-  storageStatus.configured = Boolean(supabaseUrl && supabaseKey);
-  storageStatus.lastError = null;
-}
-
-function ensureLocalStateDir() {
-  fs.mkdirSync(localStateDir, { recursive: true });
-}
-
-function readLocalStateEnvelope() {
-  try {
-    if (!fs.existsSync(localStateFile)) return null;
-    const raw = fs.readFileSync(localStateFile, "utf8");
-    if (!raw.trim()) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-    if (!parsed.payload || typeof parsed.payload !== "object") return null;
-    storageStatus.localSnapshotAt = parsed.savedAt || null;
-    storageStatus.pendingLocalSync = Boolean(parsed.pendingSync);
-    return parsed;
-  } catch (error) {
-    storageStatus.lastError = error.message;
-    return null;
-  }
-}
-
-function writeLocalStateEnvelope(pendingSync = false) {
-  ensureLocalStateDir();
-  const envelope = {
-    savedAt: new Date().toISOString(),
-    pendingSync,
-    payload: buildStatePayload()
-  };
-  fs.writeFileSync(localStateFile, JSON.stringify(envelope, null, 2), "utf8");
-  storageStatus.localSnapshotAt = envelope.savedAt;
-  storageStatus.pendingLocalSync = pendingSync;
-  return envelope;
-}
-
 function trackStorageError(error) {
   storageStatus.provider = "supabase";
   storageStatus.synced = false;
@@ -177,10 +121,6 @@ function trackStorageError(error) {
 async function ensureStorageInitialized() {
   if (!storageInitializationPromise) {
     storageInitializationPromise = initializeStorage().catch(error => {
-      if (shouldUseLocalFallback()) {
-        enableLocalFallback(error);
-        return false;
-      }
       trackStorageError(error);
       storageInitializationPromise = null;
       throw error;
@@ -1127,145 +1067,46 @@ async function loadStateFromSupabase() {
   throw lastError || new Error("Falha ao carregar do Supabase");
 }
 
-function loadStateFromLocalSnapshot() {
-  const localState = readLocalStateEnvelope();
-  if (!localState?.payload) return false;
-  const applied = applyStatePayload(localState.payload);
-  if (applied) {
-    storageStatus.provider = usingLocalFallback ? "local" : storageStatus.provider;
-    storageStatus.synced = true;
-    storageStatus.lastError = null;
-  }
-  return applied;
-}
-
-async function saveStateSnapshot(pendingSync = false) {
-  if (isServerlessRuntime) {
-    storageStatus.localSnapshotAt = null;
-    storageStatus.pendingLocalSync = false;
-    return true;
-  }
-
-  writeLocalStateEnvelope(pendingSync);
-  return true;
-}
-
-async function tryRecoverSupabaseSync() {
-  if (!usingLocalFallback || !hasSupabaseConfig()) return false;
-
-  const localState = readLocalStateEnvelope();
-  if (localState?.payload) {
-    applyStatePayload(localState.payload);
-  }
-
-  try {
-    ensureSupabaseConfigured();
-    await saveStateToSupabase();
-    await saveStateSnapshot(false);
-    disableLocalFallback();
-    return true;
-  } catch (error) {
-    enableLocalFallback(error);
-    return false;
-  }
-}
-
 async function persistState() {
-  if (usingLocalFallback) {
-    await saveStateSnapshot(true);
-    return false;
-  }
-
   try {
     ensureSupabaseConfigured();
     const saved = await saveStateToSupabase();
-    await saveStateSnapshot(false);
     return saved;
   } catch (error) {
-    if (shouldUseLocalFallback()) {
-      await saveStateSnapshot(true);
-      enableLocalFallback(error);
-      return false;
-    }
-    storageStatus.provider = "supabase";
-    storageStatus.synced = false;
-    storageStatus.lastError = error.message;
+    trackStorageError(error);
     throw error;
   }
 }
 
 async function initializeStorage() {
-  if (usingLocalFallback) {
-    return loadStateFromLocalSnapshot();
-  }
-
   try {
     ensureSupabaseConfigured();
-    const localState = readLocalStateEnvelope();
-    if (localState?.pendingSync && localState.payload) {
-      applyStatePayload(localState.payload);
-      await saveStateToSupabase();
-      await saveStateSnapshot(false);
-      disableLocalFallback();
-      return true;
-    }
-
     const loaded = await loadStateFromSupabase();
     if (!loaded) {
-      if (localState?.payload) {
-        applyStatePayload(localState.payload);
-      }
       await saveStateToSupabase();
-      await saveStateSnapshot(false);
-    } else {
-      await saveStateSnapshot(false);
     }
+    return loaded;
   } catch (error) {
-    if (shouldUseLocalFallback()) {
-      loadStateFromLocalSnapshot();
-      enableLocalFallback(error);
-      return false;
-    }
-    storageStatus.provider = "supabase";
-    storageStatus.synced = false;
-    storageStatus.lastError = error.message;
+    trackStorageError(error);
     throw error;
   }
 }
 
 async function refreshStateFromSupabase() {
-  if (usingLocalFallback) {
-    return tryRecoverSupabaseSync();
-  }
-
   try {
     ensureSupabaseConfigured();
     const loaded = await loadStateFromSupabase();
     if (!loaded) {
       await saveStateToSupabase();
-      await saveStateSnapshot(false);
-    } else {
-      await saveStateSnapshot(false);
     }
     return loaded;
   } catch (error) {
-    if (shouldUseLocalFallback()) {
-      loadStateFromLocalSnapshot();
-      enableLocalFallback(error);
-      return false;
-    }
-    storageStatus.provider = "supabase";
-    storageStatus.synced = false;
-    storageStatus.lastError = error.message;
+    trackStorageError(error);
     throw error;
   }
 }
 
 async function refreshStateFromSupabaseThrottled() {
-  if (usingLocalFallback) {
-    return tryRecoverSupabaseSync();
-  }
-
   const now = Date.now();
   if ((now - lastApiStateRefreshAt) < API_STATE_REFRESH_TTL_MS) {
     return false;
@@ -1293,22 +1134,22 @@ app.use("/api", async (req, res, next) => {
     hypothesisId: "B",
     location: "src/server.js:/api-middleware:start",
     msg: "[DEBUG] API middleware start",
-    data: { method: req.method, path: req.path, usingLocalFallback }
+    data: { method: req.method, path: req.path }
   });
   // #endregion
   try {
     await ensureStorageInitialized();
-    if (usingLocalFallback) {
-      await tryRecoverSupabaseSync();
-    } else {
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       await refreshStateFromSupabaseThrottled();
+    } else {
+      await refreshStateFromSupabase();
     }
     // #region debug-point B:api-sync-success
     appendDebugEvent({
       hypothesisId: "B",
       location: "src/server.js:/api-middleware:success",
       msg: "[DEBUG] API middleware success",
-      data: { method: req.method, path: req.path, usingLocalFallback, durationMs: Date.now() - startedAt }
+      data: { method: req.method, path: req.path, durationMs: Date.now() - startedAt }
     });
     // #endregion
     next();
@@ -1318,7 +1159,7 @@ app.use("/api", async (req, res, next) => {
       hypothesisId: "B",
       location: "src/server.js:/api-middleware:error",
       msg: "[DEBUG] API middleware error",
-      data: { method: req.method, path: req.path, usingLocalFallback, durationMs: Date.now() - startedAt, error: error.message }
+      data: { method: req.method, path: req.path, durationMs: Date.now() - startedAt, error: error.message }
     });
     // #endregion
     res.status(503).json({ error: "Falha na sincronização com o Supabase", detail: error.message });
