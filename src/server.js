@@ -2156,6 +2156,8 @@ function buildShiftReport(user, shift) {
     const timeMs = value ? new Date(value).getTime() : Number.NaN;
     return Number.isFinite(timeMs) && timeMs >= openedAtMs && timeMs <= closedAtMs;
   };
+  const shiftActions = (Array.isArray(shift.actions) ? shift.actions : [])
+    .filter(action => isWithinShiftWindow(action?.at));
   const buildAdmissionSegments = admission => {
     if (!admission) return [];
     const transfers = Array.isArray(admission.transferHistory)
@@ -2382,7 +2384,7 @@ function buildShiftReport(user, shift) {
     }
   }
 
-  for (const action of shift.actions || []) {
+  for (const action of shiftActions) {
     if (!actionBelongsToShiftWard(action)) continue;
     const meta = action.meta || {};
     const patientName = String(meta.patientName || meta.patient || meta.visitedPersonName || "").trim();
@@ -2486,7 +2488,7 @@ function buildShiftReport(user, shift) {
     }
   }
 
-  for (const action of shift.actions || []) {
+  for (const action of shiftActions) {
     const patient = findPatientFromAction(action.meta || {});
     const patientName = String(action.meta?.patientName || action.meta?.patient || "").trim();
     const bedId = action.meta?.bedId || action.meta?.fromBedId || action.meta?.toBedId || "";
@@ -2551,7 +2553,7 @@ function buildShiftReport(user, shift) {
     }
   }
 
-  for (const action of shift.actions || []) {
+  for (const action of shiftActions) {
     const procedimentos = Array.isArray(action.meta?.procedimentos) ? action.meta.procedimentos : [];
     for (const procedimento of procedimentos) {
       dispositivos[procedimento] = (dispositivos[procedimento] || 0) + 1;
@@ -2600,7 +2602,7 @@ function buildShiftReport(user, shift) {
     }
   }
 
-  for (const action of shift.actions || []) {
+  for (const action of shiftActions) {
     const openedItems = Array.isArray(action.meta?.pendenciasRegistradas) ? action.meta.pendenciasRegistradas : [];
     for (const item of openedItems) {
       addActivePending({
@@ -2682,7 +2684,7 @@ function buildShiftReport(user, shift) {
       dispositivos: topEntries(dispositivos, 20),
       pendenciasAtivas: activePendencias.length,
       pendenciasSolucionadas: solvedPendencias.length,
-      totalAlteracoes: (shift.actions || []).length
+      totalAlteracoes: shiftActions.length
     },
     patients: shiftPatients,
     movements: movementSummary,
@@ -2693,7 +2695,7 @@ function buildShiftReport(user, shift) {
     socialServiceRows: String(shift.serviceType || "").trim().toUpperCase() === "SERVICO_SOCIAL"
       ? buildSocialServiceShiftRows(shift)
       : [],
-    actions: (shift.actions || []).slice().reverse().map(action => ({
+    actions: shiftActions.slice().reverse().map(action => ({
       id: action.id,
       at: action.at,
       type: action.type,
@@ -4205,19 +4207,19 @@ app.post("/api/shifts/close", requireAuth, async (req, res) => {
     req.user.activeShift.nursingReportUpdatedAt = "";
     req.user.activeShift.nursingReportUpdatedBy = "";
   }
-  req.user.activeShift.closedAt = new Date().toISOString();
   const closingShift = req.user.activeShift;
   if (String(closingShift.serviceType || "").trim().toUpperCase() === "SERVICO_SOCIAL") {
     closingShift.socialServiceAttendances = getSocialServiceAttendancesForShift(closingShift);
     closingShift.socialServiceSnapshot = buildSocialServiceSnapshotRows();
   }
-  addUserAction(req.user, "SHIFT_CLOSE", getServiceShiftLabel(closingShift.serviceType || "")
+  const closeAction = addUserAction(req.user, "SHIFT_CLOSE", getServiceShiftLabel(closingShift.serviceType || "")
     ? `Fechou plantão de ${getServiceShiftLabel(closingShift.serviceType || "")}`
     : `Fechou plantão no setor ${closingShift.wardNome}`, {
     serviceType: closingShift.serviceType || "",
     wardId: closingShift.wardId,
     wardNome: closingShift.wardNome
   });
+  closingShift.closedAt = closeAction.at;
   const report = buildShiftReport(req.user, closingShift);
   if (String(closingShift.serviceType || "").trim().toUpperCase() === "SERVICO_SOCIAL") {
     clearActiveSocialServiceShiftDrafts();
