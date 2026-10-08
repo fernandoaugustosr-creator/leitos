@@ -1151,6 +1151,10 @@ function syncPsychologyShiftFormVisibility() {
   const openButton = document.getElementById("btn-open-psychology-shift");
   const closeButton = document.getElementById("btn-close-psychology-shift");
   if (openButton) openButton.disabled = Boolean(psychShift);
+  if (openButton) {
+    openButton.classList.toggle("shift-open-active", Boolean(psychShift));
+    openButton.textContent = psychShift ? "Plantão aberto" : "Abrir plantão";
+  }
   if (closeButton) closeButton.disabled = false;
 }
 
@@ -1164,6 +1168,10 @@ function syncSocialServiceShiftFormVisibility() {
   const openButton = document.getElementById("btn-open-social-service-shift");
   const closeButton = document.getElementById("btn-close-social-service-shift");
   if (openButton) openButton.disabled = Boolean(socialShift);
+  if (openButton) {
+    openButton.classList.toggle("shift-open-active", Boolean(socialShift));
+    openButton.textContent = socialShift ? "Plantão aberto" : "Abrir plantão";
+  }
   if (closeButton) closeButton.disabled = false;
 }
 
@@ -6023,7 +6031,11 @@ function renderCurrentUser() {
   const openButton = document.getElementById("btn-open-shift");
   const closeButton = document.getElementById("btn-close-shift");
   const openTeamButton = document.getElementById("btn-open-team-modal");
-  if (openButton) openButton.disabled = Boolean(activeShift);
+  if (openButton) {
+    openButton.disabled = Boolean(activeShift);
+    openButton.classList.toggle("shift-open-active", Boolean(activeShift));
+    openButton.textContent = activeShift ? "Plantão aberto" : "Abrir plantão";
+  }
   if (closeButton) closeButton.disabled = !activeShift;
   if (openTeamButton) openTeamButton.disabled = !activeShift;
   if (saveShiftNursingReportButton) saveShiftNursingReportButton.disabled = !activeShift;
@@ -8062,7 +8074,6 @@ async function startApp(options = {}) {
   }
   setAppEnabled(false);
   showOnly("view-home");
-  maybeOpenStartWardModal();
 }
 
 async function checkAuth() {
@@ -8743,7 +8754,14 @@ async function closeActiveShift(options = {}) {
     return;
   }
 
-  if (!confirm("Fechar o plantão e imprimir a ficha de resumo?")) return;
+  let password;
+  try {
+    password = await requestShiftClosePassword();
+  } catch (error) {
+    feedback(error.message || "Nao foi possivel solicitar a senha para fechar o plantao.", true);
+    return;
+  }
+  if (password === null) return;
 
   if (psychologyMode || normalizedExpectedServiceType === "PSICOLOGIA") {
     try {
@@ -8761,7 +8779,7 @@ async function closeActiveShift(options = {}) {
     const res = await api("/api/shifts/close", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nursingReport })
+      body: JSON.stringify({ nursingReport, password })
     });
     currentUser = res.user || currentUser;
     if (socialServiceMode) {
@@ -8798,10 +8816,49 @@ async function closeActiveShift(options = {}) {
     }
     setAppEnabled(false);
     showOnly("view-home");
-    window.setTimeout(maybeOpenStartWardModal, 250);
   } catch (error) {
     feedback(error.message || "Nao foi possivel fechar o plantao.", true);
   }
+}
+
+function requestShiftClosePassword() {
+  const dialog = document.getElementById("modal-shift-close-password");
+  const form = document.getElementById("shift-close-password-form");
+  const input = document.getElementById("shift-close-password");
+  const cancelButton = document.getElementById("btn-cancel-close-shift");
+  if (!dialog || !form || !input || !cancelButton) {
+    return Promise.reject(new Error("Não foi possível solicitar a senha para fechar o plantão."));
+  }
+
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = password => {
+      if (settled) return;
+      settled = true;
+      dialog.removeEventListener("cancel", onCancel);
+      form.removeEventListener("submit", onSubmit);
+      cancelButton.removeEventListener("click", onCancelClick);
+      dialog.close();
+      input.value = "";
+      resolve(password);
+    };
+    const onCancel = event => {
+      event.preventDefault();
+      finish(null);
+    };
+    const onCancelClick = () => finish(null);
+    const onSubmit = event => {
+      event.preventDefault();
+      if (!form.reportValidity()) return;
+      finish(input.value);
+    };
+
+    form.addEventListener("submit", onSubmit);
+    dialog.addEventListener("cancel", onCancel);
+    cancelButton.addEventListener("click", onCancelClick);
+    dialog.showModal();
+    input.focus();
+  });
 }
 
 async function saveShiftNursingReport() {

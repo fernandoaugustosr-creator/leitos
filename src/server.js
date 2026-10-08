@@ -4278,6 +4278,10 @@ app.patch("/api/shifts/nursing-report", requireAuth, async (req, res) => {
 
 app.post("/api/shifts/close", requireAuth, async (req, res) => {
   if (!req.user.activeShift) return res.status(400).json({ error: "Não há plantão aberto para este usuário" });
+  const closePassword = String(req.body?.password || "");
+  if (!closePassword || closePassword !== String(req.user.password || "")) {
+    return res.status(403).json({ error: "Senha incorreta. O plantão continua aberto." });
+  }
   req.user.activeShift.nursingReport = String(req.body?.nursingReport || req.user.activeShift.nursingReport || "").trim();
   if (req.user.activeShift.nursingReport) {
     req.user.activeShift.nursingReportUpdatedAt = new Date().toISOString();

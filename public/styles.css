@@ -3971,3 +3971,40 @@ a:focus-visible,
     grid-template-columns: 1fr;
   }
 }
+
+.modal.shift-close-password-modal {
+  width: min(460px, calc(100vw - 24px));
+}
+
+button.shift-open-active:not(.ghost),
+button.shift-open-active:not(.ghost):hover,
+button.shift-open-active:not(.ghost):disabled {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+  cursor: default;
+  opacity: 1;
+  transform: none;
+}
+
+.home-ward-grid {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 170px), 1fr));
+  gap: 12px;
+  overflow: visible;
+  flex-wrap: initial;
+}
+
+.home-ward-grid .hero-tab {
+  min-width: 0;
+  min-height: 76px;
+  padding: 12px;
+  border-radius: 14px;
+}
+
+@media (max-width: 640px) {
+  .home-ward-grid {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 140px), 1fr));
+  }
+}

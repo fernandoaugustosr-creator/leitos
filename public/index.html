@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Controle de Leitos - Posto 2</title>
-  <link rel="stylesheet" href="/styles.css?v=20261008-5">
+  <link rel="stylesheet" href="/styles.css?v=20261008-6">
 </head>
 <body>
   <div class="app-shell">
@@ -919,6 +919,24 @@
     </form>
   </dialog>
 
+  <dialog id="modal-shift-close-password" class="modal shift-close-password-modal">
+    <form id="shift-close-password-form" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">Confirmar fechamento do plantão</div>
+      </div>
+      <div class="modal-body">
+        <div class="hint">Digite sua senha para confirmar o fechamento. O plantão continuará aberto se a senha estiver incorreta.</div>
+        <label>Senha
+          <input id="shift-close-password" type="password" autocomplete="current-password" required>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-cancel-close-shift" type="button">Cancelar</button>
+        <button type="submit" class="danger">Confirmar fechamento</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="modal-paciente" class="modal">
     <form method="dialog" class="modal-content">
       <div class="modal-header">
@@ -1236,6 +1254,6 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=20261008-6"></script>
+  <script src="/app.js?v=20261008-7"></script>
 </body>
 </html>
