@@ -1574,6 +1574,7 @@ function ensurePatientRecordFromBed(bed) {
 }
 
 function createAdmissionRecord(ward, bed, actor) {
+  const recordedAt = new Date().toISOString();
   return {
     id: createRecordId(),
     wardId: ward.id,
@@ -1581,9 +1582,10 @@ function createAdmissionRecord(ward, bed, actor) {
     bedId: bed.id,
     enfermaria: bed.enfermaria || "",
     admittedAt: bed.admissao || getCurrentIsoDate(),
+    admissionEventAt: recordedAt,
     dischargedAt: null,
     outcome: null,
-    updatedAt: new Date().toISOString(),
+    updatedAt: recordedAt,
     updatedBy: actor,
     transferHistory: []
   };
@@ -2131,33 +2133,15 @@ function addShiftSolvedPendings(user, wardId, items) {
 function buildShiftReport(user, shift) {
   const ward = wards.find(item => item.id === shift.wardId);
   const beds = ward ? ward.beds.map(bed => normalizeBedData({ ...bed })) : [];
-  const occupiedBeds = beds
-    .filter(bed => bed.status === "OCUPADO")
-    .sort((a, b) => a.id - b.id)
-    .map(bed => ({
-      leito: bed.id,
-      enfermaria: bed.enfermaria || "",
-      nome: bed.nome || "",
-      admissao: bed.admissao || "",
-      diagnostico: bed.diagnostico || "",
-      pendencias: bed.pendencias || "",
-      nir: bed.nir || "",
-      procedimentos: Array.isArray(bed.procedimentos) ? bed.procedimentos : []
-    }));
   const openedAtMs = shift.openedAt ? new Date(shift.openedAt).getTime() : 0;
   const closedAtMs = shift.closedAt ? new Date(shift.closedAt).getTime() : Date.now();
-  const overlapsShiftWindow = (startAt, endAt = "") => {
-    const startMs = startAt ? new Date(startAt).getTime() : 0;
-    const endMs = endAt ? new Date(endAt).getTime() : Date.now();
-    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return false;
-    return startMs <= closedAtMs && endMs >= openedAtMs;
-  };
   const isWithinShiftWindow = value => {
     const timeMs = value ? new Date(value).getTime() : Number.NaN;
     return Number.isFinite(timeMs) && timeMs >= openedAtMs && timeMs <= closedAtMs;
   };
   const shiftActions = (Array.isArray(shift.actions) ? shift.actions : [])
     .filter(action => isWithinShiftWindow(action?.at));
+  const patientsAtOpen = Array.isArray(shift.patientsAtOpen) ? shift.patientsAtOpen : [];
   const buildAdmissionSegments = admission => {
     if (!admission) return [];
     const transfers = Array.isArray(admission.transferHistory)
@@ -2169,7 +2153,8 @@ function buildShiftReport(user, shift) {
       wardNome: admission.wardNome || "",
       bedId: admission.bedId,
       enfermaria: admission.enfermaria || "",
-      startedAt: admission.admittedAt || "",
+      startedAt: admission.admissionEventAt
+        || (String(admission.admittedAt || "").includes("T") ? admission.admittedAt : ""),
       endedAt: admission.dischargedAt || ""
     };
 
@@ -2276,11 +2261,15 @@ function buildShiftReport(user, shift) {
     if ([meta.wardId, meta.toWardId, meta.fromWardId].some(value => Number(value) === shiftWardId)) {
       return true;
     }
-    return [
+    if ([
       meta.wardNome,
       meta.toWardNome,
       meta.fromWardNome
-    ].some(value => normalizePersonName(value) === shiftWardName);
+    ].some(value => normalizePersonName(value) === shiftWardName)) {
+      return true;
+    }
+    const patient = findPatientFromAction(meta);
+    return Boolean(patient && shiftPatientsMap.has(getShiftPatientKey(patient)));
   };
   const findPatientFromAction = meta => {
     const patientId = Number(meta?.patientId);
@@ -2337,13 +2326,69 @@ function buildShiftReport(user, shift) {
   });
   const shiftPatientsMap = new Map();
 
+  for (const snapshot of patientsAtOpen) {
+    const patient = patientRegistry.find(item =>
+      !item?.deletedAt && Number(item.id) === Number(snapshot.patientId)
+    );
+    const currentAdmission = patient?.currentAdmission;
+    const currentBed = beds.find(bed =>
+      (
+        (Number(bed.id) === Number(currentAdmission?.bedId)
+          && Number(currentAdmission?.wardId) === Number(shift.wardId))
+        || (Number(bed.id) === Number(snapshot.bedId)
+          && getPatientIdentityKey(bed) === getPatientIdentityKey(snapshot))
+      )
+      && isBedOccupiedByPatient(bed)
+      && getPatientIdentityKey(bed) === getPatientIdentityKey(snapshot)
+    );
+    const socialSupport = buildPatientSocialSupport(patient?.socialSupport);
+    const socialFormDone = hasPatientSocialFormData(socialSupport.socialForm);
+    const entry = {
+      id: snapshot.patientId,
+      leito: snapshot.bedId || "",
+      enfermaria: snapshot.enfermaria || "",
+      nome: snapshot.nome || "",
+      cpf: snapshot.cpf || "",
+      birthDate: snapshot.birthDate || "",
+      idade: getPatientAgeLabel(snapshot.birthDate || "") || "",
+      telefone: snapshot.telefone || "",
+      admissao: snapshot.admissao || "",
+      alta: "",
+      diagnostico: snapshot.diagnostico || "",
+      nir: snapshot.nir || "",
+      cil: snapshot.cil || "",
+      nirStatus: patient ? getPatientNirStatus(patient) : "Inativo",
+      socialStatus: socialFormDone
+        ? "Concluído"
+        : getRequestStatusLabel(snapshot.serviceSocialRequest),
+      psychologyStatus: getRequestStatusLabel(snapshot.psychologyRequest),
+      pendencias: snapshot.pendencias || "",
+      procedimentos: Array.isArray(snapshot.procedimentos) ? snapshot.procedimentos : [],
+      ativoNoFechamento: Boolean(currentBed)
+    };
+    const patientKey = getShiftPatientKey(patient, {
+      id: entry.id,
+      cpf: entry.cpf,
+      nome: entry.nome,
+      birthDate: entry.birthDate,
+      bedId: entry.leito
+    });
+    if (patientKey) shiftPatientsMap.set(patientKey, entry);
+  }
+
   for (const patient of patientRegistry) {
     if (patient?.deletedAt) continue;
     const admissions = getMergedPatientAdmissions(patient);
     for (const admission of admissions) {
-      const segments = buildAdmissionSegments(admission).filter(segment =>
-        Number(segment.wardId) === Number(shift.wardId) && overlapsShiftWindow(segment.startedAt, segment.endedAt)
-      );
+      const segments = buildAdmissionSegments(admission).filter(segment => {
+        if (Number(segment.wardId) !== Number(shift.wardId)) return false;
+        const wasAtOpen = patientsAtOpen.some(snapshot =>
+          Number(snapshot.patientId) === Number(patient.id)
+          && Number(snapshot.bedId) === Number(segment.bedId)
+          && String(snapshot.enfermaria || "") === String(segment.enfermaria || "")
+        );
+        return wasAtOpen || isWithinShiftWindow(segment.startedAt) || isWithinShiftWindow(segment.endedAt);
+      });
       if (!segments.length) continue;
 
       const latestSegment = segments[segments.length - 1];
@@ -2438,7 +2483,9 @@ function buildShiftReport(user, shift) {
     if (!patientKey) continue;
     shiftPatientsMap.set(patientKey, mergeShiftPatientRecord(shiftPatientsMap.get(patientKey), entry));
   }
+  const shiftWardActions = shiftActions.filter(action => actionBelongsToShiftWard(action));
   const shiftPatients = Array.from(shiftPatientsMap.values())
+    .filter(patient => patient.ativoNoFechamento)
     .sort((a, b) =>
       String(a.enfermaria || "").localeCompare(String(b.enfermaria || ""), "pt-BR")
       || Number(a.leito || 0) - Number(b.leito || 0)
@@ -2457,13 +2504,13 @@ function buildShiftReport(user, shift) {
     if (patient?.deletedAt) continue;
     const admissions = getMergedPatientAdmissions(patient);
     for (const admission of admissions) {
-      if (Number(admission?.wardId) === Number(shift.wardId) && isWithinShiftWindow(admission?.admittedAt)) {
+      if (Number(admission?.wardId) === Number(shift.wardId) && isWithinShiftWindow(admission?.admissionEventAt)) {
         movementSummary.admissions.push(buildMovementEntry({
           kind: "ADMISSAO",
           patient,
           bedId: admission?.bedId || "",
           enfermaria: admission?.enfermaria || "",
-          at: admission?.admittedAt || "",
+          at: admission?.admissionEventAt || "",
           detail: admission?.closeReason || patient?.diagnostico || ""
         }));
       }
@@ -2488,7 +2535,7 @@ function buildShiftReport(user, shift) {
     }
   }
 
-  for (const action of shiftActions) {
+  for (const action of shiftWardActions) {
     const patient = findPatientFromAction(action.meta || {});
     const patientName = String(action.meta?.patientName || action.meta?.patient || "").trim();
     const bedId = action.meta?.bedId || action.meta?.fromBedId || action.meta?.toBedId || "";
@@ -2547,13 +2594,13 @@ function buildShiftReport(user, shift) {
   const obitos = movementSummary.obitos.length;
   const dispositivos = {};
 
-  for (const patient of occupiedBeds) {
+  for (const patient of shiftPatients) {
     for (const procedimento of patient.procedimentos) {
       dispositivos[procedimento] = (dispositivos[procedimento] || 0) + 1;
     }
   }
 
-  for (const action of shiftActions) {
+  for (const action of shiftWardActions) {
     const procedimentos = Array.isArray(action.meta?.procedimentos) ? action.meta.procedimentos : [];
     for (const procedimento of procedimentos) {
       dispositivos[procedimento] = (dispositivos[procedimento] || 0) + 1;
@@ -2589,7 +2636,10 @@ function buildShiftReport(user, shift) {
         finishedBy: pendencia.finishedBy
       };
 
-      if (pendencia.status !== "FINALIZADA") {
+      if (
+        pendencia.status !== "FINALIZADA"
+        && isWithinShiftWindow(pendencia.createdAt)
+      ) {
         addActivePending(baseItem);
       }
 
@@ -2602,7 +2652,7 @@ function buildShiftReport(user, shift) {
     }
   }
 
-  for (const action of shiftActions) {
+  for (const action of shiftWardActions) {
     const openedItems = Array.isArray(action.meta?.pendenciasRegistradas) ? action.meta.pendenciasRegistradas : [];
     for (const item of openedItems) {
       addActivePending({
@@ -2674,7 +2724,7 @@ function buildShiftReport(user, shift) {
     },
     summary: {
       pacientesNoPeriodo: shiftPatients.length,
-      pacientesAtivos: occupiedBeds.length,
+      pacientesAtivos: shiftPatients.length,
       altas,
       obitos,
       admissoes: movementSummary.admissions.length,
@@ -2684,7 +2734,7 @@ function buildShiftReport(user, shift) {
       dispositivos: topEntries(dispositivos, 20),
       pendenciasAtivas: activePendencias.length,
       pendenciasSolucionadas: solvedPendencias.length,
-      totalAlteracoes: shiftActions.length
+      totalAlteracoes: shiftWardActions.length
     },
     patients: shiftPatients,
     movements: movementSummary,
@@ -2695,7 +2745,7 @@ function buildShiftReport(user, shift) {
     socialServiceRows: String(shift.serviceType || "").trim().toUpperCase() === "SERVICO_SOCIAL"
       ? buildSocialServiceShiftRows(shift)
       : [],
-    actions: shiftActions.slice().reverse().map(action => ({
+    actions: shiftWardActions.slice().reverse().map(action => ({
       id: action.id,
       at: action.at,
       type: action.type,
@@ -4105,6 +4155,30 @@ app.post("/api/shifts/open", requireAuth, async (req, res) => {
   const ownerName = req.user.nome || req.user.username;
   const defaultNurseDay = shiftLength === "24H" || shiftPeriod === "DIA" || shiftPeriod === "COMPLETO" ? ownerName : "";
   const defaultNurseNight = shiftLength === "24H" || shiftPeriod === "NOITE" || shiftPeriod === "COMPLETO" ? ownerName : "";
+  const patientsAtOpen = isStandaloneService
+    ? []
+    : ward.beds
+      .filter(isBedOccupiedByPatient)
+      .map(bed => {
+        const patient = ensurePatientRecordFromBed(bed);
+        return {
+          patientId: patient.id,
+          bedId: bed.id,
+          enfermaria: bed.enfermaria || "",
+          nome: bed.nome || "",
+          cpf: normalizeCpf(bed.cpf),
+          birthDate: bed.birthDate || "",
+          telefone: patient.phone || "",
+          admissao: bed.admissao || "",
+          diagnostico: bed.diagnostico || "",
+          nir: bed.nir || "",
+          cil: bed.cil || "",
+          serviceSocialRequest: buildBedRequestState(bed.serviceSocialRequest),
+          psychologyRequest: buildBedRequestState(bed.psychologyRequest),
+          pendencias: bed.pendencias || "",
+          procedimentos: Array.isArray(bed.procedimentos) ? [...bed.procedimentos] : []
+        };
+      });
 
   req.user.activeShift = {
     id: nextShiftId++,
@@ -4118,6 +4192,7 @@ app.post("/api/shifts/open", requireAuth, async (req, res) => {
     ownerName,
     shiftLength,
     shiftPeriod,
+    patientsAtOpen,
     team: {
       medicoPlantao: "",
       enfermeiroDia: defaultNurseDay,

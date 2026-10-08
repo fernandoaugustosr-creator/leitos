@@ -6464,7 +6464,6 @@ function printShiftReport(report) {
       <td>${patient.psychologyStatus || "-"}</td>
       <td>${(patient.procedimentos || []).join(", ")}</td>
       <td>${patient.pendencias || "-"}</td>
-      <td>${patient.ativoNoFechamento ? "Sim" : "Nao"}</td>
     </tr>
   `).join("");
   const activePendings = (report.pending?.active || []).map(item => `
@@ -6487,32 +6486,6 @@ function printShiftReport(report) {
       <td>${toBRDateTime(item.finishedAt)}</td>
     </tr>
   `).join("");
-  const actionRows = (report.actions || []).map(action => {
-    const meta = [];
-    if (action.meta?.bedId) meta.push(`Leito ${action.meta.bedId}`);
-    if (action.meta?.patientName) meta.push(`Paciente: ${action.meta.patientName}`);
-    else if (action.meta?.patient) meta.push(`Paciente: ${action.meta.patient}`);
-    if (action.meta?.visitedPersonName && action.meta?.visitedPersonName !== action.meta?.patientName) {
-      meta.push(`Visitado: ${action.meta.visitedPersonName}`);
-    }
-    if (action.meta?.wardNome) meta.push(`Setor: ${action.meta.wardNome}`);
-    if (action.meta?.toWardNome) meta.push(`Destino: ${action.meta.toWardNome}${action.meta?.toBedId ? ` / Leito ${action.meta.toBedId}` : ""}`);
-    if (Array.isArray(action.meta?.procedimentos) && action.meta.procedimentos.length) meta.push(`Procedimentos: ${action.meta.procedimentos.join(", ")}`);
-    if (Array.isArray(action.meta?.pendenciasRegistradas) && action.meta.pendenciasRegistradas.length) {
-      meta.push(`Pendências abertas: ${action.meta.pendenciasRegistradas.map(item => item.texto).join(", ")}`);
-    }
-    if (Array.isArray(action.meta?.pendenciasFinalizadas) && action.meta.pendenciasFinalizadas.length) {
-      meta.push(`Pendências finalizadas: ${action.meta.pendenciasFinalizadas.map(item => item.texto).join(", ")}`);
-    }
-    return `
-      <tr>
-        <td>${toBRDateTime(action.at)}</td>
-        <td>${action.authorName || action.username || "-"}</td>
-        <td>${action.description || "-"}</td>
-        <td>${meta.join(" • ") || "-"}</td>
-      </tr>
-    `;
-  }).join("");
   const movements = report.movements || {};
   const win = window.open("", "_blank", "width=1100,height=800");
   if (!win) return;
@@ -6577,14 +6550,13 @@ function printShiftReport(report) {
         <div class="meta-card"><strong>Período</strong><span>${toBRDateTime(report.shift?.openedAt)}<br>até ${toBRDateTime(report.shift?.closedAt)}</span></div>
       </div>
       <div class="summary-grid">
-        <div class="summary-card"><strong>Pacientes no dia</strong><div>${report.summary?.pacientesNoPeriodo ?? report.patients?.length ?? 0}</div></div>
+        <div class="summary-card"><strong>Ativos no fechamento</strong><div>${report.summary?.pacientesAtivos ?? report.patients?.length ?? 0}</div></div>
         <div class="summary-card"><strong>Admissões</strong><div>${report.summary?.admissoes ?? 0}</div></div>
         <div class="summary-card"><strong>Transf. internas</strong><div>${report.summary?.transferenciasInternas ?? 0}</div></div>
         <div class="summary-card"><strong>Transf. externas</strong><div>${report.summary?.transferenciasExternas ?? 0}</div></div>
         <div class="summary-card"><strong>Altas</strong><div>${report.summary?.altas ?? 0}</div></div>
         <div class="summary-card"><strong>Óbitos</strong><div>${report.summary?.obitos ?? 0}</div></div>
         <div class="summary-card"><strong>Evasões</strong><div>${report.summary?.evasoes ?? 0}</div></div>
-        <div class="summary-card"><strong>Alterações</strong><div>${report.summary?.totalAlteracoes ?? 0}</div></div>
         <div class="summary-card"><strong>Pendências ativas</strong><div>${report.summary?.pendenciasAtivas ?? 0}</div></div>
         <div class="summary-card"><strong>Pendências solucionadas</strong><div>${report.summary?.pendenciasSolucionadas ?? 0}</div></div>
       </div>
@@ -6610,11 +6582,11 @@ function printShiftReport(report) {
         <div class="device-grid">${devices}</div>
       </div>
       <div class="section">
-        <div class="section-title"><h2>Pacientes internados no período</h2><span>${(report.patients || []).length} paciente(s)</span></div>
-        <div class="section-subtitle">Aqui aparecem todos os pacientes que passaram internados neste setor durante o plantão, com campos assistenciais e status do NIR, Serviço Social e Psicologia.</div>
+        <div class="section-title"><h2>Pacientes ativos no fechamento</h2><span>${(report.patients || []).length} paciente(s)</span></div>
+        <div class="section-subtitle">Lista os pacientes que permaneceram internados neste setor até o fechamento. Pacientes que receberam baixa durante o plantão aparecem nas movimentações.</div>
         <table>
-          <thead><tr><th>Local</th><th>Paciente</th><th>Telefone</th><th>Período</th><th>Diagnóstico</th><th>NIR</th><th>Serv. Social</th><th>Psicologia</th><th>Dispositivos</th><th>Pendências</th><th>Ativo</th></tr></thead>
-          <tbody>${patients || '<tr><td colspan="11">Nenhum paciente internado neste plantão.</td></tr>'}</tbody>
+          <thead><tr><th>Local</th><th>Paciente</th><th>Telefone</th><th>Período</th><th>Diagnóstico</th><th>NIR</th><th>Serv. Social</th><th>Psicologia</th><th>Dispositivos</th><th>Pendências</th></tr></thead>
+          <tbody>${patients || '<tr><td colspan="10">Nenhum paciente ativo no fechamento deste plantão.</td></tr>'}</tbody>
         </table>
       </div>
       <div class="section">
@@ -6631,14 +6603,6 @@ function printShiftReport(report) {
         <table>
           <thead><tr><th>Leito</th><th>Enfermaria</th><th>Paciente</th><th>Pendência</th><th>Finalizado por</th><th>Data</th></tr></thead>
           <tbody>${solvedPendings || '<tr><td colspan="6">Nenhuma pendência solucionada neste plantão.</td></tr>'}</tbody>
-        </table>
-      </div>
-      <div class="section">
-        <div class="section-title"><h2>Histórico de alterações do plantão</h2><span>${report.summary?.totalAlteracoes ?? 0} alteração(ões)</span></div>
-        <div class="section-subtitle">Registro cronológico das ações realizadas durante o plantão.</div>
-        <table>
-          <thead><tr><th>Data</th><th>Registrado por</th><th>Ação</th><th>Detalhes</th></tr></thead>
-          <tbody>${actionRows || '<tr><td colspan="4">Nenhuma alteração registrada neste plantão.</td></tr>'}</tbody>
         </table>
       </div>
       <div class="section">
