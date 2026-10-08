@@ -96,9 +96,14 @@ const storageStatus = {
   pendingLocalSync: false,
   localSnapshotAt: null
 };
+const localStateFiles = [
+  path.join(__dirname, "..", "data", "app-state.local.pending-backup.json"),
+  path.join(__dirname, "..", "data", "app-state.local.json")
+];
 let storageInitializationPromise = null;
 let lastApiStateRefreshAt = 0;
 let apiStateRefreshPromise = null;
+let latestSupabaseStatePayload = null;
 
 function appendDebugEvent(event = {}) {
   try {
@@ -1027,8 +1032,62 @@ async function saveStateToSupabase() {
   throw lastError || new Error("Falha ao salvar no Supabase");
 }
 
+function getStatePayloadTimestamp(payload) {
+  if (!payload || typeof payload !== "object") return 0;
+  const sourceValue = payload.updatedAt || payload.savedAt || payload.lastSyncAt || "";
+  const timestamp = Date.parse(String(sourceValue));
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function readLocalStateFile(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const payload = parsed.payload && typeof parsed.payload === "object" ? parsed.payload : parsed;
+    if (!payload || !Array.isArray(payload.wards)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function findNewestLocalStatePayload() {
+  let newest = null;
+
+  for (const filePath of localStateFiles) {
+    const candidate = readLocalStateFile(filePath);
+    if (!candidate) continue;
+    if (!newest || getStatePayloadTimestamp(candidate) > getStatePayloadTimestamp(newest)) {
+      newest = candidate;
+    }
+  }
+
+  return newest;
+}
+
+function applyLocalStateIfNewerThanSupabase(remotePayload = null) {
+  const localPayload = findNewestLocalStatePayload();
+  if (!localPayload) return false;
+
+  const localTimestamp = getStatePayloadTimestamp(localPayload);
+  const remoteTimestamp = getStatePayloadTimestamp(remotePayload);
+
+  if (localTimestamp <= remoteTimestamp) return false;
+
+  const applied = applyStatePayload(localPayload);
+  storageStatus.provider = "supabase";
+  storageStatus.synced = applied;
+  storageStatus.lastSyncAt = new Date().toISOString();
+  storageStatus.lastError = null;
+  storageStatus.pendingLocalSync = false;
+  storageStatus.localSnapshotAt = new Date(localTimestamp).toISOString();
+  return applied;
+}
+
 async function loadStateFromSupabase() {
   if (!hasSupabaseConfig()) return false;
+  latestSupabaseStatePayload = null;
   let lastError = null;
 
   for (const column of supabaseStateColumns) {
@@ -1056,7 +1115,8 @@ async function loadStateFromSupabase() {
       return false;
     }
 
-    const applied = applyStatePayload(rows[0][column]);
+    latestSupabaseStatePayload = rows[0][column];
+    const applied = applyStatePayload(latestSupabaseStatePayload);
     storageStatus.provider = "supabase";
     storageStatus.synced = applied;
     storageStatus.lastSyncAt = new Date().toISOString();
@@ -1082,6 +1142,10 @@ async function initializeStorage() {
   try {
     ensureSupabaseConfigured();
     const loaded = await loadStateFromSupabase();
+    if (applyLocalStateIfNewerThanSupabase(latestSupabaseStatePayload)) {
+      await saveStateToSupabase();
+      return true;
+    }
     if (!loaded) {
       await saveStateToSupabase();
     }
@@ -1096,6 +1160,10 @@ async function refreshStateFromSupabase() {
   try {
     ensureSupabaseConfigured();
     const loaded = await loadStateFromSupabase();
+    if (applyLocalStateIfNewerThanSupabase(latestSupabaseStatePayload)) {
+      await saveStateToSupabase();
+      return true;
+    }
     if (!loaded) {
       await saveStateToSupabase();
     }

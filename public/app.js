@@ -615,25 +615,42 @@ function renderBarGroup(containerId, items, options = {}) {
     return;
   }
 
-  const maxValue = Math.max(1, ...items.map(item => options.valueKey ? item[options.valueKey] : item.value));
+  const maxValue = Math.max(1, ...items.map(item => {
+    const rawValue = options.valueKey ? Number(item?.[options.valueKey]) : Number(item?.value ?? 0);
+    return Number.isFinite(rawValue) ? rawValue : 0;
+  }));
+
   for (const [index, item] of items.entries()) {
     const label = options.labelKey ? item[options.labelKey] : item.label;
-    const value = options.valueKey ? item[options.valueKey] : item.value;
+    const value = options.valueKey ? Number(item?.[options.valueKey] ?? 0) : Number(item?.value ?? 0);
+    const percentageFromMetric = Number(item?.percent ?? item?.percentage ?? item?.porcentagem ?? item?.taxa ?? "");
+    const percentageValue = Number.isFinite(percentageFromMetric) && percentageFromMetric >= 0
+      ? percentageFromMetric
+      : Math.max(0, (value / maxValue) * 100);
+    const normalizedPercent = Math.min(100, percentageValue);
     const row = document.createElement("div");
     row.className = "bar-row";
+
     const labelEl = document.createElement("div");
     labelEl.className = "bar-label";
     labelEl.textContent = label;
+
     const track = document.createElement("div");
     track.className = "bar-track";
+
     const fill = document.createElement("div");
     const colorClass = options.getColorClass ? options.getColorClass(item, index) : item.colorClass;
     fill.className = `bar-fill ${colorClass || ""}`.trim();
-    fill.style.width = `${Math.max(8, Math.round((value / maxValue) * 100))}%`;
+    fill.style.width = `${normalizedPercent}%`;
     track.appendChild(fill);
+
     const valueEl = document.createElement("div");
     valueEl.className = "bar-value";
-    valueEl.textContent = options.formatValue ? options.formatValue(item) : String(value);
+    const formattedPercent = options.formatValue
+      ? options.formatValue(item, normalizedPercent)
+      : `${normalizedPercent.toFixed(normalizedPercent % 1 === 0 ? 0 : 1)}%`;
+    valueEl.textContent = formattedPercent;
+
     row.append(labelEl, track, valueEl);
     container.appendChild(row);
   }
