@@ -4008,3 +4008,74 @@ button.shift-open-active:not(.ghost):disabled {
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 140px), 1fr));
   }
 }
+
+:root {
+  --primary: #1f4b91;
+  --primary-hover: #173b78;
+  --bg-main: #edf3fb;
+  --bg-panel: #fff;
+  --text-main: #1b2b45;
+  --text-muted: #60728d;
+  --border: #d3dfef;
+  --sidebar: #173b78;
+  --sidebar-soft: rgba(31, 75, 145, 0.1);
+  --shadow: 0 12px 32px rgba(23, 59, 120, 0.08);
+  --shadow-sm: 0 4px 12px rgba(23, 59, 120, 0.06);
+}
+
+body {
+  background:
+    radial-gradient(circle at top left, rgba(31, 75, 145, 0.08), transparent 30%),
+    linear-gradient(180deg, #f8fbff 0%, var(--bg-main) 100%);
+}
+
+.sidebar {
+  background: linear-gradient(180deg, #234f96 0%, #142f61 100%);
+}
+
+.brand-logo {
+  display: block;
+  width: min(100%, 210px);
+  height: auto;
+  padding: 7px;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.sidebar-brand .brand-kicker,
+.sidebar-card-title,
+.sidebar .sidebar-nav-label {
+  color: #c8dcff;
+}
+
+.sidebar-btn:not(.ghost) {
+  background: linear-gradient(135deg, #3471c5, #1e4b91);
+  box-shadow: 0 8px 18px rgba(10, 32, 71, 0.24);
+}
+
+.sidebar-btn.ghost {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #f4f8ff;
+}
+
+.sidebar-btn.ghost:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+button:not(.ghost):not(.danger):not(.sidebar-logout):not(.sidebar-toggle),
+.row button:not(.ghost):not(.danger) {
+  background: linear-gradient(135deg, #2e66b3, #1d4788);
+}
+
+button:not(.ghost):not(.danger):not(.sidebar-logout):not(.sidebar-toggle):hover,
+.row button:not(.ghost):not(.danger):hover {
+  background: linear-gradient(135deg, #24569c, #173b78);
+}
+
+.hero-tab.active,
+.home-ward-grid .hero-tab.active {
+  background: linear-gradient(135deg, #2e66b3, #173b78);
+  border-color: transparent;
+  color: #fff;
+}
