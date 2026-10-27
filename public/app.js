@@ -5857,14 +5857,16 @@ async function openPsychologyView() {
   await loadPsychologyMonthlyAttendances({ silent: true });
 
   try {
-    const psychologyQueue = await buildPsychologyQueueFromWards(wards);
-    renderPsychologyPatients(psychologyQueue);
+    const psychologyQueue = await refreshPsychologyQueueView();
     setPsychologyFeedback(psychologyQueue.length
       ? "Solicitações da Psicologia carregadas pelos leitos atuais."
       : "Nenhuma solicitação para a Psicologia no momento.");
   } catch (error) {
     try {
-      const fallbackPatients = getPsychologyRequestedPatients(await buildPatientsFallbackList());
+      const fallbackPatients = [
+        ...getPsychologyRequestedPatients(await buildPatientsFallbackList()),
+        ...buildPsychologyManualQueueEntries()
+      ];
       renderPsychologyPatients(fallbackPatients);
       setPsychologyFeedback(fallbackPatients.length
         ? "Solicitações da Psicologia carregadas pelos leitos atuais."
