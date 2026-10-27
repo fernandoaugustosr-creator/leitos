@@ -4,6 +4,41 @@ function toBRDate(iso) {
   return `${String(d).padStart(2, "0")}/${String(m).padStart(2, "0")}/${y}`;
 }
 
+function isNirPatientAccepted(patient = {}) {
+  const workflowStatus = String(patient.nirWorkflowStatus || "").trim().toUpperCase();
+  const request = patient.currentAdmission?.nirRequest || {};
+  const requestStatus = String(request.status || "").trim().toUpperCase();
+  const hasActiveRequest = Boolean(request.requested || request.requestedAt || request.viewedAt || request.startedAt);
+  if (
+    requestStatus === "SOLICITADO"
+    || requestStatus === "BAIXA"
+    || ["SOLICITADO", "BAIXA", "CANCELADO"].includes(workflowStatus)
+  ) return false;
+  if (hasActiveRequest && workflowStatus !== "EM_ACOMPANHAMENTO" && requestStatus !== "EM_ACOMPANHAMENTO") return false;
+  return workflowStatus === "EM_ACOMPANHAMENTO"
+    || requestStatus === "EM_ACOMPANHAMENTO"
+    || (!hasActiveRequest && Boolean(String(patient.regulationAcceptedAt || "").trim()));
+}
+
+function getCensusPeriod(baseDate = new Date()) {
+  const start = new Date(baseDate);
+  if (start.getHours() < 7) start.setDate(start.getDate() - 1);
+  start.setHours(7, 0, 0, 0);
+
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+
+  const toLocalIsoDate = date =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+
+  return { start, end, startDate: toLocalIsoDate(start), endDate: toLocalIsoDate(end) };
+}
+
+function isProcedureInCurrentCensusPeriod(procedure, period = getCensusPeriod()) {
+  const createdAt = new Date(procedure?.createdAt);
+  return !Number.isNaN(createdAt.getTime()) && createdAt >= period.start && createdAt < period.end;
+}
+
 function renderCounts(counts) {
   document.getElementById("count-ocupado").textContent = counts.OCUPADO ?? 0;
   document.getElementById("count-livre").textContent = counts.LIVRE ?? 0;
@@ -28,44 +63,61 @@ let currentWardId = null;
 let wardShiftPanelRequested = false;
 let sessionId = sessionStorage.getItem("sid") || null;
 let pendingScrollEnf = null;
-let dashboardFilters = { wardId: "", month: "", from: "", to: "" };
+let dashboardFilters = { wardId: "", month: getCurrentMonthValue(), from: "", to: "" };
 let currentUser = null;
+let teamShiftHistory = [];
 let lastClosedReport = null;
+let bpaPrintPanel = null;
+let bpaPrintPlaceholder = null;
 let transferWardCache = new Map();
 let sidebarPatients = [];
 let registeredPatients = [];
 let nirPatients = [];
 let nirAcceptedPatients = [];
+let nirExternalRegulations = [];
 let adminUsers = [];
 let currentAdminUserEditId = null;
 let currentPatientRecord = null;
 let pendingWhatsAppMessage = "";
+let nirCensusCacheMonth = "";
+let nirCensusCacheLoadedAt = 0;
+let nirCensusRequest = null;
+let nirCensusRequestId = 0;
+let nirCensusMonthReports = [];
+let nirCensusMonthWards = [];
+let nirCensusMonthSelected = "";
 let staffDirectory = [];
 let selectedRegistryPatient = null;
 let pendingBedRegistryLink = null;
 let nirCurrentReport = null;
 let nirPreviousReports = [];
 let nirOtherUserReports = [];
-let nirSirelSaveTimers = new Map();
+let nirFinalizedShiftReports = [];
+let nirHistoricalShiftReport = null;
+let nirPendingHistoricalReportAction = null;
+let nirExternalRegulationShiftId = "";
+let nirExternalRegulationSavePromise = Promise.resolve();
 let currentPortariaPatient = null;
 let portariaActivePatients = [];
 let portariaVisitorEntries = [];
 let psychologyActivePatients = [];
 let psychologyManualEntries = [];
 let psychologyMonthlyEntries = [];
+let bpaIAttendances = [];
 let currentPsychologyTab = "queue";
 let socialServiceManualEntries = [];
 let socialServiceAttendanceEntries = [];
 let socialServiceAttendanceSourceEntries = [];
 let currentSocialServiceTab = "queue";
 let currentSocialServiceFormPatientId = null;
+let currentSocialServiceFormManualRequestId = "";
 let hospitalTripEntries = [];
 let maranhaoTravelCities = [];
 let maranhaoTravelCitiesLookup = new Set();
 let travelDistanceEstimate = null;
 let authRecoveryInProgress = false;
 
-const procedureOptions = ["SNE", "SNG", "SANGUE", "ASPIRAÇÃO", "DRENO DE TORAX"];
+const procedureOptions = ["SVD", "CVC", "SNE", "INTUBACAO", "SNG", "SANGUE", "ASPIRAÇÃO"];
 const NO_ENFERMARIA_VALUE = "__SEM_ENFERMARIA__";
 const ALL_ENFERMARIA_VALUE = "__TODAS_ENFERMARIAS__";
 const WHATSAPP_CENTRAL_AIR_LINK = "https://chat.whatsapp.com/FbxcYoy45yCD1TW6eZwGKd";
@@ -236,8 +288,26 @@ function toBRDateTime(iso) {
   return new Date(iso).toLocaleString("pt-BR");
 }
 
+function toDateTimeLocalValue(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function dateTimeLocalToIso(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
 function getTodayIsoDate() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function getCurrentMonthValue() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
 function getCurrentTimeValue() {
@@ -436,6 +506,27 @@ function setPatientFieldsEnabled(enabled) {
     if (!enabled) el.classList.add("muted");
     else el.classList.remove("muted");
   }
+  const bed = ward?.beds?.find(item => item.id === currentBedId);
+  renderProcedureAvailability(bed?.procedimentosHistorico, enabled);
+}
+
+function updatePatientBedStatusPreview() {
+  const statusSelect = document.getElementById("modal-status");
+  if (!statusSelect) return;
+  const status = statusSelect.value;
+  const bed = ward?.beds?.find(item => item.id === currentBedId);
+  const normalizedSavedStatus = String(bed?.status || "").toUpperCase();
+  const statusClasses = ["status-occupied", "status-available", "status-blocked", "status-reserved", "status-extra"];
+  const statusClass = {
+    OCUPADO: "status-occupied",
+    LIVRE: "status-available",
+    BLOQUEADO: "status-blocked",
+    RESERVADO: "status-reserved",
+    EXTRA: "status-extra"
+  }[status] || "status-available";
+  statusSelect.classList.remove(...statusClasses);
+  statusSelect.classList.add(statusClass);
+  document.getElementById("bed-status-pending")?.classList.toggle("hidden", status === normalizedSavedStatus);
 }
 
 function showUnexpectedError(error) {
@@ -464,7 +555,7 @@ function clearPatientFields() {
 }
 
 function showOnly(viewId) {
-  const ids = ["view-login", "view-dashboard", "view-home", "view-psychology", "view-social-service", "view-portaria", "view-travel", "view-patients", "view-nir", "view-admin"];
+  const ids = ["view-login", "view-dashboard", "view-home", "view-my-shifts", "view-psychology", "view-social-service", "view-portaria", "view-travel", "view-patients", "view-nir", "view-admin"];
   for (const id of ids) {
     const el = document.getElementById(id);
     if (!el) continue;
@@ -473,6 +564,7 @@ function showOnly(viewId) {
   const navMap = {
     "view-dashboard": "nav-dashboard",
     "view-home": "nav-home",
+    "view-my-shifts": "nav-my-shifts",
     "view-psychology": "nav-psychology",
     "view-social-service": "nav-social-service",
     "view-portaria": "nav-portaria",
@@ -481,14 +573,17 @@ function showOnly(viewId) {
     "view-nir": "nav-nir",
     "view-admin": "nav-gerenciar"
   };
-  for (const id of ["nav-dashboard", "nav-home", "nav-psychology", "nav-social-service", "nav-portaria", "nav-travel", "nav-patients", "nav-nir", "nav-gerenciar"]) {
+  for (const id of ["nav-dashboard", "nav-home", "nav-my-shifts", "nav-psychology", "nav-social-service", "nav-portaria", "nav-travel", "nav-patients", "nav-nir", "nav-gerenciar"]) {
     document.getElementById(id)?.classList.toggle("ghost", navMap[viewId] !== id);
   }
   document.body.classList.toggle("login-only", viewId === "view-login");
+  syncGlobalShiftToolbar();
 }
 
 function syncWorkAreaNavigation() {
-  const activeShift = currentUser?.activeShift || null;
+  const activeShift = currentUser?.activeShift
+    || (Array.isArray(currentUser?.activeShifts) ? currentUser.activeShifts[0] : null)
+    || null;
   const serviceType = String(activeShift?.serviceType || "").trim().toUpperCase();
   const hasWardShift = Boolean(activeShift && !serviceType && Number(activeShift.wardId));
   const isAdmin = isAdminUser();
@@ -514,6 +609,7 @@ function syncWorkAreaNavigation() {
 
 function setWardPanelsEnabled(enabled, options = {}) {
   document.getElementById("ward-detail-toolbar")?.classList.toggle("hidden", !enabled);
+  document.getElementById("btn-back-to-sectors")?.classList.toggle("hidden", !enabled);
   if (!enabled) {
     document.getElementById("ward-shift-entry")?.classList.add("hidden");
     document.querySelector(".plantao")?.classList.add("hidden");
@@ -531,12 +627,43 @@ function setAppEnabled(enabled) {
 
 async function api(path, options) {
   const startedAt = performance.now();
+  const method = String(options?.method || "GET").toUpperCase();
+  const routePath = String(path || "").split("?")[0];
+  const userManagementMutation = routePath === "/api/users"
+    || /^\/api\/users\/\d+(?:\/password\/reset)?$/.test(routePath);
+  const shiftReopenMutation = /^\/api\/shifts\/\d+\/reopen-requests$/.test(routePath)
+    || /^\/api\/shifts\/reopen-requests\/[^/]+\/decision$/.test(routePath);
+  const shiftAuthorizationMutation = routePath === "/api/shifts/authorization-requests"
+    || /^\/api\/shifts\/authorization-requests\/[^/]+\/decision$/.test(routePath);
+  const adminPasswordMutation = method === "DELETE" && (
+    /^\/api\/(?:psychology|social-service)\/(?:attendances|requests\/manual)\/[^/]+$/.test(routePath)
+    || /^\/api\/patients\/\d+\/(?:psychology-support|social-support)\/request$/.test(routePath)
+  );
+  if (
+    !["GET", "HEAD", "OPTIONS"].includes(method)
+    && routePath.startsWith("/api/")
+    && !["/api/login", "/api/logout", "/api/shifts/open"].includes(routePath)
+    && routePath !== "/api/me/password"
+    && !userManagementMutation
+    && !/^\/api\/nir\/shift-reports\/[^/]+\/open$/.test(routePath)
+    && !shiftReopenMutation
+    && !shiftAuthorizationMutation
+    && !adminPasswordMutation
+    && !currentUser?.activeShift
+  ) {
+    throw new Error("Assuma um plantão antes de fazer qualquer alteração.");
+  }
   // #region debug-point A:frontend-api-start
   reportDebugEvent("A", "public/app.js:api:start", "[DEBUG] Frontend API start", { path, method: options?.method || "GET" });
   // #endregion
   const merged = { ...(options || {}) };
   merged.headers = { ...(merged.headers || {}) };
   if (sessionId) merged.headers["X-Session-Id"] = sessionId;
+  if (currentUser) {
+    merged.headers["X-Active-Shift-Id"] = currentUser.activeShift?.id
+      ? String(currentUser.activeShift.id)
+      : "none";
+  }
   const res = await fetch(path, merged);
   const rawText = await res.text();
   let data = {};
@@ -595,11 +722,114 @@ async function api(path, options) {
 }
 
 function renderIndicadores(ind) {
-  document.getElementById("ind-pacientes").textContent = ind.pacientes;
-  document.getElementById("ind-leitos").textContent = ind.leitos;
-  document.getElementById("ind-altas").textContent = ind.altas;
-  document.getElementById("ind-obitos").textContent = ind.obitos;
-  document.getElementById("ind-bloqueados").textContent = ind.leitos_bloqueados;
+  const form = document.getElementById("census-form");
+  if (!form || !currentWardId) return;
+
+  const period = getCensusPeriod();
+  const values = ward?.censusValues || {
+    pacientes: ind.pacientes,
+    leitos: ind.leitos,
+    altas: 0,
+    obitos: 0,
+    transferencias_externas: 0,
+    transferencias_internas: 0,
+    leitos_bloqueados: ind.leitos_bloqueados
+  };
+  form.querySelectorAll("[data-census-field]").forEach(input => {
+    const field = input.dataset.censusField;
+    const value = values[field];
+    input.value = Number.isInteger(Number(value)) && Number(value) >= 0 ? String(value) : "0";
+  });
+
+  document.getElementById("census-title").textContent = `Censo diário — ${ward?.nome || "Setor"}`;
+  document.getElementById("census-ward-date").textContent =
+    `Período do plantão: ${toBRDate(period.startDate)} às 07h até ${toBRDate(period.endDate)} às 07h`;
+  const authorsElement = document.getElementById("census-authors");
+  if (authorsElement) authorsElement.textContent = "Atualizado automaticamente conforme as movimentações registradas no setor.";
+  renderCensusSubmissionStatus(ward?.censusSubmission || null);
+}
+
+function renderCensusSubmissionStatus(submission) {
+  const status = document.getElementById("census-submit-status");
+  const button = document.getElementById("btn-send-census");
+  if (!status || !button) return;
+  const sentAt = String(submission?.sentAt || "").trim();
+  const sentBy = String(submission?.sentBy || "").trim();
+  const canSend = Boolean(
+    currentWardId
+    && currentUser?.activeShift
+    && !currentUser.activeShift.serviceType
+    && Number(currentUser.activeShift.wardId) === Number(currentWardId)
+  );
+  button.disabled = !canSend || button.dataset.sending === "true";
+  status.classList.toggle("is-sent", Boolean(sentAt));
+  status.textContent = sentAt
+    ? `Enviado ao NIR às ${new Date(sentAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}${sentBy ? ` por ${sentBy}` : ""}.`
+    : "Ainda não enviado ao NIR.";
+}
+
+function readCensusSnapshot() {
+  const form = document.getElementById("census-form");
+  if (!form || !currentWardId || Number(currentUser?.activeShift?.wardId) !== Number(currentWardId)) return null;
+  const period = getCensusPeriod();
+  const values = Object.fromEntries(
+    [...form.querySelectorAll("[data-census-field]")].map(input => [
+      input.dataset.censusField,
+      Number(input.value) || 0
+    ])
+  );
+  return {
+    wardId: currentWardId,
+    wardName: ward?.nome || "",
+    periodStartDate: period.startDate,
+    periodEndDate: period.endDate,
+    period: document.getElementById("census-ward-date")?.textContent || "",
+    authors: document.getElementById("census-authors")?.textContent || "",
+    values
+  };
+}
+
+async function sendCensusToNir() {
+  const button = document.getElementById("btn-send-census");
+  const feedback = document.getElementById("census-feedback");
+  const snapshot = readCensusSnapshot();
+  if (!snapshot) {
+    if (feedback) {
+      feedback.textContent = "Abra o plantão deste setor antes de enviar o censo ao NIR.";
+      feedback.classList.add("error-text");
+    }
+    return;
+  }
+  if (button) {
+    button.dataset.sending = "true";
+    button.disabled = true;
+    button.textContent = "Enviando...";
+  }
+  if (feedback) {
+    feedback.textContent = "";
+    feedback.classList.remove("error-text");
+  }
+  try {
+    const result = await api(`/api/wards/${currentWardId}/census/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ census: snapshot })
+    });
+    if (ward) ward.censusSubmission = result.censusSubmission || null;
+    renderCensusSubmissionStatus(ward?.censusSubmission);
+    if (feedback) feedback.textContent = "Censo enviado ao NIR.";
+  } catch (error) {
+    if (feedback) {
+      feedback.textContent = error.message || "Não foi possível enviar o censo ao NIR.";
+      feedback.classList.add("error-text");
+    }
+  } finally {
+    if (button) {
+      button.dataset.sending = "false";
+      button.textContent = "Enviar ao NIR";
+    }
+    renderCensusSubmissionStatus(ward?.censusSubmission);
+  }
 }
 
 function renderBarGroup(containerId, items, options = {}) {
@@ -623,7 +853,10 @@ function renderBarGroup(containerId, items, options = {}) {
   for (const [index, item] of items.entries()) {
     const label = options.labelKey ? item[options.labelKey] : item.label;
     const value = options.valueKey ? Number(item?.[options.valueKey] ?? 0) : Number(item?.value ?? 0);
-    const percentageFromMetric = Number(item?.percent ?? item?.percentage ?? item?.porcentagem ?? item?.taxa ?? "");
+    const metric = item?.percent ?? item?.percentage ?? item?.porcentagem ?? item?.taxa;
+    const percentageFromMetric = metric === undefined || metric === null || String(metric).trim() === ""
+      ? Number.NaN
+      : Number(metric);
     const percentageValue = Number.isFinite(percentageFromMetric) && percentageFromMetric >= 0
       ? percentageFromMetric
       : Math.max(0, (value / maxValue) * 100);
@@ -648,7 +881,7 @@ function renderBarGroup(containerId, items, options = {}) {
     valueEl.className = "bar-value";
     const formattedPercent = options.formatValue
       ? options.formatValue(item, normalizedPercent)
-      : `${normalizedPercent.toFixed(normalizedPercent % 1 === 0 ? 0 : 1)}%`;
+      : String(value);
     valueEl.textContent = formattedPercent;
 
     row.append(labelEl, track, valueEl);
@@ -702,16 +935,26 @@ function setDashboardFeedback(message = "", isError = false) {
   feedback.classList.toggle("error-text", Boolean(message && isError));
 }
 
-function setShiftFeedback(message = "", isError = false) {
+function setShiftFeedback(message = "", isError = false, canRequestAuthorization = false) {
   const feedback = document.getElementById("shift-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+  document.getElementById("btn-request-shift-authorization")
+    ?.classList.toggle("hidden", !canRequestAuthorization);
+}
+
+function setPatientLookupFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("modal-patient-lookup");
   if (!feedback) return;
   feedback.textContent = message;
   feedback.classList.toggle("hidden", !message);
   feedback.classList.toggle("error-text", Boolean(message && isError));
 }
 
-function setPatientLookupFeedback(message = "", isError = false) {
-  const feedback = document.getElementById("modal-patient-lookup");
+function setOutcomeFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("modal-outcome-feedback");
   if (!feedback) return;
   feedback.textContent = message;
   feedback.classList.toggle("hidden", !message);
@@ -743,6 +986,7 @@ function toggleExternalTransferPanel(visible = false) {
   const field = document.getElementById("modal-external-transfer-note");
   if (!panel || !field) return;
   panel.classList.toggle("hidden", !visible);
+  setOutcomeFeedback("");
   if (!visible) {
     field.value = "";
   } else {
@@ -754,10 +998,9 @@ function normalizeShiftLength(value) {
   return String(value || "").trim().toUpperCase() === "24H" ? "24H" : "12H";
 }
 
-function normalizeShiftPeriod(value, shiftLength = "12H") {
-  if (normalizeShiftLength(shiftLength) === "24H") return "COMPLETO";
-  const normalized = String(value || "").trim().toUpperCase();
-  return normalized === "NOITE" ? "NOITE" : "DIA";
+function getSelectedShiftLength(selectId) {
+  const value = String(document.getElementById(selectId)?.value || "").trim().toUpperCase();
+  return value === "12H" || value === "24H" ? value : "";
 }
 
 function getPsychologyAutoShiftPeriod(baseValue = new Date(), shiftLength = "12H") {
@@ -774,8 +1017,12 @@ function getShiftPeriodLabel(value) {
 }
 
 function getActiveShiftTeam() {
-  const activeShift = currentUser?.activeShift || null;
-  if (activeShift?.serviceType === "PSICOLOGIA") return activeShift.team || null;
+  const activeShift = currentUser?.activeShift
+    || (Array.isArray(currentUser?.activeShifts) ? currentUser.activeShifts[0] : null)
+    || null;
+  if (["NIR", "PSICOLOGIA", "SERVICO_SOCIAL"].includes(String(activeShift?.serviceType || "").trim().toUpperCase())) {
+    return activeShift.team || null;
+  }
   if (!activeShift || Number(activeShift.wardId) !== Number(currentWardId)) return null;
   return activeShift.team || null;
 }
@@ -822,6 +1069,7 @@ function renderStaffSuggestions(items) {
   renderStaffDatalist("staff-list-medicos", names);
   renderStaffDatalist("staff-list-enfermeiros", names);
   renderStaffDatalist("staff-list-tecnicos", names);
+  renderStaffDatalist("staff-list-administrativos", names);
 }
 
 async function refreshStaffSuggestions() {
@@ -853,12 +1101,23 @@ function renderShiftTeamSummary() {
   container.innerHTML = "";
   if (!activeShift) return;
 
+  const team = activeShift.team || {};
+  if (String(activeShift.serviceType || "").trim().toUpperCase() === "NIR") {
+    for (const [label, value] of [
+      ["Enfermeiro(a) responsável", activeShift.ownerName || currentUser?.nome || currentUser?.username || "-"],
+      ["Auxiliar administrativo", team.auxiliarAdministrativo || "-"]
+    ]) {
+      const row = document.createElement("div");
+      row.className = "shift-team-row";
+      row.innerHTML = `<strong>${label}</strong><span>${escapeHtml(value)}</span>`;
+      container.appendChild(row);
+    }
+    return;
+  }
   const ownerRow = document.createElement("div");
   ownerRow.className = "shift-team-row";
   ownerRow.innerHTML = `<strong>Plantão vinculado</strong><span>${activeShift.ownerName || currentUser?.nome || currentUser?.username || "-"} (${activeShift.ownerUsername || currentUser?.username || "-"})</span>`;
   container.appendChild(ownerRow);
-
-  const team = activeShift.team || {};
   const shiftLength = activeShift.shiftLength || "12H";
   const shiftPeriod = activeShift.shiftPeriod || "DIA";
   const items = [];
@@ -942,7 +1201,11 @@ function openPatientRegistryFromBedCpf() {
     return;
   }
 
-  pendingBedRegistryLink = { bedId: currentBedId, cpf: digits };
+  pendingBedRegistryLink = {
+    bedId: currentBedId,
+    cpf: digits,
+    status: document.getElementById("modal-status").value
+  };
   document.getElementById("modal-paciente")?.close();
   openNewPatientRegistry({ cpf: digits });
 }
@@ -973,7 +1236,7 @@ async function resolvePatientFromBedCpf(options = {}) {
   }
 
   selectedRegistryPatient = null;
-  setPatientLookupFeedback("CPF não encontrado. Cadastre o paciente para vincular este leito.", true);
+  setPatientLookupFeedback("CPF não encontrado. Cadastre o paciente e depois salve o leito.", true);
   toggleCreatePatientButton(true);
   if (openRegistryIfMissing) {
     openPatientRegistryFromBedCpf();
@@ -1057,54 +1320,242 @@ function renderShiftHistory() {
   const container = document.getElementById("shift-history-list");
   if (!container) return;
   container.innerHTML = "";
+  const monthFilter = document.getElementById("shift-history-month")?.value || "";
+  const isTeamHistory = isAdminUser();
 
   const activeShift = currentUser?.activeShift || null;
-  if (activeShift) {
+  if (activeShift && !isTeamHistory) {
     const currentCard = document.createElement("div");
     currentCard.className = "shift-history-card current";
     currentCard.innerHTML = `
       <strong>Plantão em andamento</strong>
-      <span>Data: ${toBRDate(activeShift.shiftDate || getTodayIsoDate())}</span>
-      <span>Aberto por ${activeShift.ownerName || currentUser?.nome || currentUser?.username || "-"} (${activeShift.ownerUsername || currentUser?.username || "-"}) em ${toBRDateTime(activeShift.openedAt)}</span>
+      <span>Data: ${escapeHtml(toBRDate(activeShift.shiftDate || getTodayIsoDate()))}</span>
+      <span>Aberto por ${escapeHtml(activeShift.ownerName || currentUser?.nome || currentUser?.username || "-")} (${escapeHtml(activeShift.ownerUsername || currentUser?.username || "-")}) em ${escapeHtml(toBRDateTime(activeShift.openedAt))}</span>
     `;
     container.appendChild(currentCard);
   }
 
-  const shifts = Array.isArray(currentUser?.recentShifts) ? currentUser.recentShifts : [];
-  if (!shifts.length && !activeShift) {
+  const allShifts = isTeamHistory
+    ? teamShiftHistory
+    : (Array.isArray(currentUser?.recentShifts) ? currentUser.recentShifts : []);
+  const shifts = allShifts.filter(shift => {
+    if (!monthFilter) return true;
+    return String(shift.shiftDate || shift.openedAt || "").startsWith(monthFilter);
+  });
+  const count = document.getElementById("shift-history-count");
+  if (count) count.textContent = `${shifts.length} plantão(ões) encontrado(s)${monthFilter ? ` em ${monthFilter}` : ""}.`;
+  if (!shifts.length && (!activeShift || isTeamHistory)) {
     const empty = document.createElement("div");
     empty.className = "shift-team-empty";
-    empty.textContent = "Nenhum histórico de plantão registrado.";
+    empty.textContent = monthFilter
+      ? "Nenhum plantão encontrado neste mês. Escolha outro mês ou limpe o filtro para ver o histórico disponível."
+      : "Nenhum histórico de plantão registrado.";
     container.appendChild(empty);
     return;
   }
 
   for (const shift of shifts) {
     const card = document.createElement("div");
-    card.className = "shift-history-card";
+    card.className = `shift-history-card${shift.closedAt ? "" : " current"}`;
     const teamLines = buildShiftHistoryTeamLines(shift);
+    const latestRequest = (Array.isArray(shift.reopenRequests) ? shift.reopenRequests : []).slice(-1)[0] || null;
+    const requestStatus = latestRequest?.status === "pending"
+      ? "Solicitação de reabertura aguardando o coordenador."
+      : latestRequest?.status === "rejected"
+        ? `Solicitação negada por ${latestRequest.decidedBy || "coordenador"}.${latestRequest.decisionNote ? ` Motivo: ${latestRequest.decisionNote}` : ""}`
+        : latestRequest?.status === "approved"
+          ? "Reabertura autorizada."
+          : "";
     const meta = [
       `Data: ${toBRDate(shift.shiftDate || (shift.openedAt ? String(shift.openedAt).slice(0, 10) : "")) || "-"}`,
-      `Setor: ${shift.wardNome || "-"}`,
-      `Vinculado a: ${shift.ownerName || shift.ownerUsername || "-"}`,
+      `Setor: ${shift.wardNome || ({
+        NIR: "NIR",
+        PSICOLOGIA: "Psicologia",
+        SERVICO_SOCIAL: "Serviço Social"
+      })[String(shift.serviceType || "").toUpperCase()] || "-"}`,
+      ...(isTeamHistory ? [`Profissional: ${shift.ownerName || shift.ownerUsername || "-"}`] : []),
       `Abertura: ${toBRDateTime(shift.openedAt) || "-"}`,
-      `Fechamento: ${toBRDateTime(shift.closedAt) || "-"}`
+      `Fechamento: ${toBRDateTime(shift.closedAt) || (isTeamHistory ? "Em andamento" : "-")}`
     ];
     card.innerHTML = `
-      <strong>${shift.shiftLength || "12H"} • ${getShiftPeriodLabel(shift.shiftPeriod)}</strong>
-      ${meta.map(item => `<span>${item}</span>`).join("")}
-      ${teamLines.length ? `<div class="shift-history-team">${teamLines.map(item => `<span>${item}</span>`).join("")}</div>` : "<span>Equipe não registrada.</span>"}
+      <strong>${shift.closedAt ? "" : "Plantão em andamento • "}${escapeHtml(shift.shiftLength || "12H")} • ${escapeHtml(getShiftPeriodLabel(shift.shiftPeriod))}</strong>
+      ${meta.map(item => `<span>${escapeHtml(item)}</span>`).join("")}
+      ${teamLines.length ? `<div class="shift-history-team">${teamLines.map(item => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : "<span>Equipe não registrada.</span>"}
+      ${requestStatus ? `<span class="shift-reopen-status">${escapeHtml(requestStatus)}</span>` : ""}
+      <div class="shift-history-actions">
+        ${shift.closedAt ? `<button type="button" class="ghost btn-reprint-shift" data-shift-id="${escapeHtml(shift.id)}" data-owner-username="${escapeHtml(shift.ownerUsername || currentUser?.username || "")}">Reimprimir relatório</button>` : ""}
+        ${shift.closedAt && (!isTeamHistory || shift.ownerUsername === currentUser?.username) && latestRequest?.status !== "pending" ? `<button type="button" class="ghost btn-request-reopen" data-shift-id="${escapeHtml(shift.id)}">Solicitar reabertura</button>` : ""}
+      </div>
     `;
     container.appendChild(card);
+  }
+}
+
+function setMyShiftsFeedback(message, isError = false) {
+  const feedback = document.getElementById("my-shifts-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", isError);
+}
+
+async function reprintHistoricalShift(shiftId, ownerUsername = "") {
+  try {
+    const ownerQuery = ownerUsername ? `?ownerUsername=${encodeURIComponent(ownerUsername)}` : "";
+    const data = await api(`/api/shifts/${encodeURIComponent(shiftId)}/report${ownerQuery}`);
+    const report = data.report || null;
+    if (!report) throw new Error("O relatório deste plantão não está disponível.");
+    if (report.printMode === "psychology") {
+      printPsychologyShiftReport(report);
+    } else if (report.printMode === "social_service") {
+      printSocialServiceShiftReport(report);
+    } else if (report.printMode === "nir") {
+      printNirShiftReport(report);
+    } else {
+      printShiftReport(report);
+    }
+  } catch (error) {
+    setMyShiftsFeedback(error.message || "Não foi possível reimprimir o relatório.", true);
+  }
+}
+
+function openShiftReopenDialog(shiftId) {
+  const dialog = document.getElementById("modal-reopen-shift");
+  const form = document.getElementById("shift-reopen-form");
+  const feedback = document.getElementById("shift-reopen-feedback");
+  if (!dialog || !form || !feedback) return;
+  form.reset();
+  feedback.textContent = "";
+  feedback.classList.add("hidden");
+  dialog.dataset.shiftId = String(shiftId);
+  dialog.showModal();
+  document.getElementById("shift-reopen-reason")?.focus();
+}
+
+async function requestShiftReopen(shiftId, reason) {
+  await api(`/api/shifts/${encodeURIComponent(shiftId)}/reopen-requests`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason })
+  });
+  await refreshCurrentUser();
+  if (isAdminUser()) {
+    const data = await api("/api/shifts/history");
+    teamShiftHistory = Array.isArray(data.shifts) ? data.shifts : [];
+  }
+  renderShiftHistory();
+  setMyShiftsFeedback("Solicitação enviada ao coordenador para autorização.");
+}
+
+async function loadAdminShiftReopenRequests() {
+  const container = document.getElementById("admin-shift-reopen-list");
+  const empty = document.getElementById("admin-shift-reopen-empty");
+  if (!isAdminUser() || !container || !empty) return;
+  const data = await api("/api/shifts/reopen-requests");
+  const requests = Array.isArray(data.requests) ? data.requests : [];
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", requests.length > 0);
+  for (const request of requests) {
+    const card = document.createElement("div");
+    card.className = "shift-history-card";
+    const service = request.serviceType === "PSICOLOGIA"
+      ? "Psicologia"
+      : request.serviceType === "SERVICO_SOCIAL"
+        ? "Serviço Social"
+        : (request.wardNome || "Setor");
+    card.innerHTML = `
+      <strong>${escapeHtml(request.ownerName)} — ${escapeHtml(service)}</strong>
+      <span>Plantão ${escapeHtml(request.shiftLength)} • ${escapeHtml(getShiftPeriodLabel(request.shiftPeriod))} • ${escapeHtml(toBRDate(request.shiftDate) || "-")}</span>
+      <span>Fechado em ${escapeHtml(toBRDateTime(request.closedAt) || "-")} • Solicitação: ${escapeHtml(toBRDateTime(request.requestedAt) || "-")}</span>
+      <span>Motivo: ${escapeHtml(request.reason)}</span>
+      <div class="shift-history-actions">
+        <button type="button" class="btn-approve-shift-reopen" data-request-id="${escapeHtml(request.id)}">Autorizar reabertura</button>
+        <button type="button" class="ghost btn-reject-shift-reopen" data-request-id="${escapeHtml(request.id)}">Negar</button>
+      </div>
+    `;
+    container.appendChild(card);
+  }
+}
+
+function setShiftAuthorizationQueueFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("shift-authorization-queue-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+async function loadCoordinatorShiftAuthorizationRequests() {
+  const container = document.getElementById("shift-authorization-queue");
+  const empty = document.getElementById("shift-authorization-queue-empty");
+  const section = document.getElementById("coordinator-shift-authorization-section");
+  if (!container || !empty || !currentUser?.canApproveShiftAuthorizations) {
+    section?.classList.add("hidden");
+    return;
+  }
+  section?.classList.remove("hidden");
+  try {
+    const data = await api("/api/shifts/authorization-requests");
+    const requests = Array.isArray(data.requests) ? data.requests : [];
+    container.innerHTML = "";
+    empty.classList.toggle("hidden", requests.length > 0);
+    for (const request of requests) {
+      const card = document.createElement("article");
+      card.className = "shift-history-card";
+      card.innerHTML = `
+        <strong>${escapeHtml(request.requesterName || request.requesterUsername || "Profissional")} — ${escapeHtml(request.wardName || "Setor")}</strong>
+        <span>Plantão ${escapeHtml(request.shiftLength || "12H")} • ${escapeHtml(getShiftPeriodLabel(request.shiftPeriod))} • ${escapeHtml(toBRDate(request.shiftDate) || "-")}</span>
+        <span>Solicitado em ${escapeHtml(toBRDateTime(request.requestedAt) || "-")}</span>
+        <span>Motivo: ${escapeHtml(request.reason || "-")}</span>
+        <div class="shift-history-actions">
+          <button type="button" class="btn-decide-shift-authorization" data-request-id="${escapeHtml(request.id)}" data-decision="approve">Autorizar abertura</button>
+          <button type="button" class="ghost btn-decide-shift-authorization" data-request-id="${escapeHtml(request.id)}" data-decision="reject">Negar</button>
+        </div>
+      `;
+      container.appendChild(card);
+    }
+    setShiftAuthorizationQueueFeedback("");
+  } catch (error) {
+    setShiftAuthorizationQueueFeedback(error.message || "Não foi possível carregar as solicitações.", true);
+  }
+}
+
+async function requestShiftAuthorization({ fromAssumeDialog = false } = {}) {
+  const wardId = Number(document.getElementById("shift-ward")?.value);
+  const shiftLength = getSelectedShiftLength(fromAssumeDialog ? "assume-ward-shift-length" : "shift-length");
+  if (!shiftLength) {
+    const message = "Selecione se o plantão será de 12H ou 24H antes de solicitar autorização.";
+    if (fromAssumeDialog) setAssumeWardShiftFeedback(message, true);
+    else setShiftFeedback(message, true);
+    return;
+  }
+  const reason = window.prompt("Informe por que precisa assumir este setor (mínimo de 10 caracteres):");
+  if (reason === null) return;
+  try {
+    const shiftPeriod = getPsychologyAutoShiftPeriod(new Date(), shiftLength);
+    await api("/api/shifts/authorization-requests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wardId, shiftLength, shiftPeriod, reason })
+    });
+    await refreshCurrentUser();
+    const message = "Solicitação enviada ao coordenador. Você poderá abrir o plantão após a autorização.";
+    if (fromAssumeDialog) setAssumeWardShiftFeedback(message);
+    else setShiftFeedback(message);
+  } catch (error) {
+    const message = error.message || "Não foi possível enviar a solicitação.";
+    if (fromAssumeDialog) setAssumeWardShiftFeedback(message, true);
+    else setShiftFeedback(message, true);
   }
 }
 
 function renderShiftTeamForm() {
   const team = getActiveShiftTeam();
   const activeShift = currentUser?.activeShift || null;
+  const isNirShift = String(activeShift?.serviceType || "").trim().toUpperCase() === "NIR";
   const loggedUserName = currentUser?.nome || currentUser?.username || "";
   const shiftLength = activeShift?.shiftLength || normalizeShiftLength(document.getElementById("shift-length")?.value);
-  const shiftPeriod = activeShift?.shiftPeriod || normalizeShiftPeriod(document.getElementById("shift-period")?.value, shiftLength);
+  const shiftPeriod = activeShift?.shiftPeriod || getPsychologyAutoShiftPeriod(new Date(), shiftLength);
   const defaultNurseDay = (shiftLength === "24H" || shiftPeriod === "DIA" || shiftPeriod === "COMPLETO") ? loggedUserName : "";
   const defaultNurseNight = (shiftLength === "24H" || shiftPeriod === "NOITE" || shiftPeriod === "COMPLETO") ? loggedUserName : "";
   const shiftDate = document.getElementById("shift-date");
@@ -1115,6 +1566,19 @@ function renderShiftTeamForm() {
   document.getElementById("eq-enf-noite").value = team?.enfermeiroNoite || defaultNurseNight;
   document.getElementById("eq-tec-noite").value = team?.tecnicosNoite || "";
   document.getElementById("eq-faltosos").value = team?.faltosos || "";
+  document.getElementById("eq-nir-nurse").value = activeShift?.ownerName || loggedUserName;
+  document.getElementById("eq-nir-admin").value = team?.auxiliarAdministrativo || "";
+  for (const id of ["field-eq-medico", "field-eq-enf-dia", "field-eq-tec-dia", "field-eq-enf-noite", "field-eq-tec-noite", "field-eq-faltosos"]) {
+    document.getElementById(id)?.classList.toggle("hidden", isNirShift);
+  }
+  document.getElementById("field-eq-nir-nurse")?.classList.toggle("hidden", !isNirShift);
+  document.getElementById("field-eq-nir-admin")?.classList.toggle("hidden", !isNirShift);
+  const hint = document.getElementById("shift-team-modal-hint");
+  if (hint) {
+    hint.textContent = isNirShift
+      ? "A equipe do NIR é formada pelo enfermeiro responsável pelo plantão e pelo auxiliar administrativo."
+      : "Cadastre a equipe do dia vinculada ao seu plantão.";
+  }
 }
 
 function openShiftTeamModal(feedback = setShiftFeedback) {
@@ -1129,12 +1593,8 @@ function openShiftTeamModal(feedback = setShiftFeedback) {
 
 function syncShiftFormVisibility() {
   const shiftLength = normalizeShiftLength(document.getElementById("shift-length")?.value);
-  const shiftPeriod = normalizeShiftPeriod(document.getElementById("shift-period")?.value, shiftLength);
-  const periodSelect = document.getElementById("shift-period");
-  if (periodSelect) {
-    periodSelect.value = shiftPeriod;
-    periodSelect.disabled = shiftLength === "24H" || Boolean(currentUser?.activeShift);
-  }
+  const activeShift = currentUser?.activeShift;
+  const shiftPeriod = activeShift?.shiftPeriod || getPsychologyAutoShiftPeriod(new Date(), shiftLength);
   document.getElementById("field-eq-enf-dia")?.classList.toggle("hidden", shiftLength === "12H" && shiftPeriod === "NOITE");
   document.getElementById("field-eq-tec-dia")?.classList.toggle("hidden", shiftLength === "12H" && shiftPeriod === "NOITE");
   document.getElementById("field-eq-enf-noite")?.classList.toggle("hidden", shiftLength === "12H" && shiftPeriod === "DIA");
@@ -1142,8 +1602,7 @@ function syncShiftFormVisibility() {
 }
 
 function syncPsychologyShiftFormVisibility() {
-  const activeShift = currentUser?.activeShift || null;
-  const psychShift = activeShift?.serviceType === "PSICOLOGIA" ? activeShift : null;
+  const psychShift = getActiveServiceShift("PSICOLOGIA");
   const lengthSelect = document.getElementById("psychology-shift-length");
   if (lengthSelect) {
     lengthSelect.disabled = Boolean(psychShift);
@@ -1159,8 +1618,7 @@ function syncPsychologyShiftFormVisibility() {
 }
 
 function syncSocialServiceShiftFormVisibility() {
-  const activeShift = currentUser?.activeShift || null;
-  const socialShift = activeShift?.serviceType === "SERVICO_SOCIAL" ? activeShift : null;
+  const socialShift = getActiveServiceShift("SERVICO_SOCIAL");
   const lengthSelect = document.getElementById("social-service-shift-length");
   if (lengthSelect) {
     lengthSelect.disabled = Boolean(socialShift);
@@ -1176,24 +1634,55 @@ function syncSocialServiceShiftFormVisibility() {
 }
 
 function renderPsychologyShiftPanel() {
-  const activeShift = currentUser?.activeShift || null;
-  const psychShift = activeShift?.serviceType === "PSICOLOGIA" ? activeShift : null;
+  const psychShift = getActiveServiceShift("PSICOLOGIA");
   const shiftDate = document.getElementById("psychology-shift-date");
   const shiftLength = document.getElementById("psychology-shift-length");
   if (shiftDate) shiftDate.value = psychShift?.shiftDate || getOperationalDayKey();
-  if (shiftLength) shiftLength.value = psychShift?.shiftLength || "12H";
+  if (shiftLength && psychShift) shiftLength.value = psychShift.shiftLength || "";
   syncPsychologyShiftFormVisibility();
   syncPsychologyEditingAvailability();
 }
 
 function renderSocialServiceShiftPanel() {
-  const activeShift = currentUser?.activeShift || null;
-  const socialShift = activeShift?.serviceType === "SERVICO_SOCIAL" ? activeShift : null;
+  const socialShift = getActiveServiceShift("SERVICO_SOCIAL");
   const shiftDate = document.getElementById("social-service-shift-date");
   const shiftLength = document.getElementById("social-service-shift-length");
   if (shiftDate) shiftDate.value = socialShift?.shiftDate || getOperationalDayKey();
-  if (shiftLength) shiftLength.value = socialShift?.shiftLength || "12H";
+  if (shiftLength && socialShift) shiftLength.value = socialShift.shiftLength || "";
+  const report = socialShift?.socialServiceReport || {};
+  const pendingInput = document.getElementById("social-service-report-pending");
+  if (pendingInput) {
+    pendingInput.value = report.pending || "";
+    pendingInput.disabled = !socialShift;
+  }
+  const saveButton = document.getElementById("btn-save-social-service-report");
+  if (saveButton) saveButton.disabled = !socialShift;
   syncSocialServiceShiftFormVisibility();
+}
+
+async function saveSocialServiceShiftReport(options = {}) {
+  const { feedback = setSocialServiceShiftFeedback } = options;
+  if (String(currentUser?.activeShift?.serviceType || "").trim().toUpperCase() !== "SERVICO_SOCIAL") {
+    feedback("Abra o plantão do Serviço Social antes de salvar o relatório.", true);
+    return false;
+  }
+  const socialServiceReport = {
+    pending: String(document.getElementById("social-service-report-pending")?.value || "").trim()
+  };
+  try {
+    const result = await api("/api/shifts/social-service-report", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ socialServiceReport })
+    });
+    currentUser = result.user || currentUser;
+    renderCurrentUser();
+    feedback("Relatório do Serviço Social salvo neste plantão.");
+    return true;
+  } catch (error) {
+    feedback(error.message || "Não foi possível salvar o relatório do Serviço Social.", true);
+    return false;
+  }
 }
 
 function setSidebarPatientFeedback(message = "", isError = false) {
@@ -1339,10 +1828,8 @@ function clearAdminUserForm() {
   document.getElementById("admin-user-name").value = "";
   document.getElementById("admin-user-username").value = "";
   document.getElementById("admin-user-cpf").value = "";
-  document.getElementById("admin-user-birthdate").value = "";
-  document.getElementById("admin-user-role").value = "user";
-  document.getElementById("admin-user-password").value = "";
-  document.getElementById("btn-save-user").textContent = "Salvar usuário";
+  document.getElementById("admin-user-role").value = "enfermeiro";
+  document.getElementById("btn-save-user").textContent = "Salvar profissional";
   document.getElementById("btn-cancel-user-edit")?.classList.add("hidden");
 }
 
@@ -1351,11 +1838,20 @@ function fillAdminUserForm(user) {
   document.getElementById("admin-user-name").value = user.nome || "";
   document.getElementById("admin-user-username").value = user.username || "";
   document.getElementById("admin-user-cpf").value = formatCpf(user.cpf || "");
-  document.getElementById("admin-user-birthdate").value = user.birthDate || "";
-  document.getElementById("admin-user-role").value = user.role || "user";
-  document.getElementById("admin-user-password").value = "";
+  document.getElementById("admin-user-role").value = user.role || "enfermeiro";
   document.getElementById("btn-save-user").textContent = "Salvar alterações";
   document.getElementById("btn-cancel-user-edit")?.classList.remove("hidden");
+}
+
+function userRoleLabel(role) {
+  return ({
+    admin: "Administrador",
+    enfermeiro: "Enfermeiro",
+    coordenador: "Coordenador",
+    psicologo: "Psicólogo",
+    servico_social: "Serviço Social",
+    user: "Enfermeiro"
+  })[role] || "Enfermeiro";
 }
 
 function renderAdminUsers(items) {
@@ -1370,24 +1866,41 @@ function renderAdminUsers(items) {
   for (const user of adminUsers) {
     const row = document.createElement("div");
     row.className = "admin-user-row";
-    row.innerHTML = `
-      <div>
-        <strong>${user.nome || "-"}</strong>
-        <span>Login: ${user.username || "-"}</span>
-      </div>
-      <div>
-        <strong>${formatCpf(user.cpf || "") || "-"}</strong>
-        <span>CPF</span>
-      </div>
-      <div>
-        <strong>${user.birthDate ? toBRDate(user.birthDate) : "-"}</strong>
-        <span>Data de nascimento</span>
-      </div>
-      <div class="admin-user-actions">
-        <span class="admin-user-role-badge">${user.role === "admin" ? "Administrador" : "Usuário"}</span>
-        <button type="button" class="ghost btn-admin-user-edit" data-id="${user.id}">Alterar</button>
-      </div>
-    `;
+    const identity = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = user.nome || "-";
+    const username = document.createElement("span");
+    username.textContent = `Login: ${user.username || "-"}`;
+    identity.append(name, username);
+
+    const cpfBlock = document.createElement("div");
+    const cpf = document.createElement("strong");
+    cpf.textContent = formatCpf(user.cpf || "") || "-";
+    const cpfLabel = document.createElement("span");
+    cpfLabel.textContent = "CPF";
+    cpfBlock.append(cpf, cpfLabel);
+
+    const functionBlock = document.createElement("div");
+    const role = document.createElement("strong");
+    role.textContent = userRoleLabel(user.role);
+    const status = document.createElement("span");
+    status.textContent = user.mustChangePassword ? "Função · senha provisória" : "Função";
+    functionBlock.append(role, status);
+
+    const actions = document.createElement("div");
+    actions.className = "admin-user-actions";
+    for (const [className, label] of [
+      ["btn-admin-user-edit", "Alterar"],
+      ["btn-admin-user-reset-password", "Zerar senha"]
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `ghost ${className}`;
+      button.dataset.id = String(user.id);
+      button.textContent = label;
+      actions.append(button);
+    }
+    row.append(identity, cpfBlock, functionBlock, actions);
     container.appendChild(row);
   }
 }
@@ -1412,9 +1925,7 @@ async function saveAdminUser() {
     nome: document.getElementById("admin-user-name").value.trim(),
     username: document.getElementById("admin-user-username").value.trim(),
     cpf: normalizeCpf(document.getElementById("admin-user-cpf").value),
-    birthDate: document.getElementById("admin-user-birthdate").value,
-    role: document.getElementById("admin-user-role").value,
-    password: document.getElementById("admin-user-password").value
+    role: document.getElementById("admin-user-role").value
   };
 
   const isEditing = Boolean(currentAdminUserEditId);
@@ -1430,9 +1941,9 @@ async function saveAdminUser() {
     clearAdminUserForm();
     await loadAdminUsers();
     await refreshCurrentUser();
-    setAdminUsersFeedback(isEditing ? "Usuário alterado com sucesso." : "Usuário cadastrado com sucesso.");
+    setAdminUsersFeedback(isEditing ? "Profissional alterado com sucesso." : "Profissional cadastrado com sucesso.");
   } catch (error) {
-    setAdminUsersFeedback(error.message || "Não foi possível salvar o usuário.", true);
+    setAdminUsersFeedback(error.message || "Não foi possível salvar o profissional.", true);
   }
 }
 
@@ -1441,6 +1952,8 @@ function syncAdminAccess() {
   document.getElementById("nav-gerenciar")?.classList.toggle("hidden", !isAdmin);
   document.getElementById("btn-gerenciar")?.classList.toggle("hidden", !isAdmin);
   document.getElementById("admin-users-section")?.classList.toggle("hidden", !isAdmin);
+  if (!isAdmin) document.getElementById("admin-ward-management")?.classList.add("hidden");
+  document.getElementById("admin-shift-reopen-section")?.classList.toggle("hidden", !isAdmin);
   syncWorkAreaNavigation();
 }
 
@@ -1458,30 +1971,258 @@ function renderHeaderWardTabs() {
     button.type = "button";
     button.className = `hero-tab${item.id === currentWardId ? " active" : ""}`;
     button.dataset.id = String(item.id);
-    button.textContent = item.nome || "-";
+    const name = document.createElement("span");
+    name.className = "home-ward-name";
+    name.textContent = item.nome || "-";
+    button.appendChild(name);
+    if (item.activeShift) {
+      const shiftIndicator = document.createElement("span");
+      shiftIndicator.className = "home-ward-shift-indicator";
+      const ownerNames = Array.isArray(item.activeShift.ownerNames) ? item.activeShift.ownerNames : [];
+      shiftIndicator.textContent = `Plantão aberto • ${ownerNames.join(", ") || item.activeShift.ownerName || "Responsável não identificado"}`;
+      button.appendChild(shiftIndicator);
+    }
     container.appendChild(button);
   }
 }
 
 function renderWardDetailToolbar() {
   const title = document.getElementById("ward-detail-title");
-  const subtitle = document.getElementById("ward-detail-subtitle");
-  if (!title || !subtitle) return;
+  if (!title) return;
 
   const selectedWard = ward && Number(ward.id) === Number(currentWardId)
     ? ward
     : wards.find(item => Number(item.id) === Number(currentWardId));
 
   title.textContent = selectedWard?.nome || "Setor";
-  subtitle.textContent = selectedWard
-    ? `Setor ${selectedWard.nome} aberto. Aqui você pode abrir o plantão, fechar, imprimir o relatório e depois voltar para acessar os outros setores.`
-    : "Abra o plantão, feche, imprima o relatório e volte para acessar os outros setores.";
 }
 
 function hasActiveWardShiftForCurrentWard() {
   const activeShift = currentUser?.activeShift || null;
   const serviceType = String(activeShift?.serviceType || "").trim().toUpperCase();
   return Boolean(activeShift && !serviceType && Number(activeShift.wardId) === Number(currentWardId));
+}
+
+function selectActiveWardShift(wardId) {
+  if (!currentUser) return null;
+  const activeShift = (Array.isArray(currentUser.activeShifts) ? currentUser.activeShifts : [])
+    .find(shift => !shift.serviceType && Number(shift.wardId) === Number(wardId)) || null;
+  currentUser.activeShift = activeShift;
+  return activeShift;
+}
+
+function getActiveServiceShift(serviceType) {
+  const expectedServiceType = String(serviceType || "").trim().toUpperCase();
+  return (Array.isArray(currentUser?.activeShifts) ? currentUser.activeShifts : [])
+    .find(shift => String(shift.serviceType || "").trim().toUpperCase() === expectedServiceType) || null;
+}
+
+function getGlobalShiftControlContext() {
+  const visibleView = ["view-home", "view-psychology", "view-social-service", "view-nir"]
+    .find(id => !document.getElementById(id)?.classList.contains("hidden")) || "";
+  const isWardDetailOpen = !document.getElementById("ward-detail-toolbar")?.classList.contains("hidden")
+    && Boolean(currentWardId);
+  let serviceType = "";
+  let label = "Área de trabalho";
+
+  if (visibleView === "view-psychology") {
+    serviceType = "PSICOLOGIA";
+    label = "Psicologia";
+  } else if (visibleView === "view-social-service") {
+    serviceType = "SERVICO_SOCIAL";
+    label = "Serviço Social";
+  } else if (visibleView === "view-nir") {
+    serviceType = "NIR";
+    label = "NIR";
+  } else if (isWardDetailOpen) {
+    label = wards.find(item => Number(item.id) === Number(currentWardId))?.nome || ward?.nome || "Setor";
+  }
+
+  const activeShifts = Array.isArray(currentUser?.activeShifts) ? currentUser.activeShifts : [];
+  let activeShift = null;
+  if (serviceType) {
+    activeShift = activeShifts.find(shift =>
+      String(shift.serviceType || "").trim().toUpperCase() === serviceType
+    ) || (
+      String(currentUser?.activeShift?.serviceType || "").trim().toUpperCase() === serviceType
+        ? currentUser.activeShift
+        : null
+    );
+  } else if (isWardDetailOpen) {
+    activeShift = activeShifts.find(shift =>
+      !String(shift.serviceType || "").trim()
+      && Number(shift.wardId) === Number(currentWardId)
+    ) || (
+      !String(currentUser?.activeShift?.serviceType || "").trim()
+      && Number(currentUser?.activeShift?.wardId) === Number(currentWardId)
+        ? currentUser.activeShift
+        : null
+    );
+  } else {
+    activeShift = currentUser?.activeShift
+      || activeShifts[0]
+      || null;
+    if (activeShift?.serviceType) {
+      serviceType = String(activeShift.serviceType).trim().toUpperCase();
+      label = {
+        PSICOLOGIA: "Psicologia",
+        SERVICO_SOCIAL: "Serviço Social",
+        NIR: "NIR"
+      }[serviceType] || label;
+    } else if (activeShift?.wardNome) {
+      label = activeShift.wardNome;
+    }
+  }
+
+  return {
+    activeShift,
+    isWardDetailOpen,
+    label,
+    serviceType,
+    wardId: isWardDetailOpen ? currentWardId : null
+  };
+}
+
+function syncGlobalShiftToolbar() {
+  const toolbar = document.getElementById("app-shift-toolbar");
+  if (!toolbar) return;
+  toolbar.classList.toggle("hidden", !currentUser);
+  if (!currentUser) return;
+
+  const context = getGlobalShiftControlContext();
+  const activeShift = context.activeShift;
+  const status = document.getElementById("global-shift-status");
+  const contextLabel = document.getElementById("global-shift-context");
+  const button = document.getElementById("btn-global-shift-menu");
+  const openState = Boolean(activeShift);
+
+  if (status) status.textContent = openState ? "Plantão aberto" : "Plantão fechado";
+  if (contextLabel) {
+    contextLabel.textContent = openState
+      ? `${context.label} · ${activeShift.shiftLength || "Período não informado"}`
+      : context.label;
+  }
+  if (button) {
+    button.textContent = openState
+      ? "Gerenciar plantão aberto"
+      : (context.isWardDetailOpen ? "Assumir plantão" : (context.serviceType ? "Abrir plantão" : "Iniciar plantão"));
+  }
+}
+
+function openGlobalShiftDialog() {
+  const context = getGlobalShiftControlContext();
+  const activeShift = context.activeShift;
+  const modal = document.getElementById("modal-global-shift");
+  const lengthField = document.getElementById("global-shift-length-field");
+  const lengthSelect = document.getElementById("global-shift-length");
+  const state = document.getElementById("global-shift-modal-state");
+  const description = document.getElementById("global-shift-modal-context");
+  const action = document.getElementById("btn-confirm-global-shift");
+  const serviceSelectId = {
+    PSICOLOGIA: "psychology-shift-length",
+    SERVICO_SOCIAL: "social-service-shift-length",
+    NIR: "nir-shift-length"
+  }[context.serviceType];
+  const canChooseLengthHere = Boolean(serviceSelectId && !activeShift);
+  const currentLength = serviceSelectId ? document.getElementById(serviceSelectId)?.value : "";
+
+  if (state) state.textContent = activeShift ? "Plantão em andamento" : "Plantão fechado";
+  if (description) {
+    description.textContent = activeShift
+      ? `${context.label}: plantão de ${activeShift.shiftLength || "período não informado"}. Para encerrar, será solicitada a senha do profissional.`
+      : context.isWardDetailOpen
+        ? `Assuma o plantão do setor ${context.label}. A confirmação de setor e período será feita na próxima etapa.`
+        : context.serviceType
+          ? `Selecione 12H ou 24H para abrir o plantão de ${context.label}.`
+          : "Escolha sua área de trabalho e o período na janela de abertura.";
+  }
+  if (lengthField) lengthField.classList.toggle("hidden", !canChooseLengthHere);
+  if (lengthSelect) lengthSelect.value = currentLength || "";
+  if (action) action.textContent = activeShift ? "Fechar plantão" : (canChooseLengthHere ? "Abrir plantão" : "Continuar");
+  setGlobalShiftFeedback("");
+  modal?.showModal();
+}
+
+function setGlobalShiftFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("global-shift-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+async function confirmGlobalShiftAction() {
+  const context = getGlobalShiftControlContext();
+  const modal = document.getElementById("modal-global-shift");
+  const activeShift = context.activeShift;
+  if (activeShift) {
+    modal?.close();
+    currentUser.activeShift = activeShift;
+    const closeButtonId = {
+      PSICOLOGIA: "btn-close-psychology-shift",
+      SERVICO_SOCIAL: "btn-close-social-service-shift",
+      NIR: "btn-close-nir-shift"
+    }[context.serviceType] || "btn-close-shift";
+    if (!context.serviceType && context.wardId) selectActiveWardShift(context.wardId);
+    document.getElementById(closeButtonId)?.click();
+    return;
+  }
+
+  if (context.isWardDetailOpen) {
+    modal?.close();
+    openAssumeWardShiftDialog();
+    setShiftFeedback("");
+    return;
+  }
+
+  const serviceSelectId = {
+    PSICOLOGIA: "psychology-shift-length",
+    SERVICO_SOCIAL: "social-service-shift-length",
+    NIR: "nir-shift-length"
+  }[context.serviceType];
+  if (!serviceSelectId) {
+    modal?.close();
+    maybeOpenStartWardModal();
+    return;
+  }
+
+  const lengthSelect = document.getElementById("global-shift-length");
+  const shiftLength = getSelectedShiftLength("global-shift-length");
+  if (!shiftLength) {
+    setGlobalShiftFeedback("Selecione se o plantão será de 12H ou 24H.", true);
+    lengthSelect?.focus();
+    return;
+  }
+
+  const targetLengthSelect = document.getElementById(serviceSelectId);
+  if (targetLengthSelect) targetLengthSelect.value = shiftLength;
+  const openFunction = {
+    PSICOLOGIA: openPsychologyShift,
+    SERVICO_SOCIAL: openSocialServiceShift,
+    NIR: openNirShift
+  }[context.serviceType];
+  await openFunction?.();
+
+  if (getGlobalShiftControlContext().activeShift) {
+    modal?.close();
+    syncGlobalShiftToolbar();
+    return;
+  }
+
+  const feedbackId = {
+    PSICOLOGIA: "psychology-shift-feedback",
+    SERVICO_SOCIAL: "social-service-shift-feedback",
+    NIR: "nir-shift-feedback"
+  }[context.serviceType];
+  const sourceFeedback = document.getElementById(feedbackId);
+  setGlobalShiftFeedback(sourceFeedback?.textContent || "Não foi possível abrir o plantão.", true);
+}
+
+function selectActiveServiceShift(serviceType) {
+  if (!currentUser) return null;
+  const activeShift = getActiveServiceShift(serviceType);
+  currentUser.activeShift = activeShift;
+  return activeShift;
 }
 
 function syncWardShiftEntryState() {
@@ -1493,10 +2234,11 @@ function syncWardShiftEntryState() {
   if (!entry || !plantao) return;
 
   const sectorOpen = Boolean(currentWardId && !document.getElementById("ward-detail-toolbar")?.classList.contains("hidden"));
-  const activeShift = currentUser?.activeShift || null;
+  const activeShift = currentUser?.activeShift
+    || (Array.isArray(currentUser?.activeShifts) ? currentUser.activeShifts[0] : null)
+    || null;
   const activeWardShift = hasActiveWardShiftForCurrentWard();
-  const hasOtherShiftOpen = Boolean(activeShift && !activeWardShift);
-  const shouldShowPlantao = Boolean(sectorOpen && (activeWardShift || wardShiftPanelRequested));
+  const shouldShowPlantao = Boolean(sectorOpen && activeWardShift);
 
   entry.classList.toggle("hidden", !sectorOpen || shouldShowPlantao);
   plantao.classList.toggle("hidden", !shouldShowPlantao);
@@ -1513,22 +2255,63 @@ function syncWardShiftEntryState() {
     return;
   }
 
-  if (hasOtherShiftOpen) {
-    if (entryTitle) entryTitle.textContent = "Plantão já aberto em outro setor";
-    if (entrySubtitle) entrySubtitle.textContent = `Você já está responsável por ${activeShift?.wardNome || "outro setor"}. Feche o plantão atual para assumir este setor.`;
-    if (assumeButton) {
-      assumeButton.textContent = "Assumir setor";
-      assumeButton.disabled = true;
-    }
-    return;
+  if (entryTitle) entryTitle.textContent = "Assumir plantão neste setor";
+  if (entrySubtitle) {
+    entrySubtitle.textContent = activeShift
+      ? `Seu plantão em ${activeShift.wardNome || "outro setor"} continuará aberto. Você pode assumir este setor também.`
+      : "Assuma o plantão para liberar os registros, controles e relatório deste setor.";
   }
-
-  if (entryTitle) entryTitle.textContent = "Assumir este setor";
-  if (entrySubtitle) entrySubtitle.textContent = "Quando você assumir o setor, o painel do plantão será liberado para abrir, fechar e imprimir o relatório do período.";
   if (assumeButton) {
-    assumeButton.textContent = "Assumir setor";
+    assumeButton.textContent = "Assumir plantão";
     assumeButton.disabled = false;
   }
+}
+
+function openAssumeWardShiftDialog() {
+  if (!currentWardId) return;
+  const selectedWard = wards.find(item => Number(item.id) === Number(currentWardId)) || ward;
+  const context = document.getElementById("assume-ward-shift-context");
+  const lengthSelect = document.getElementById("assume-ward-shift-length");
+  const dialog = document.getElementById("modal-assume-ward-shift");
+  const shiftDate = document.getElementById("shift-date")?.value || getOperationalDayKey();
+  if (context) {
+    context.textContent = `Confirme o tipo do plantão para assumir ${selectedWard?.nome || "este setor"} em ${toBRDate(shiftDate)}.`;
+  }
+  if (lengthSelect) lengthSelect.value = "";
+  setAssumeWardShiftFeedback("");
+  dialog?.showModal();
+}
+
+function setAssumeWardShiftFeedback(message = "", isError = false, canRequestAuthorization = false) {
+  const feedback = document.getElementById("assume-ward-shift-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+  document.getElementById("btn-request-assume-ward-shift-authorization")
+    ?.classList.toggle("hidden", !canRequestAuthorization);
+}
+
+async function confirmAssumeWardShift() {
+  const shiftLength = getSelectedShiftLength("assume-ward-shift-length");
+  if (!shiftLength) {
+    setAssumeWardShiftFeedback("Selecione se o plantão será de 12H ou 24H.", true);
+    return;
+  }
+  const existingShiftLength = document.getElementById("shift-length");
+  if (existingShiftLength) existingShiftLength.value = shiftLength;
+  const opened = await openShiftForSelectedWard(currentWardId, { openTeamModal: false });
+  if (opened) {
+    document.getElementById("modal-assume-ward-shift")?.close();
+    return;
+  }
+  const feedback = document.getElementById("shift-feedback");
+  const authorizationButton = document.getElementById("btn-request-shift-authorization");
+  setAssumeWardShiftFeedback(
+    feedback?.textContent || "Não foi possível abrir o plantão.",
+    feedback?.classList.contains("error-text"),
+    !authorizationButton?.classList.contains("hidden")
+  );
 }
 
 function renderPatientCurrentAdmission(admission) {
@@ -1886,14 +2669,14 @@ function updatePortariaSocialCount(count) {
   const badge = document.getElementById("portaria-social-count");
   if (!badge) return;
   const total = Number(count) || 0;
-  badge.textContent = total === 1 ? "1 solicitação" : `${total} solicitações`;
+  badge.textContent = total === 1 ? "1 atendimento" : `${total} atendimentos`;
 }
 
 function updatePsychologyCount(count) {
   const badge = document.getElementById("psychology-count");
   if (!badge) return;
   const total = Number(count) || 0;
-  badge.textContent = total === 1 ? "1 solicitação" : `${total} solicitações`;
+  badge.textContent = total === 1 ? "1 atendimento" : `${total} atendimentos`;
 }
 
 function updatePsychologyManualCount(count) {
@@ -1912,13 +2695,6 @@ function updateSocialServiceManualCount(count) {
 
 function updatePsychologyMonthlyCount(count) {
   const badge = document.getElementById("psychology-monthly-count");
-  if (!badge) return;
-  const total = Number(count) || 0;
-  badge.textContent = total === 1 ? "1 atendimento" : `${total} atendimentos`;
-}
-
-function updatePsychologyRecentCount(count) {
-  const badge = document.getElementById("psychology-recent-count");
   if (!badge) return;
   const total = Number(count) || 0;
   badge.textContent = total === 1 ? "1 atendimento" : `${total} atendimentos`;
@@ -1946,7 +2722,9 @@ function hasServiceSocialRequest(patient) {
   const request = patient?.currentAdmission?.serviceSocialRequest || {};
   const status = String(request?.status || "").trim().toUpperCase();
   if (patient?.socialSupport?.dischargePending) return true;
-  if (status === "BAIXA" || request?.closedAt) return false;
+  if (status === "BAIXA") return false;
+  if (status === "SOLICITADO" || status === "EM_ACOMPANHAMENTO") return true;
+  if (request?.closedAt) return false;
   return Boolean(request?.requested || request?.requestedAt || request?.viewedAt || request?.startedAt);
 }
 
@@ -2009,7 +2787,7 @@ function buildPsychologyManualQueueEntries(items = psychologyManualEntries) {
     manualRequestId: String(entry.id || ""),
     isManualRequest: true,
     nome: entry.patientName || "",
-    birthDate: "",
+    birthDate: entry.birthDate || "",
     diagnostico: entry.notes || "",
     manualEntry: { ...entry },
     psychologySupport: {
@@ -2070,8 +2848,9 @@ function buildSocialServiceManualQueueEntries(items = socialServiceManualEntries
     id: `manual-social-${String(entry.id || "")}`,
     manualRequestId: String(entry.id || ""),
     isManualRequest: true,
+    socialServiceCategory: String(entry.category || "AVULSO").trim().toUpperCase(),
     nome: entry.patientName || "",
-    birthDate: "",
+    birthDate: entry.birthDate || "",
     phone: entry.contacts || "",
     manualEntry: { ...entry },
     socialSupport: {
@@ -2079,7 +2858,7 @@ function buildSocialServiceManualQueueEntries(items = socialServiceManualEntries
       admissionNotes: "",
       socialRecord: entry.socialRecord || "Pendente",
       observation: entry.observation || "",
-      socialForm: {},
+      socialForm: entry.socialForm || {},
       socialRecordUpdatedAt: entry.updatedAt || "",
       socialRecordUpdatedBy: entry.updatedBy || "",
       dischargePending: false,
@@ -2100,6 +2879,150 @@ function buildSocialServiceManualQueueEntries(items = socialServiceManualEntries
   }));
 }
 
+async function loadSocialServiceManualRequests() {
+  const data = await api("/api/social-service/requests/manual");
+  socialServiceManualEntries = Array.isArray(data.requests) ? data.requests : [];
+}
+
+async function saveSocialServiceManualRequest() {
+  const categoryInput = document.getElementById("social-service-manual-category");
+  const nameInput = document.getElementById("social-service-manual-name");
+  const birthDateInput = document.getElementById("social-service-manual-birth-date");
+  const reasonInput = document.getElementById("social-service-manual-reason");
+  const notesInput = document.getElementById("social-service-manual-notes");
+  const button = document.getElementById("btn-save-social-service-manual");
+  if (!getActiveServiceShift("SERVICO_SOCIAL")) {
+    setSocialServiceManualFeedback("Abra o plantão do Serviço Social para cadastrar uma solicitação avulsa.", true);
+    return;
+  }
+  const patientName = String(nameInput?.value || "").trim();
+  const sectorOrReason = String(reasonInput?.value || "").trim();
+  if (!patientName || !sectorOrReason) {
+    setSocialServiceManualFeedback("Informe o nome e o setor ou motivo da solicitação avulsa.", true);
+    return;
+  }
+  try {
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Adicionando...";
+    }
+    const data = await api("/api/social-service/requests/manual", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        category: String(categoryInput?.value || "AVULSO").trim().toUpperCase(),
+        patientName,
+        birthDate: String(birthDateInput?.value || "").trim(),
+        sectorOrReason,
+        notes: String(notesInput?.value || "").trim()
+      })
+    });
+    socialServiceManualEntries = [data.request, ...socialServiceManualEntries].filter(Boolean);
+    if (categoryInput) categoryInput.value = "AVULSO";
+    if (nameInput) nameInput.value = "";
+    if (birthDateInput) birthDateInput.value = "";
+    if (reasonInput) reasonInput.value = "";
+    if (notesInput) notesInput.value = "";
+    await refreshSocialServiceQueueView();
+    setSocialServiceManualFeedback("Solicitação avulsa adicionada à fila do Serviço Social.");
+  } catch (error) {
+    setSocialServiceManualFeedback(error.message || "Não foi possível adicionar a solicitação avulsa.", true);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Adicionar solicitação avulsa";
+    }
+  }
+}
+
+async function updateSocialServiceManualRequest(requestId, row, status, options = {}) {
+  const request = socialServiceManualEntries.find(entry => String(entry.id) === String(requestId));
+  if (!request || !row) return;
+  if (!getActiveServiceShift("SERVICO_SOCIAL")) {
+    setPortariaSocialFeedback("Abra o plantão do Serviço Social para atualizar solicitações avulsas.", true);
+    return;
+  }
+  const statusToSave = status === "BAIXA" || status === "ATENDIMENTO_OBITO"
+    ? "BAIXA"
+    : (status === "SOLICITADO" ? "SOLICITADO" : "EM_ACOMPANHAMENTO");
+  const categoryToSave = status === "ATENDIMENTO_OBITO" ? "OBITO" : request.category;
+  const button = row.querySelector(".btn-save-social-manual");
+  try {
+    if (button) {
+      button.disabled = true;
+      button.textContent = statusToSave === "BAIXA" ? "Finalizando..." : "Salvando...";
+    }
+    const data = await api(`/api/social-service/requests/manual/${encodeURIComponent(requestId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        status: statusToSave,
+        attended: options.attended !== false && statusToSave === "EM_ACOMPANHAMENTO",
+        category: categoryToSave,
+        contacts: row.querySelector('[data-field="manual-contacts"]')?.value.trim() || "",
+        socialRecord: request.socialRecord || "Pendente",
+        observation: row.querySelector('[data-field="manual-observation"]')?.value.trim() || ""
+      })
+    });
+    socialServiceManualEntries = socialServiceManualEntries.map(entry =>
+      String(entry.id) === String(requestId) ? data.request : entry
+    );
+    await refreshSocialServiceQueueView();
+    await loadSocialServiceAttendances({ silent: true });
+    setPortariaSocialFeedback(status === "ATENDIMENTO_OBITO"
+      ? "Atendimento de óbito registrado na produção e removido da planilha de acompanhamento."
+      : (statusToSave === "BAIXA"
+        ? "Atendimento avulso baixado e enviado para a produção."
+        : (statusToSave === "SOLICITADO"
+          ? "Atendimento avulso salvo como solicitado."
+          : "Atendimento avulso salvo como em acompanhamento.")));
+  } catch (error) {
+    setPortariaSocialFeedback(error.message || "Não foi possível atualizar o atendimento avulso.", true);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = getAttendanceButtonLabel(row, "social");
+    }
+    refreshAttendanceClaims();
+  }
+}
+
+function syncSocialServiceEditingAvailability() {
+  const canEdit = Boolean(getActiveServiceShift("SERVICO_SOCIAL"));
+  for (const row of document.querySelectorAll("#portaria-social-list tr")) {
+    const statusSelect = row.querySelector('[data-field="social-status"]');
+    const observation = row.querySelector('[data-field="observation"], [data-field="manual-observation"]');
+    statusSelect?.toggleAttribute("disabled", !canEdit);
+    observation?.toggleAttribute("disabled", !canEdit);
+
+    const saveButton = row.querySelector(".btn-save-portaria-social, .btn-save-social-manual");
+    if (saveButton) {
+      saveButton.toggleAttribute("disabled", !canEdit || saveButton.dataset.recordUnavailable === "true");
+      saveButton.textContent = canEdit ? getAttendanceButtonLabel(row, "social") : "Plantão fechado";
+      saveButton.title = canEdit ? "" : "Abra o plantão do Serviço Social para editar e salvar.";
+    }
+  }
+}
+
+function syncSocialServiceStatusDraft(row) {
+  const select = row?.querySelector('[data-field="social-status"]');
+  if (!select) return;
+  select.classList.remove("requested", "in-progress", "done", "none");
+  const status = String(select.value || "").trim().toUpperCase();
+  select.classList.add(status === "EM_ACOMPANHAMENTO" || status === "ATENDIMENTO_OBITO"
+    ? "in-progress"
+    : (status === "BAIXA" ? "done" : "requested"));
+  const meta = row.querySelector("[data-social-status-meta]");
+  if (meta) {
+    meta.textContent = status === row.dataset.currentStatus
+      ? (row.dataset.currentMeta || "Status do atendimento")
+      : (status === "BAIXA" || status === "ATENDIMENTO_OBITO"
+        ? "Alteração pendente. Clique no botão de confirmação."
+        : "Alteração pendente.");
+  }
+  applyAttendanceClaimButtons();
+}
+
 async function refreshSocialServiceQueueView() {
   const queue = await buildServiceSocialQueueFromWards(wards);
   const merged = [...queue, ...buildSocialServiceManualQueueEntries()]
@@ -2110,6 +3033,50 @@ async function refreshSocialServiceQueueView() {
   portariaActivePatients = merged;
   renderPortariaSocialList(merged);
   return merged;
+}
+
+async function deleteActiveServiceRequest(button) {
+  const service = String(button?.dataset.service || "").trim().toLowerCase();
+  const requestId = String(button?.dataset.id || "").trim();
+  const isManual = button?.dataset.manual === "true";
+  if (!requestId || !["psychology", "social-service"].includes(service)) return;
+  const serviceLabel = service === "psychology" ? "Psicologia" : "Serviço Social";
+  const requestType = isManual ? "solicitação avulsa" : "solicitação vinculada ao leito";
+  if (!confirm(`Excluir esta ${requestType} da fila de ${serviceLabel}?\n\nA solicitação de leito será desativada, sem apagar as anotações. A exclusão não gera produção.`)) return;
+  const adminPassword = window.prompt("Digite a senha de um administrador para confirmar a exclusão:");
+  if (adminPassword === null) return;
+  if (!adminPassword.trim()) {
+    const feedback = service === "psychology" ? setPsychologyFeedback : setPortariaSocialFeedback;
+    feedback("A senha do administrador é obrigatória.", true);
+    return;
+  }
+
+  const endpoint = service === "psychology"
+    ? (isManual
+      ? `/api/psychology/requests/manual/${encodeURIComponent(requestId)}`
+      : `/api/patients/${encodeURIComponent(requestId)}/psychology-support/request`)
+    : (isManual
+      ? `/api/social-service/requests/manual/${encodeURIComponent(requestId)}`
+      : `/api/patients/${encodeURIComponent(requestId)}/social-support/request`);
+  const feedback = service === "psychology" ? setPsychologyFeedback : setPortariaSocialFeedback;
+  try {
+    await api(endpoint, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ adminPassword })
+    });
+    await refreshWards();
+    if (service === "psychology") {
+      if (isManual) await loadPsychologyManualRequests();
+      await refreshPsychologyQueueView();
+    } else {
+      if (isManual) await loadSocialServiceManualRequests();
+      await refreshSocialServiceQueueView();
+    }
+    feedback(`Solicitação da fila de ${serviceLabel} excluída. Nenhum registro de produção foi criado.`);
+  } catch (error) {
+    feedback(error.message || `Não foi possível excluir a solicitação de ${serviceLabel}.`, true);
+  }
 }
 
 function getPsychologyStatusPresentation(request = {}) {
@@ -2153,6 +3120,55 @@ function getPsychologyStatusPresentation(request = {}) {
     chipClassName: "none",
     badgeClassName: "none",
     meta: ""
+  };
+}
+
+function getSocialServiceRequestState(request = {}) {
+  const status = String(request?.status || "").trim().toUpperCase();
+  if (["SOLICITADO", "EM_ACOMPANHAMENTO", "BAIXA"].includes(status)) return status;
+  if (request?.closedAt) return "BAIXA";
+  if (request?.startedAt || request?.viewedAt) return "EM_ACOMPANHAMENTO";
+  return request?.requested || request?.requestedAt ? "SOLICITADO" : "";
+}
+
+function getSocialServiceRequestPresentation(request = {}) {
+  const state = getSocialServiceRequestState(request);
+  const presentation = getBedRequestStatus(request, "serviceSocialRequest");
+  if (state === "BAIXA") {
+    return {
+      state,
+      label: "Alta do atendimento",
+      className: "done",
+      meta: request?.closedBy
+        ? `Atendimento finalizado por ${request.closedBy}`
+        : `Finalizado em ${toBRDateTime(request?.closedAt) || "-"}`
+    };
+  }
+  if (state === "EM_ACOMPANHAMENTO") {
+    return {
+      state,
+      label: "Em acompanhamento",
+      className: "in-progress",
+      meta: request?.startedBy || request?.viewedBy
+        ? `Em acompanhamento por ${request.startedBy || request.viewedBy}`
+        : `Iniciado em ${toBRDateTime(request?.startedAt || request?.viewedAt) || "-"}`
+    };
+  }
+  if (state === "SOLICITADO") {
+    return {
+      state,
+      label: "Solicitado",
+      className: "requested",
+      meta: request?.requestedBy
+        ? `Solicitado por ${request.requestedBy}`
+        : `Solicitado em ${toBRDateTime(request?.requestedAt) || "-"}`
+    };
+  }
+  return {
+    state,
+    label: presentation.label,
+    className: presentation.className,
+    meta: presentation.meta
   };
 }
 
@@ -2724,7 +3740,39 @@ function openSocialServiceFormModal(patientId) {
   const patient = portariaActivePatients.find(item => String(item?.id || "") === String(patientId)) || null;
   if (!patient) return;
   currentSocialServiceFormPatientId = Number(patient.id) || null;
+  currentSocialServiceFormManualRequestId = "";
   renderSocialServiceFormModal(patient);
+  document.getElementById("modal-social-service-form")?.showModal();
+}
+
+function buildSocialServiceManualFormPatient(entry = {}) {
+  return {
+    nome: entry.patientName || "",
+    birthDate: entry.birthDate || "",
+    phone: entry.contacts || "",
+    isManualRequest: true,
+    currentAdmission: {
+      wardNome: entry.sectorOrReason || "Solicitação avulsa",
+      bedId: "-",
+      admittedAt: entry.createdAt || ""
+    },
+    socialSupport: {
+      contacts: entry.contacts || "",
+      socialRecord: entry.socialRecord || "Pendente",
+      observation: entry.observation || "",
+      socialForm: entry.socialForm || {},
+      updatedAt: entry.updatedAt || "",
+      updatedBy: entry.updatedBy || ""
+    }
+  };
+}
+
+function openSocialServiceManualFormModal(requestId) {
+  const entry = socialServiceManualEntries.find(item => String(item.id || "") === String(requestId)) || null;
+  if (!entry) return;
+  currentSocialServiceFormPatientId = null;
+  currentSocialServiceFormManualRequestId = String(entry.id || "");
+  renderSocialServiceFormModal(buildSocialServiceManualFormPatient(entry));
   document.getElementById("modal-social-service-form")?.showModal();
 }
 
@@ -2734,6 +3782,42 @@ function getSocialServiceRowDraftObservation(patientId) {
 }
 
 async function saveSocialServiceFormModal() {
+  const manualRequestId = String(currentSocialServiceFormManualRequestId || "");
+  if (manualRequestId) {
+    const entry = socialServiceManualEntries.find(item => String(item.id || "") === manualRequestId);
+    if (!entry) return;
+    if (!getActiveServiceShift("SERVICO_SOCIAL")) {
+      setSocialServiceFormFeedback("Abra o plantão do Serviço Social para salvar a ficha social.", true);
+      return;
+    }
+    const button = document.getElementById("btn-save-social-service-form");
+    try {
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Salvando...";
+      }
+      const data = await api(`/api/social-service/requests/manual/${encodeURIComponent(manualRequestId)}/social-form`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ socialForm: collectSocialServiceFormModalData() })
+      });
+      socialServiceManualEntries = socialServiceManualEntries.map(item =>
+        String(item.id || "") === manualRequestId ? data.request : item
+      );
+      await refreshSocialServiceQueueView();
+      document.getElementById("modal-social-service-form")?.close();
+      setPortariaSocialFeedback("Ficha social do atendimento avulso salva com sucesso.");
+    } catch (error) {
+      setSocialServiceFormFeedback(error.message || "Não foi possível salvar a ficha social do atendimento avulso.", true);
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = "Salvar ficha";
+      }
+    }
+    return;
+  }
+
   const patientId = Number(currentSocialServiceFormPatientId);
   if (!patientId) return;
 
@@ -2796,8 +3880,12 @@ function printSocialServiceForm(patientId, overrideForm = null) {
   const patient = typeof patientId === "object"
     ? patientId
     : (portariaActivePatients.find(item => String(item?.id || "") === String(patientId)) || null);
-  if (!patient) return;
+  if (!patient) {
+    setPortariaSocialFeedback("Não foi possível localizar o paciente para imprimir a ficha social.", true);
+    return;
+  }
 
+  const win = window.open("", "_blank", "width=1280,height=920");
   const support = createSocialSupportState(patient.socialSupport);
   const form = buildSocialServiceFormPrintData(patient, overrideForm);
   const familyContacts = form.familyContacts.length
@@ -2815,10 +3903,7 @@ function printSocialServiceForm(patientId, overrideForm = null) {
   const printTitle = `Ficha Social - ${patient?.nome || "Paciente"}`;
   const printUpdatedAt = toBRDateTime(form.updatedAt || support.updatedAt) || "-";
   const printUpdatedBy = form.updatedBy || support.updatedBy || "-";
-  const win = window.open("", "_blank", "width=1280,height=920");
-  if (!win) return;
-
-  win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${escapeHtml(printTitle)}</title><style>
+  const printDocument = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${escapeHtml(printTitle)}</title><style>
     @page { size: A4 portrait; margin: 5mm; }
     * {
       box-sizing: border-box;
@@ -2831,8 +3916,8 @@ function printSocialServiceForm(patientId, overrideForm = null) {
     .sheet { width: 100%; margin: 0 auto; background: #fff; padding: 4mm 4mm 3mm; border: 1px solid #8ca6c7; }
     .header-code { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.4mm; font-size: 6.1pt; font-weight: 800; color: #17365d; }
     .header { display: grid; grid-template-columns: 34mm minmax(0, 1fr) 42mm; gap: 2mm; align-items: start; border-bottom: 1px solid #7e93ae; padding-bottom: 2mm; }
-    .brand { display: grid; grid-template-columns: 12mm minmax(0, 1fr); gap: 2mm; align-items: start; }
-    .brand-mark { font-size: 18pt; font-weight: 900; color: #10283d; line-height: 1; }
+    .brand { display: grid; grid-template-columns: 30mm minmax(0, 1fr); gap: 2mm; align-items: center; }
+    .brand-logo { display: block; width: 30mm; height: auto; }
     .brand-text { font-size: 6.2pt; font-weight: 800; text-align: center; color: #10283d; line-height: 1.15; }
     .title { text-align: center; padding-top: 1mm; }
     .title .line-1 { font-size: 8.5pt; font-weight: 900; color: #10283d; }
@@ -2865,7 +3950,7 @@ function printSocialServiceForm(patientId, overrideForm = null) {
       </div>
       <div class="header">
         <div class="brand">
-          <div class="brand-mark">HMA</div>
+          <img class="brand-logo" src="${escapeHtml(new URL("/logo-hma.webp", window.location.href).href)}" alt="HMA">
           <div class="brand-text">HOSPITAL MUNICIPAL DE ACAILANDIA<br>URGENCIA E EMERGENCIA</div>
         </div>
         <div class="title">
@@ -2970,17 +4055,60 @@ function printSocialServiceForm(patientId, overrideForm = null) {
       <div class="footer-note">Ficha atualizada por ${escapeHtml(printUpdatedBy)} em ${escapeHtml(printUpdatedAt)}.</div>
       <div class="footer-note">HMA - A servico da vida.</div>
     </div>
-    <script>
-      window.onload = () => {
-        setTimeout(() => {
-          window.focus();
-          window.print();
-        }, 120);
-      };
-    </script>
-  </body></html>`);
-  win.document.close();
-  win.focus();
+  </body></html>`;
+  if (win) {
+    try {
+      win.document.write(printDocument);
+      win.document.close();
+      applyA4PrintLayout(win, "portrait");
+    } catch (error) {
+      win.close();
+      console.error("Falha ao preparar a ficha social para impressão.", error);
+      setPortariaSocialFeedback("Não foi possível preparar a ficha social para impressão.", true);
+    }
+    return;
+  }
+
+  const printFrame = document.createElement("iframe");
+  printFrame.title = printTitle;
+  printFrame.style.cssText = "position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0";
+  printFrame.srcdoc = printDocument;
+  const cleanup = () => printFrame.remove();
+  printFrame.onload = async () => {
+    const frameWindow = printFrame.contentWindow;
+    if (!frameWindow) {
+      cleanup();
+      setPortariaSocialFeedback("O navegador não permitiu abrir a impressão. Autorize a impressão para este site e tente novamente.", true);
+      return;
+    }
+    const imageLoads = Array.from(frameWindow.document.images).map(image => {
+      if (image.complete) return Promise.resolve();
+      return new Promise(resolve => {
+        image.addEventListener("load", resolve, { once: true });
+        image.addEventListener("error", resolve, { once: true });
+      });
+    });
+    await Promise.race([
+      Promise.all(imageLoads),
+      new Promise(resolve => window.setTimeout(resolve, 2000))
+    ]);
+    frameWindow.onafterprint = cleanup;
+    try {
+      frameWindow.focus();
+      frameWindow.print();
+    } catch (error) {
+      cleanup();
+      console.error("Falha ao iniciar a impressão da ficha social.", error);
+      setPortariaSocialFeedback("Não foi possível iniciar a impressão da ficha social neste navegador.", true);
+    }
+  };
+  document.body.appendChild(printFrame);
+  window.setTimeout(() => {
+    if (printFrame.isConnected && !printFrame.contentWindow) {
+      cleanup();
+      setPortariaSocialFeedback("O navegador bloqueou a impressão da ficha social. Permita pop-ups e tente novamente.", true);
+    }
+  }, 5000);
 }
 
 function normalizeSocialServiceRecordValue(value = "") {
@@ -3050,6 +4178,58 @@ async function buildPsychologyQueueFromWards(wardItems = wards) {
   }
 }
 
+let myAttendanceClaims = { psychologyPatientIds: [], psychologyManualIds: [], socialPatientIds: [], socialManualIds: [] };
+
+function isAttendanceClaimedByMe(row, kind) {
+  if (!row) return false;
+  const manualId = String(row.dataset.manualRequestId || "").trim();
+  if (kind === "psychology") {
+    return manualId
+      ? (myAttendanceClaims.psychologyManualIds || []).includes(manualId)
+      : (myAttendanceClaims.psychologyPatientIds || []).includes(Number(row.dataset.id));
+  }
+  return manualId
+    ? (myAttendanceClaims.socialManualIds || []).includes(manualId)
+    : (myAttendanceClaims.socialPatientIds || []).includes(Number(row.dataset.id));
+}
+
+function getAttendanceButtonLabel(row, kind) {
+  const selectedStatus = String(row?.querySelector('[data-field="psychology-status"], [data-field="social-status"]')?.value || "").trim().toUpperCase();
+  if (selectedStatus === "BAIXA") return "Confirmar alta";
+  if (selectedStatus === "ATENDIMENTO_OBITO") return "Confirmar óbito";
+  return "Atendido por mim";
+}
+
+function applyAttendanceClaimButtons() {
+  const groups = [
+    ["#psychology-list tr", ".btn-save-psychology-record", "psychology", isPsychologyShiftOpen()],
+    ["#portaria-social-list tr", ".btn-save-portaria-social, .btn-save-social-manual", "social", Boolean(getActiveServiceShift("SERVICO_SOCIAL"))]
+  ];
+  for (const [rowSelector, buttonSelector, kind, canEdit] of groups) {
+    for (const row of document.querySelectorAll(rowSelector)) {
+      const button = row.querySelector(buttonSelector);
+      if (!button || button.dataset.recordUnavailable === "true" || !canEdit) continue;
+      if (button.disabled && button.textContent === "Salvando...") continue;
+      button.textContent = getAttendanceButtonLabel(row, kind);
+      button.classList.toggle("attended-by-me", isAttendanceClaimedByMe(row, kind));
+      button.title = "Registra que você atendeu este paciente neste plantão. Só os atendimentos marcados entram na sua ficha de fechamento.";
+    }
+  }
+}
+
+async function refreshAttendanceClaims() {
+  try {
+    const data = await api("/api/attendance-claims/mine");
+    myAttendanceClaims = {
+      psychologyPatientIds: Array.isArray(data.psychologyPatientIds) ? data.psychologyPatientIds : [],
+      psychologyManualIds: Array.isArray(data.psychologyManualIds) ? data.psychologyManualIds : [],
+      socialPatientIds: Array.isArray(data.socialPatientIds) ? data.socialPatientIds : [],
+      socialManualIds: Array.isArray(data.socialManualIds) ? data.socialManualIds : []
+    };
+    applyAttendanceClaimButtons();
+  } catch {}
+}
+
 function renderPsychologyPatients(items) {
   const patients = Array.isArray(items) ? items : [];
   psychologyActivePatients = patients;
@@ -3062,7 +4242,7 @@ function renderPsychologyPatients(items) {
   updatePsychologyCount(patients.length);
   const canEdit = isPsychologyShiftOpen();
   const disabledAttr = canEdit ? "" : "disabled";
-  const saveLabel = canEdit ? "Salvar evolução" : "Plantão fechado";
+  const saveLabel = canEdit ? "Atendido por mim" : "Plantão fechado";
   const blockedTitle = canEdit ? "" : "title=\"Abra o plantao da Psicologia para editar e salvar a evolucao.\"";
 
   for (const [index, patient] of patients.entries()) {
@@ -3082,6 +4262,7 @@ function renderPsychologyPatients(items) {
     row.dataset.queueKey = getPsychologyQueueKey(patient);
     row.dataset.currentStatus = requestStatus.state || "";
     row.dataset.currentMeta = requestStatus.meta || "";
+    row.dataset.manualRequestId = patient.isManualRequest ? String(patient.manualRequestId || "") : "";
     row.innerHTML = `
       <td>${escapeHtml(String(index + 1).padStart(2, "0"))}</td>
       <td>${escapeHtml(currentAdmission.wardNome || "-")}</td>
@@ -3105,7 +4286,9 @@ function renderPsychologyPatients(items) {
         ${support.dischargePending ? `<div class="psychology-status-meta">${escapeHtml(getSupportDischargeMeta(support))}</div>` : ""}
       </td>
       <td class="psychology-table-action-cell">
+        <button type="button" class="ghost btn-open-psychology-history" data-id="${escapeHtml(String(patient.id || ""))}" data-manual-request-id="${escapeHtml(patient.isManualRequest ? String(patient.manualRequestId || "") : "")}">Histórico</button>
         <button type="button" class="btn-save-psychology-record" data-id="${escapeHtml(String(patient.id || ""))}" ${disabledAttr} ${blockedTitle}>${saveLabel}</button>
+        <button type="button" class="btn-delete-active-service-request" data-id="${escapeHtml(patient.isManualRequest ? String(patient.manualRequestId || "") : String(patient.id || ""))}" data-service="psychology" data-manual="${patient.isManualRequest ? "true" : "false"}">Excluir</button>
         <div class="psychology-table-updated">${support.updatedAt ? `Atualizado por ${escapeHtml(support.updatedBy || "-")} em ${escapeHtml(toBRDateTime(support.updatedAt) || "-")}` : "Sem evolução salva ainda."}</div>
       </td>
     `;
@@ -3113,10 +4296,12 @@ function renderPsychologyPatients(items) {
   }
 
   syncPsychologyEditingAvailability();
+  applyAttendanceClaimButtons();
+  refreshAttendanceClaims();
 }
 
 function isPsychologyShiftOpen() {
-  return String(currentUser?.activeShift?.serviceType || "").trim().toUpperCase() === "PSICOLOGIA";
+  return Boolean(getActiveServiceShift("PSICOLOGIA"));
 }
 
 function syncPsychologyEditingAvailability() {
@@ -3129,7 +4314,7 @@ function syncPsychologyEditingAvailability() {
     const button = row.querySelector(".btn-save-psychology-record");
     if (button) {
       button.toggleAttribute("disabled", !canEdit);
-      button.textContent = canEdit ? "Salvar evolução" : "Plantão fechado";
+      button.textContent = canEdit ? getAttendanceButtonLabel(row, "psychology") : "Plantão fechado";
       button.title = canEdit ? "" : "Abra o plantao da Psicologia para editar e salvar a evolucao.";
     }
   }
@@ -3155,11 +4340,15 @@ function syncPsychologyStatusDraft(card) {
   applyPsychologyStatusSelectVisual(select, selectedStatus);
 
   if (selectedStatus && selectedStatus !== currentStatus) {
-    meta.textContent = "Alteracao pendente. Clique em Salvar evolução.";
+    meta.textContent = selectedStatus === "BAIXA"
+      ? "Alteração pendente. Clique em Confirmar alta."
+      : "Alteração pendente.";
+    applyAttendanceClaimButtons();
     return;
   }
 
   meta.textContent = card.dataset.currentMeta || "-";
+  applyAttendanceClaimButtons();
 }
 
 function buildPsychologyRequestPayload(current = {}, nextStatus = "", supportPayload = {}) {
@@ -3230,6 +4419,7 @@ function renderPsychologyManualRequests(items) {
     card.className = "portaria-registry-card";
     card.innerHTML = `
       <strong>${escapeHtml(entry.patientName || "-")}</strong>
+      <span>Nascimento: ${escapeHtml(toBRDate(entry.birthDate) || "Não informada")}</span>
       <span>Setor ou motivo: ${escapeHtml(entry.sectorOrReason || "-")}</span>
       ${entry.notes ? `<span>Observacao: ${escapeHtml(entry.notes)}</span>` : ""}
       <span>Status: ${escapeHtml(getPsychologyStatusPresentation({ status: entry.status || "SOLICITADO" }).label || "Solicitado")}</span>
@@ -3241,11 +4431,13 @@ function renderPsychologyManualRequests(items) {
 }
 
 function setPsychologyActiveTab(tab = "queue") {
-  currentPsychologyTab = tab === "monthly" ? "monthly" : "queue";
+  currentPsychologyTab = ["monthly", "bpa"].includes(tab) ? tab : "queue";
   document.getElementById("btn-psychology-tab-queue")?.classList.toggle("active", currentPsychologyTab === "queue");
   document.getElementById("btn-psychology-tab-monthly")?.classList.toggle("active", currentPsychologyTab === "monthly");
+  document.getElementById("btn-psychology-tab-bpa")?.classList.toggle("active", currentPsychologyTab === "bpa");
   document.getElementById("psychology-tab-queue-panel")?.classList.toggle("hidden", currentPsychologyTab !== "queue");
   document.getElementById("psychology-tab-monthly-panel")?.classList.toggle("hidden", currentPsychologyTab !== "monthly");
+  document.getElementById("psychology-tab-bpa-panel")?.classList.toggle("hidden", currentPsychologyTab !== "bpa");
 }
 
 function renderPsychologyAttendanceTable(items, options = {}) {
@@ -3275,8 +4467,33 @@ function renderPsychologyAttendanceTable(items, options = {}) {
       <td>${escapeHtml(statusPresentation.state ? statusPresentation.label : "-")}</td>
       <td>${escapeHtml(entry.interventions || "-")}</td>
       <td>${escapeHtml(entry.observation || "-")}</td>
+      <td><button type="button" class="danger btn-delete-psychology-attendance" data-id="${escapeHtml(entry.id || "")}">Apagar</button></td>
     `;
     container.appendChild(row);
+  }
+}
+
+async function deletePsychologyAttendanceEntry(entryId) {
+  const normalizedEntryId = String(entryId || "").trim();
+  if (!normalizedEntryId || !confirm("Apagar este registro de atendimento da Psicologia?")) return;
+  const adminPassword = prompt("Digite a senha de um administrador para apagar este registro:");
+  if (adminPassword === null) return;
+  if (!adminPassword) {
+    setPsychologyFeedback("A senha do administrador é obrigatória.", true);
+    return;
+  }
+
+  try {
+    await api(`/api/psychology/attendances/${encodeURIComponent(normalizedEntryId)}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ adminPassword })
+    });
+    await loadPsychologyMonthlyAttendances({ silent: true });
+    if (currentPsychologyTab === "bpa") await loadBpaIAttendances();
+    setPsychologyFeedback("Registro da Psicologia apagado.");
+  } catch (error) {
+    setPsychologyFeedback(error.message || "Não foi possível apagar o registro.", true);
   }
 }
 
@@ -3287,23 +4504,6 @@ function renderPsychologyMonthlyAttendances(items) {
     emptyId: "psychology-monthly-empty",
     countUpdater: updatePsychologyMonthlyCount
   });
-}
-
-function renderPsychologyRecentAttendances(items) {
-  renderPsychologyAttendanceTable(items, {
-    bodyId: "psychology-recent-list",
-    emptyId: "psychology-recent-empty",
-    countUpdater: updatePsychologyRecentCount
-  });
-}
-
-async function loadPsychologyRecentAttendances() {
-  try {
-    const data = await api("/api/psychology/attendances?month=all");
-    renderPsychologyRecentAttendances(data.attendances || []);
-  } catch {
-    renderPsychologyRecentAttendances([]);
-  }
 }
 
 async function loadPsychologyMonthlyAttendances(options = {}) {
@@ -3330,15 +4530,132 @@ async function loadPsychologyMonthlyAttendances(options = {}) {
     if (!silent) {
       setPsychologyMonthlyFeedback(items.length
         ? (usedFallbackAll
-          ? "Nao houve atendimento neste mês selecionado. Mostrando todos os atendimentos registrados."
-          : "Atendimentos da Psicologia carregados com sucesso.")
-        : "Nenhum atendimento da Psicologia encontrado neste mês.");
+          ? "Nao houve produção neste mês selecionado. Mostrando todos os atendimentos registrados."
+          : "Produção da Psicologia carregada com sucesso.")
+        : "Nenhuma produção da Psicologia encontrada neste mês.");
     } else {
       setPsychologyMonthlyFeedback("");
     }
   } catch (error) {
     renderPsychologyMonthlyAttendances([]);
     setPsychologyMonthlyFeedback(error.message || "Nao foi possivel carregar os atendimentos do mês da Psicologia.", true);
+  }
+}
+
+function setBpaIFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("bpa-i-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function getBpaAgeLabel(birthDate, attendedAt) {
+  if (!birthDate) return "Não informado";
+  const birth = new Date(`${birthDate}T00:00:00`);
+  const attended = new Date(attendedAt || "");
+  if (Number.isNaN(birth.getTime()) || Number.isNaN(attended.getTime()) || attended < birth) return "Não informado";
+
+  let months = (attended.getFullYear() - birth.getFullYear()) * 12 + attended.getMonth() - birth.getMonth();
+  if (attended.getDate() < birth.getDate()) months -= 1;
+  if (months >= 12) {
+    const years = Math.floor(months / 12);
+    return `${years} ${years === 1 ? "ano" : "anos"}`;
+  }
+  const safeMonths = Math.max(months, 0);
+  return `${String(safeMonths).padStart(2, "0")} ${safeMonths === 1 ? "mês" : "meses"}`;
+}
+
+function getSocialServiceBpaAgeLabel(entry = {}) {
+  if (entry.patientBirthDate) {
+    return getBpaAgeLabel(entry.patientBirthDate, entry.closedAt || entry.shiftDate);
+  }
+  const label = String(entry.patientAgeLabel || "").trim();
+  const match = label.match(/(\d{1,3})\s*(ano|m[eê]s)/i);
+  if (!match) return "Não informado";
+  const value = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  return unit.startsWith("m")
+    ? `${String(value).padStart(2, "0")} ${value === 1 ? "mês" : "meses"}`
+    : `${value} ${value === 1 ? "ano" : "anos"}`;
+}
+
+function getBpaAgeSortValue(label) {
+  const match = String(label || "").match(/^(\d+)\s+(m[eê]ses?|anos?)$/i);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  return Number(match[1]) * (match[2].toLowerCase().startsWith("m") ? 1 : 12);
+}
+
+function renderBpaIAttendances(items, monthValue) {
+  const month = String(monthValue || "").split("-");
+  const period = month.length === 2 ? `${month[1]}/${month[0]}` : "-";
+  document.getElementById("bpa-i-period").textContent = period;
+
+  const body = document.getElementById("bpa-i-rows");
+  body.replaceChildren();
+  const totalsByAge = new Map();
+  for (const entry of Array.isArray(items) ? items : []) {
+    const ageLabel = getBpaAgeLabel(entry.patientBirthDate, entry.createdAt);
+    totalsByAge.set(ageLabel, (totalsByAge.get(ageLabel) || 0) + 1);
+  }
+  const orderedAgeCounts = Array.from(totalsByAge.entries())
+    .sort((a, b) => getBpaAgeSortValue(a[0]) - getBpaAgeSortValue(b[0]) || a[0].localeCompare(b[0], "pt-BR"));
+  for (const [ageLabel, totalByAge] of orderedAgeCounts) {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>03.01.01.004-8</td>
+      <td>251510</td>
+      <td>${escapeHtml(ageLabel)}</td>
+      <td>${escapeHtml(String(totalByAge))}</td>
+    `;
+    body.appendChild(row);
+  }
+
+  const total = Array.isArray(items) ? items.length : 0;
+  document.getElementById("bpa-i-action-total").textContent = String(total);
+  document.getElementById("bpa-i-total").textContent = String(total);
+  document.getElementById("bpa-i-empty")?.remove();
+  if (!total) {
+    const emptyRow = document.createElement("tr");
+    emptyRow.id = "bpa-i-empty";
+    emptyRow.innerHTML = '<td colspan="4">Nenhum atendimento registrado neste mês.</td>';
+    body.appendChild(emptyRow);
+  }
+}
+
+async function loadBpaIAttendances() {
+  const monthInput = document.getElementById("bpa-i-month");
+  const monthValue = String(monthInput?.value || getCurrentMonthValue()).trim();
+  if (monthInput && !monthInput.value) monthInput.value = monthValue;
+  try {
+    const data = await api(`/api/psychology/attendances?month=${encodeURIComponent(monthValue)}`);
+    const attendances = Array.isArray(data.attendances) ? data.attendances : [];
+    let ageLookupError = "";
+    try {
+      const patientsData = await api("/api/patients");
+      const birthDates = new Map((patientsData.patients || []).map(patient => [
+        Number(patient.id),
+        String(patient.birthDate || "")
+      ]));
+      bpaIAttendances = attendances.map(entry => ({
+        ...entry,
+        patientBirthDate: String(entry.patientBirthDate || birthDates.get(Number(entry.patientId)) || "")
+      }));
+    } catch (error) {
+      bpaIAttendances = attendances;
+      ageLookupError = error.message || "Não foi possível consultar as datas de nascimento dos pacientes.";
+    }
+    renderBpaIAttendances(bpaIAttendances, monthValue);
+    const reportMessage = bpaIAttendances.length
+      ? `${bpaIAttendances.length} atendimento(s) incluído(s) no BPA-I do período.`
+      : "Nenhum atendimento psicológico registrado neste mês.";
+    setBpaIFeedback(ageLookupError
+      ? `${reportMessage} Atenção: ${ageLookupError}`
+      : reportMessage, Boolean(ageLookupError));
+  } catch (error) {
+    bpaIAttendances = [];
+    renderBpaIAttendances([], monthValue);
+    setBpaIFeedback(error.message || "Não foi possível carregar o relatório BPA-I.", true);
   }
 }
 
@@ -3411,7 +4728,7 @@ function renderSocialServiceAttendances(items) {
   empty.classList.toggle("hidden", socialServiceAttendanceEntries.length > 0);
   empty.textContent = (getSocialServiceHistoryProfessionalSearchValue() || getSocialServiceHistoryPatientSearchValue())
     ? "Nenhum registro encontrado para os filtros aplicados no mês pesquisado."
-    : "Nenhuma observação do Serviço Social encontrada neste mês.";
+    : "Nenhuma produção do Serviço Social encontrada neste mês.";
   updateSocialServiceHistoryCount(socialServiceAttendanceEntries.length);
 
   for (const entry of socialServiceAttendanceEntries) {
@@ -3424,7 +4741,10 @@ function renderSocialServiceAttendances(items) {
       <td>${escapeHtml(entryLabel)}<br><span class="social-service-history-meta">${escapeHtml(toBRDate(entry.shiftDate) || "-")}</span></td>
       <td>${escapeHtml(entry.wardName || "-")}</td>
       <td>${escapeHtml(String(entry.bedId || "-"))}</td>
-      <td>${escapeHtml(entry.patientName || "-")}</td>
+      <td>
+        ${escapeHtml(entry.patientName || "-")}
+        ${entry.companionName ? `<span class="social-service-history-meta">Acompanhante: ${escapeHtml(entry.companionName)} • Nasc.: ${escapeHtml(toBRDate(entry.companionBirthDate) || "-")} • Parentesco: ${escapeHtml(entry.companionKinship || "-")}</span>` : ""}
+      </td>
       <td>${escapeHtml(entry.contacts || "-")}</td>
       <td>${escapeHtml(entry.socialRecord || "-")}</td>
       <td class="social-service-history-observation-cell">${escapeHtml(entry.observation || "-")}</td>
@@ -3439,54 +4759,60 @@ function renderSocialServiceAttendances(items) {
 async function deleteSocialServiceAttendanceEntry(entryId) {
   const normalizedEntryId = String(entryId || "").trim();
   if (!normalizedEntryId) return;
-  if (!confirm("Apagar este registro do histórico do Serviço Social?")) return;
+  if (!confirm("Apagar este registro da produção do Serviço Social?")) return;
 
-  const coordinatorPassword = prompt("Digite a senha do coordenador Fernando Augusto para apagar este registro:");
-  if (coordinatorPassword === null) return;
+  const adminPassword = prompt("Digite a senha de um administrador para apagar este registro:");
+  if (adminPassword === null) return;
 
   try {
     await api(`/api/social-service/attendances/${encodeURIComponent(normalizedEntryId)}`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ coordinatorPassword })
+      body: JSON.stringify({ adminPassword })
     });
     await loadSocialServiceAttendances({ filterId: "social-service-history-filter" });
-    setSocialServiceFeedback("Registro do Serviço Social apagado com sucesso.");
+    setSocialServiceFeedback("Registro da produção do Serviço Social apagado com sucesso.");
   } catch (error) {
     setSocialServiceFeedback(error.message || "Nao foi possivel apagar o registro do Serviço Social.", true);
   }
 }
 
 function renderSocialServiceAgeCounts(items) {
-  const container = document.getElementById("social-service-age-list");
+  const container = document.getElementById("social-service-bpa-rows");
   if (!container) return;
 
   const totalsByAge = new Map();
-  for (let age = 0; age <= 105; age += 1) {
-    totalsByAge.set(age, 0);
-  }
-
-  let totalAttendances = 0;
   for (const entry of Array.isArray(items) ? items : []) {
-    const age = getPatientAgeNumber(entry?.patientBirthDate || "", entry?.closedAt || entry?.shiftDate || "")
-      ?? getPatientAgeNumberFromLabel(entry?.patientAgeLabel || "");
-    if (age === null || age < 0 || age > 105) continue;
-    totalsByAge.set(age, (totalsByAge.get(age) || 0) + 1);
-    totalAttendances += 1;
+    const ageLabel = getSocialServiceBpaAgeLabel(entry);
+    totalsByAge.set(ageLabel, (totalsByAge.get(ageLabel) || 0) + 1);
   }
 
-  container.innerHTML = "";
-  for (let age = 0; age <= 105; age += 1) {
-    const totalByAge = totalsByAge.get(age) || 0;
-    if (!totalByAge) continue;
+  container.replaceChildren();
+  const monthValue = String(document.getElementById("social-service-age-filter")?.value || getCurrentMonthValue());
+  const [year, month] = monthValue.split("-");
+  document.getElementById("social-service-bpa-period").textContent = year && month ? `${month}/${year}` : "-";
+  const orderedAgeCounts = Array.from(totalsByAge.entries())
+    .sort((a, b) => getBpaAgeSortValue(a[0]) - getBpaAgeSortValue(b[0]) || a[0].localeCompare(b[0], "pt-BR"));
+  for (const [ageLabel, totalByAge] of orderedAgeCounts) {
     const row = document.createElement("tr");
     row.innerHTML = `
-      <td>${escapeHtml(age === 1 ? "1 ano" : `${age} anos`)}</td>
+      <td>03.01.01.004-8</td>
+      <td>251605</td>
+      <td>${escapeHtml(ageLabel)}</td>
       <td>${escapeHtml(String(totalByAge))}</td>
     `;
     container.appendChild(row);
   }
 
+  const totalAttendances = Array.from(totalsByAge.values()).reduce((sum, count) => sum + count, 0);
+  if (!totalAttendances) {
+    const row = document.createElement("tr");
+    row.innerHTML = '<td colspan="4">Nenhum atendimento registrado neste mês.</td>';
+    container.appendChild(row);
+  }
+
+  document.getElementById("social-service-bpa-total").textContent = String(totalAttendances);
+  document.getElementById("social-service-bpa-grand-total").textContent = String(totalAttendances);
   updateSocialServiceAgeCount(totalAttendances);
 }
 
@@ -3572,6 +4898,7 @@ function renderSocialServicePatientHistory(items) {
       <strong>${escapeHtml(entryLabel)}</strong>
       <span>Registrado por ${escapeHtml(entry.closedBy || "-")} em ${escapeHtml(toBRDateTime(entry.closedAt) || "-")}</span>
       <span>Setor ${escapeHtml(entry.wardName || "-")} • Leito ${escapeHtml(String(entry.bedId || "-"))} • Ficha ${escapeHtml(entry.socialRecord || "-")}</span>
+      ${entry.companionName ? `<span>Acompanhante: ${escapeHtml(entry.companionName)} • Nascimento: ${escapeHtml(toBRDate(entry.companionBirthDate) || "-")} • Parentesco: ${escapeHtml(entry.companionKinship || "-")}</span>` : ""}
       <span class="social-service-patient-history-text">${escapeHtml(entry.observation || "Sem observação registrada.")}</span>
     `;
     container.appendChild(card);
@@ -3589,13 +4916,81 @@ async function openSocialServicePatientHistory(patientId) {
   }
 
   try {
-    const data = await api("/api/social-service/attendances?month=all");
+    const data = await api("/api/social-service/attendances?month=all&includeFollowUps=true");
     const items = (data.attendances || []).filter(entry => matchesSocialServiceHistoryEntry(patient, entry));
     renderSocialServicePatientHistory(items);
     document.getElementById("modal-social-service-patient-history")?.showModal();
   } catch (error) {
     renderSocialServicePatientHistory([]);
     setPortariaSocialFeedback(error.message || "Nao foi possivel carregar o histórico deste paciente.", true);
+  }
+}
+
+async function openSocialServiceManualHistory(requestId) {
+  const request = socialServiceManualEntries.find(item => String(item.id || "") === String(requestId || "")) || null;
+  if (!request) return;
+
+  const title = document.getElementById("social-service-patient-history-title");
+  if (title) title.textContent = `Histórico do Serviço Social - ${request.patientName || "Paciente avulso"}`;
+
+  try {
+    const data = await api("/api/social-service/attendances?month=all&includeFollowUps=true");
+    const items = (data.attendances || []).filter(entry => String(entry.manualRequestId || "") === String(request.id));
+    renderSocialServicePatientHistory(items);
+    document.getElementById("modal-social-service-patient-history")?.showModal();
+  } catch (error) {
+    renderSocialServicePatientHistory([]);
+    setPortariaSocialFeedback(error.message || "Nao foi possivel carregar o histórico deste atendimento.", true);
+  }
+}
+
+function renderPsychologyPatientHistory(items) {
+  const container = document.getElementById("psychology-patient-history-list");
+  const empty = document.getElementById("psychology-patient-history-empty");
+  if (!container || !empty) return;
+
+  const history = Array.isArray(items) ? items : [];
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", history.length > 0);
+
+  for (const entry of history) {
+    const status = String(entry.status || "").toUpperCase() === "BAIXA"
+      ? "Alta do atendimento"
+      : "Em acompanhamento";
+    const card = document.createElement("div");
+    card.className = "patient-history-card";
+    card.innerHTML = `
+      <strong>${escapeHtml(status)}</strong>
+      <span>Registrado por ${escapeHtml(entry.createdBy || "-")} em ${escapeHtml(toBRDateTime(entry.createdAt) || "-")}</span>
+      <span>Setor ${escapeHtml(entry.wardName || "-")} • Leito ${escapeHtml(String(entry.bedId || "-"))}</span>
+      <span>Intervenções: ${escapeHtml(entry.interventions || "Nenhuma intervenção registrada.")}</span>
+      <span>Observações: ${escapeHtml(entry.observation || "Nenhuma observação registrada.")}</span>
+    `;
+    container.appendChild(card);
+  }
+}
+
+async function openPsychologyPatientHistory(row) {
+  if (!row) return;
+  const manualRequestId = String(row.dataset.manualRequestId || "").trim();
+  const patient = manualRequestId
+    ? psychologyManualEntries.find(item => String(item.id || "") === manualRequestId)
+    : psychologyActivePatients.find(item => Number(item.id) === Number(row.dataset.id));
+  if (!patient) return;
+
+  const title = document.getElementById("psychology-patient-history-title");
+  if (title) title.textContent = `Histórico da Psicologia - ${patient.nome || patient.patientName || "Paciente"}`;
+
+  try {
+    const data = await api("/api/psychology/attendances?month=all&includeActive=true");
+    const items = (data.attendances || []).filter(entry => manualRequestId
+      ? String(entry.manualRequestId || "") === manualRequestId
+      : Number(entry.patientId) === Number(row.dataset.id));
+    renderPsychologyPatientHistory(items);
+    document.getElementById("modal-psychology-patient-history")?.showModal();
+  } catch (error) {
+    renderPsychologyPatientHistory([]);
+    setPsychologyFeedback(error.message || "Nao foi possivel carregar o histórico deste paciente.", true);
   }
 }
 
@@ -3613,6 +5008,7 @@ async function loadPsychologyManualRequests() {
 async function savePsychologyManualRequest() {
   const payload = {
     patientName: document.getElementById("psychology-manual-patient-name")?.value.trim() || "",
+    birthDate: document.getElementById("psychology-manual-birth-date")?.value || "",
     sectorOrReason: document.getElementById("psychology-manual-sector-reason")?.value.trim() || "",
     notes: document.getElementById("psychology-manual-notes")?.value.trim() || ""
   };
@@ -3626,6 +5022,7 @@ async function savePsychologyManualRequest() {
     renderPsychologyManualRequests([data.request, ...psychologyManualEntries].filter(Boolean));
     await refreshPsychologyQueueView();
     document.getElementById("psychology-manual-patient-name").value = "";
+    document.getElementById("psychology-manual-birth-date").value = "";
     document.getElementById("psychology-manual-sector-reason").value = "";
     document.getElementById("psychology-manual-notes").value = "";
     setPsychologyManualFeedback("Solicitacao avulsa cadastrada com sucesso.");
@@ -3634,7 +5031,7 @@ async function savePsychologyManualRequest() {
   }
 }
 
-async function savePsychologyRecord(patientId, card) {
+async function savePsychologyRecord(patientId, card, options = {}) {
   if (!card) return;
   if (!isPsychologyShiftOpen()) {
     setPsychologyFeedback("Abra o plantao da Psicologia para editar e salvar a evolucao.", true);
@@ -3653,13 +5050,15 @@ async function savePsychologyRecord(patientId, card) {
   const admission = patient?.currentAdmission || {};
   const wardId = Number(admission.wardId);
   const bedId = Number(admission.bedId);
-  const currentRequest = admission.psychologyRequest || {};
   const selectedStatus = String(card.querySelector('[data-field="psychology-status"]')?.value || "").trim().toUpperCase();
+  const statusToSave = selectedStatus === "BAIXA" ? "BAIXA" : "EM_ACOMPANHAMENTO";
+  const currentRequest = admission.psychologyRequest || {};
   const currentStatus = getPsychologyRequestState(currentRequest);
   const payload = {
     interventions: card.querySelector('[data-field="interventions"]')?.value.trim() || "",
     observation: card.querySelector('[data-field="observation"]')?.value.trim() || "",
-    status: selectedStatus || currentStatus || ""
+    status: statusToSave,
+    attended: options.attended !== false && statusToSave !== "BAIXA"
   };
 
   try {
@@ -3675,11 +5074,10 @@ async function savePsychologyRecord(patientId, card) {
       });
       await loadPsychologyManualRequests();
       await refreshPsychologyQueueView();
-      await loadPsychologyRecentAttendances();
       await loadPsychologyMonthlyAttendances({ silent: true });
-      setPsychologyFeedback(selectedStatus === "BAIXA"
+      setPsychologyFeedback(statusToSave === "BAIXA"
         ? "Solicitacao avulsa da Psicologia finalizada com sucesso."
-        : "Acompanhamento avulso da Psicologia salvo com sucesso.");
+        : "Acompanhamento avulso da Psicologia salvo como em acompanhamento.");
       return;
     }
 
@@ -3704,61 +5102,26 @@ async function savePsychologyRecord(patientId, card) {
       renderBeds(ward.beds);
     }
 
-    if (selectedStatus && selectedStatus !== currentStatus && wardId && bedId) {
-      try {
-        const nextRequest = buildPsychologyRequestPayload(currentRequest, selectedStatus, payload);
-        const requestData = await api(`/api/wards/${wardId}/beds/${bedId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ psychologyRequest: nextRequest })
-        });
-
-        if (selectedStatus === "BAIXA") {
-          nextPatients = nextPatients.filter(item => getPsychologyQueueKey(item) !== queueKey);
-          setPsychologyFeedback("Evolucao salva e alta do atendimento aplicada com sucesso.");
-        } else {
-          nextPatients = nextPatients.map(item =>
-            getPsychologyQueueKey(item) === queueKey
-              ? {
-                  ...item,
-                  currentAdmission: {
-                    ...(item.currentAdmission || {}),
-                    psychologyRequest: requestData?.bed?.psychologyRequest || nextRequest
-                  }
-                }
-              : item
-          );
-          setPsychologyFeedback("Evolucao e status da Psicologia salvos com sucesso.");
-        }
-
-        if (ward && Number(currentWardId) === wardId && requestData?.bed) {
-          ward.beds = ward.beds.map(item => item.id === bedId ? requestData.bed : item);
-          renderCounts(computeLocalWardCounts(ward.beds));
-          renderBeds(ward.beds);
-        }
-      } catch (statusError) {
-        psychologyActivePatients = nextPatients;
-        renderPsychologyPatients(psychologyActivePatients);
-        await loadPsychologyRecentAttendances();
-        await loadPsychologyMonthlyAttendances({ silent: true });
-        setPsychologyFeedback(statusError.message || "Evolucao salva, mas nao foi possivel aplicar o status da Psicologia.", true);
-        return;
-      }
+    if (statusToSave === "BAIXA") {
+      nextPatients = nextPatients.filter(item => getPsychologyQueueKey(item) !== queueKey);
+      setPsychologyFeedback("Evolucao salva e alta do atendimento aplicada com sucesso.");
+    } else if (statusToSave !== currentStatus) {
+      setPsychologyFeedback("Evolucao e status da Psicologia salvos com sucesso.");
     } else {
       setPsychologyFeedback("Evolucao psicologica salva com sucesso.");
     }
 
     psychologyActivePatients = nextPatients;
     renderPsychologyPatients(psychologyActivePatients);
-    await loadPsychologyRecentAttendances();
     await loadPsychologyMonthlyAttendances({ silent: true });
   } catch (error) {
     setPsychologyFeedback(error.message || "Nao foi possivel salvar a evolucao psicologica.", true);
   } finally {
     if (button) {
       button.disabled = false;
-      button.textContent = "Salvar evolução";
+      button.textContent = getAttendanceButtonLabel(card, "psychology");
     }
+    refreshAttendanceClaims();
   }
 }
 
@@ -3797,13 +5160,14 @@ async function saveAllPsychologyRecords(options = {}) {
 
   let savedCount = 0;
   for (const draft of drafts) {
+    const statusToSave = draft.selectedStatus === "BAIXA" ? "BAIXA" : "EM_ACOMPANHAMENTO";
     const data = await api(`/api/patients/${draft.patientId}/psychology-support`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         interventions: draft.interventions,
         observation: draft.observation,
-        status: draft.selectedStatus || draft.currentStatus || ""
+        status: statusToSave
       })
     });
     if (data?.patient) {
@@ -3818,38 +5182,8 @@ async function saveAllPsychologyRecords(options = {}) {
       }
     }
 
-    if (draft.selectedStatus && draft.selectedStatus !== draft.currentStatus) {
-      const patient = updatedPatients.get(draft.patientId);
-      const admission = patient?.currentAdmission || {};
-      const wardId = Number(admission.wardId);
-      const bedId = Number(admission.bedId);
-      const currentRequest = admission.psychologyRequest || {};
-      if (wardId && bedId) {
-        const nextRequest = buildPsychologyRequestPayload(currentRequest, draft.selectedStatus, {
-          observation: draft.observation
-        });
-        const requestData = await api(`/api/wards/${wardId}/beds/${bedId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ psychologyRequest: nextRequest })
-        });
-
-        if (draft.selectedStatus === "BAIXA") {
-          removedQueueKeys.add(draft.queueKey);
-        } else {
-          updatedPatients.set(draft.patientId, {
-            ...patient,
-            currentAdmission: {
-              ...(patient?.currentAdmission || {}),
-              psychologyRequest: requestData?.bed?.psychologyRequest || nextRequest
-            }
-          });
-        }
-
-        if (ward && Number(currentWardId) === wardId && requestData?.bed) {
-          ward.beds = ward.beds.map(item => item.id === bedId ? requestData.bed : item);
-        }
-      }
+    if (statusToSave === "BAIXA") {
+      removedQueueKeys.add(draft.queueKey);
     }
 
     savedCount += 1;
@@ -3860,7 +5194,6 @@ async function saveAllPsychologyRecords(options = {}) {
     return updatedPatients.has(numericId) ? updatedPatients.get(numericId) : patient;
   }).filter(patient => !removedQueueKeys.has(getPsychologyQueueKey(patient)));
   renderPsychologyPatients(psychologyActivePatients);
-  await loadPsychologyRecentAttendances();
   await loadPsychologyMonthlyAttendances({ silent: true });
   if (ward) {
     renderCounts(computeLocalWardCounts(ward.beds));
@@ -3886,14 +5219,78 @@ function renderPortariaSocialList(items) {
   updatePortariaSocialCount(patients.length);
 
   for (const patient of patients) {
+    if (patient?.isManualRequest) {
+      const entry = patient.manualEntry || {};
+      const manualRequestId = String(patient.manualRequestId || "");
+      const manualStatusPresentation = getSocialServiceRequestPresentation(entry);
+      const displayManualStatus = manualStatusPresentation.state || "SOLICITADO";
+      const manualStatusMeta = manualStatusPresentation.meta || entry.updatedBy || entry.createdBy || "Solicitação avulsa";
+      const manualStatusClass = manualStatusPresentation.className || "requested";
+      const canEditManual = Boolean(getActiveServiceShift("SERVICO_SOCIAL"));
+      const categoryLabels = {
+        ACOMPANHANTE: "Acompanhante",
+        FAMILIAR: "Familiar",
+        OBITO: "Óbito",
+        AVULSO: "Paciente avulso"
+      };
+      const categoryLabel = categoryLabels[String(entry.category || "AVULSO").trim().toUpperCase()] || "Paciente avulso";
+      const row = document.createElement("tr");
+      row.className = "portaria-social-row social-service-manual-row";
+      row.dataset.manualRequestId = manualRequestId;
+      row.dataset.currentStatus = displayManualStatus;
+      row.dataset.currentMeta = manualStatusMeta;
+      row.innerHTML = `
+        <td class="social-service-leito-cell">Avulso</td>
+        <td class="social-service-patient-cell">
+          <strong>${escapeHtml(patient.nome || "-")}</strong>
+          <span>${escapeHtml(categoryLabel)}${entry.sectorOrReason ? ` · ${escapeHtml(entry.sectorOrReason)}` : ""}</span>
+        </td>
+        <td class="social-service-age-cell">${escapeHtml(getPatientAgeLabel(patient.birthDate) || "Não informada")}</td>
+        <td class="social-service-editor-cell">
+          <textarea data-field="manual-contacts" rows="2" placeholder="Telefone para contato">${escapeHtml(entry.contacts || "")}</textarea>
+        </td>
+        <td class="social-service-admission-cell">${escapeHtml(toBRDate(String(entry.createdAt || "").slice(0, 10)) || "-")}</td>
+        <td class="psychology-table-status-cell">
+          <select class="psychology-status-select social-service-status-select ${escapeHtml(manualStatusClass)}" data-field="social-status" ${canEditManual ? "" : "disabled"}>
+            <option value="SOLICITADO" ${displayManualStatus === "SOLICITADO" ? "selected" : ""}>Solicitado</option>
+            <option value="EM_ACOMPANHAMENTO" ${displayManualStatus === "EM_ACOMPANHAMENTO" ? "selected" : ""}>Em acompanhamento</option>
+            <option value="ATENDIMENTO_OBITO" ${displayManualStatus === "ATENDIMENTO_OBITO" ? "selected" : ""}>Atendimento de óbito</option>
+            <option value="BAIXA" ${displayManualStatus === "BAIXA" ? "selected" : ""}>Alta do atendimento</option>
+          </select>
+          <div class="psychology-status-meta social-service-status-meta" data-social-status-meta>${escapeHtml(manualStatusMeta)}</div>
+        </td>
+          <td class="social-service-editor-cell social-service-form-cell">
+            <div class="social-service-status-badge ${getSocialServiceFormBadgeClass(entry.socialRecord || "Pendente")}">${escapeHtml(entry.socialRecord || "Pendente")}</div>
+            <div class="social-service-status-meta">${entry.socialForm?.filledAt ? `Ficha preenchida por ${escapeHtml(entry.socialForm.filledBy || "-")} em ${escapeHtml(toBRDateTime(entry.socialForm.filledAt) || "-")}` : "Atendimento avulso"}</div>
+            ${entry.notes ? `<div class="social-service-status-meta">${escapeHtml(entry.notes)}</div>` : ""}
+            <div class="social-service-form-actions">
+              <button type="button" class="ghost btn-open-social-manual-form" data-id="${escapeHtml(manualRequestId)}" ${canEditManual ? "" : "disabled"}>${hasSocialServiceFormContent(entry.socialForm) ? "Editar ficha" : "Preencher ficha"}</button>
+              <button type="button" class="ghost btn-print-social-manual-form" data-id="${escapeHtml(manualRequestId)}">Imprimir</button>
+            </div>
+          </td>
+        <td class="social-service-editor-cell social-service-observation-cell">
+          <textarea data-field="manual-observation" rows="3" placeholder="Observações importantes" ${canEditManual ? "" : "disabled"}>${escapeHtml(entry.observation || "")}</textarea>
+          <div class="social-service-row-buttons">
+            <button type="button" class="ghost btn-open-social-manual-history" data-id="${escapeHtml(manualRequestId)}">Histórico</button>
+            <button type="button" class="btn-save-social-manual" data-id="${escapeHtml(manualRequestId)}" ${canEditManual ? "" : "disabled"}>${canEditManual ? "Atendido por mim" : "Plantão fechado"}</button>
+            <button type="button" class="btn-delete-active-service-request danger" data-id="${escapeHtml(manualRequestId)}" data-service="social-service" data-manual="true">Excluir</button>
+          </div>
+        </td>
+      `;
+      container.appendChild(row);
+      continue;
+    }
     const socialSupport = createSocialSupportState(patient.socialSupport);
     const serviceSocialStatus = socialSupport.dischargePending
       ? {
         label: "Em acompanhamento",
+        state: "EM_ACOMPANHAMENTO",
         className: "in-progress",
         meta: getSupportDischargeMeta(socialSupport)
       }
-      : getBedRequestStatus(patient.currentAdmission?.serviceSocialRequest || {}, "serviceSocialRequest");
+      : getSocialServiceRequestPresentation(patient.currentAdmission?.serviceSocialRequest || {});
+    const currentServiceStatus = serviceSocialStatus.state || getSocialServiceRequestState(patient.currentAdmission?.serviceSocialRequest || {});
+    const canEdit = Boolean(getActiveServiceShift("SERVICO_SOCIAL"));
     const hasSocialForm = hasSocialServiceFormContent(socialSupport.socialForm);
     const normalizedSocialRecordValue = hasSocialForm ? "Concluído" : (socialSupport.socialRecord || "Pendente");
     const patientPhone = formatPhone(patient.phone || "");
@@ -3910,6 +5307,8 @@ function renderPortariaSocialList(items) {
     const row = document.createElement("tr");
     row.className = "portaria-social-row";
     row.dataset.id = String(patient.id || "");
+    row.dataset.currentStatus = currentServiceStatus;
+    row.dataset.currentMeta = serviceSocialStatus.meta || "";
     row.innerHTML = `
       <td class="social-service-leito-cell">${escapeHtml(String(patient.currentAdmission?.bedId || "-"))}</td>
       <td class="social-service-patient-cell">
@@ -3926,32 +5325,60 @@ function renderPortariaSocialList(items) {
         ${hasPatientPhone ? "" : `<button type="button" class="ghost btn-open-social-patient-registry" data-id="${escapeHtml(String(patient.id || ""))}">Cadastrar telefone</button>`}
       </td>
       <td class="social-service-admission-cell">${escapeHtml(toBRDate(patient.currentAdmission?.admittedAt) || "-")}</td>
+      <td class="psychology-table-status-cell">
+        <select class="psychology-status-select social-service-status-select ${escapeHtml(serviceSocialStatus.className || "none")}" data-field="social-status" ${canEdit ? "" : "disabled"}>
+          <option value="SOLICITADO" ${currentServiceStatus === "SOLICITADO" ? "selected" : ""}>Solicitado</option>
+          <option value="EM_ACOMPANHAMENTO" ${currentServiceStatus === "EM_ACOMPANHAMENTO" ? "selected" : ""}>Em acompanhamento</option>
+          <option value="ATENDIMENTO_OBITO">Atendimento de óbito</option>
+          <option value="BAIXA" ${currentServiceStatus === "BAIXA" ? "selected" : ""}>Alta do atendimento</option>
+        </select>
+        <div class="psychology-status-meta social-service-status-meta" data-social-status-meta>${escapeHtml(serviceSocialStatus.meta || "Solicitação aguardando atendimento.")}</div>
+      </td>
       <td class="social-service-editor-cell social-service-form-cell">
         <div class="social-service-status-badge ${getSocialServiceFormBadgeClass(normalizedSocialRecordValue)}">${escapeHtml(normalizedSocialRecordValue)}</div>
         ${socialRecordMeta ? `<div class="social-service-status-meta">${socialRecordMeta}</div>` : ""}
         ${socialFormMeta ? `<div class="social-service-form-filled-meta">${socialFormMeta}</div>` : ""}
-        <div class="social-service-status-meta">Atendimento: <span class="bed-request-chip ${escapeHtml(serviceSocialStatus.className || "none")}">${escapeHtml(serviceSocialStatus.label || "Solicitar")}</span></div>
-        <div class="social-service-status-meta">${escapeHtml(serviceSocialStatus.meta || "Clique para registrar")}</div>
         <div class="social-service-form-actions">
           <button type="button" class="ghost btn-open-social-form" data-id="${escapeHtml(String(patient.id || ""))}" ${canSave ? "" : "disabled"}>${hasSocialForm ? "Editar ficha" : "Preencher ficha"}</button>
-          <button type="button" class="ghost btn-print-social-form" data-id="${escapeHtml(String(patient.id || ""))}" ${hasSocialForm ? "" : "disabled"}>Imprimir</button>
+          <button type="button" class="ghost btn-print-social-form" data-id="${escapeHtml(String(patient.id || ""))}" ${canSave ? "" : "disabled"}>Imprimir</button>
         </div>
         ${socialSupport.dischargePending ? `<div class="social-service-status-meta">${escapeHtml(dischargeMeta)}</div>` : ""}
       </td>
       <td class="social-service-editor-cell social-service-observation-cell">
-        <textarea data-field="observation" rows="3" placeholder="Observações importantes">${escapeHtml(socialSupport.observation || "")}</textarea>
+        <textarea data-field="observation" rows="3" placeholder="Observações importantes" ${canEdit ? "" : "disabled"}>${escapeHtml(socialSupport.observation || "")}</textarea>
+        <div class="social-service-row-buttons">
+          <button type="button" class="ghost btn-register-social-death" data-id="${escapeHtml(String(patient.id || ""))}" title="Registra a produção de atendimento de óbito e encerra o acompanhamento" ${canEdit ? "" : "disabled"}>Atendimento óbito</button>
+          <button type="button" class="ghost btn-register-social-companion" data-id="${escapeHtml(String(patient.id || ""))}" title="Registra produção separada sem encerrar o acompanhamento" ${canEdit ? "" : "disabled"}>Atendimento acompanhante</button>
+        </div>
+        <div class="social-companion-attendance-form hidden" data-companion-attendance-form>
+          <label>Nome completo
+            <input type="text" data-field="companion-name" maxlength="160" autocomplete="name" required>
+          </label>
+          <label>Data de nascimento
+            <input type="date" data-field="companion-birth-date" required>
+          </label>
+          <label>Grau de parentesco
+            <input type="text" data-field="companion-kinship" maxlength="80" placeholder="Ex.: mãe, filho(a), cônjuge" required>
+          </label>
+          <div class="social-service-row-buttons">
+            <button type="button" class="btn-submit-social-companion" data-id="${escapeHtml(String(patient.id || ""))}" ${canEdit ? "" : "disabled"}>Registrar produção</button>
+            <button type="button" class="ghost btn-cancel-social-companion">Cancelar</button>
+          </div>
+        </div>
         <div class="portaria-social-actions">
           <span class="portaria-social-updated">${socialSupport.dischargePending ? escapeHtml(dischargeMeta) : (socialSupport.updatedAt ? `Atualizado por ${escapeHtml(socialSupport.updatedBy || "-")} em ${escapeHtml(toBRDateTime(socialSupport.updatedAt) || "-")}` : (canSave ? "Sem anotações salvas ainda." : "Paciente exibido pelos leitos. Vincule ao cadastro para salvar o acompanhamento."))}</span>
           <div class="social-service-row-buttons">
             <button type="button" class="ghost btn-open-social-history" data-id="${escapeHtml(String(patient.id || ""))}">Histórico</button>
-            <button type="button" class="ghost btn-close-portaria-social" data-id="${escapeHtml(String(patient.id || ""))}" ${canSave ? "" : "disabled"}>${canSave ? "Dar baixa" : "Cadastro pendente"}</button>
-            <button type="button" class="btn-save-portaria-social" data-id="${escapeHtml(String(patient.id || ""))}" ${canSave ? "" : "disabled"}>${canSave ? "Salvar" : "Cadastro pendente"}</button>
+            <button type="button" class="btn-save-portaria-social" data-id="${escapeHtml(String(patient.id || ""))}" data-record-unavailable="${canSave ? "false" : "true"}" ${canSave && canEdit ? "" : "disabled"}>${!canSave ? "Cadastro pendente" : (canEdit ? "Atendido por mim" : "Plantão fechado")}</button>
+            <button type="button" class="btn-delete-active-service-request danger" data-id="${escapeHtml(String(patient.id || ""))}" data-service="social-service" data-manual="false">Excluir</button>
           </div>
         </div>
       </td>
     `;
     container.appendChild(row);
   }
+  syncSocialServiceEditingAvailability();
+  refreshAttendanceClaims();
   // #region debug-point C:social-render
   reportDebugEvent("C", "public/app.js:renderPortariaSocialList", "[DEBUG] Social service render complete", {
     totalRows: patients.length,
@@ -4167,9 +5594,20 @@ function renderPortariaPatients(items) {
   }
 }
 
-async function savePortariaSocialSupport(patientId, card) {
+async function savePortariaSocialSupport(patientId, card, options = {}) {
   const numericId = Number(patientId);
   if (!numericId || !card) return;
+
+  if (!getActiveServiceShift("SERVICO_SOCIAL")) {
+    setPortariaSocialFeedback("Abra o plantão do Serviço Social para editar e salvar o acompanhamento.", true);
+    return;
+  }
+  const selectedStatus = String(card.querySelector('[data-field="social-status"]')?.value || "").trim().toUpperCase();
+  if (selectedStatus === "BAIXA" || selectedStatus === "ATENDIMENTO_OBITO") {
+    await closePortariaSocialSupport(patientId, card, selectedStatus === "ATENDIMENTO_OBITO" ? "OBITO" : "");
+    return;
+  }
+  const statusToSave = selectedStatus === "SOLICITADO" ? "SOLICITADO" : "EM_ACOMPANHAMENTO";
 
   const button = card.querySelector(".btn-save-portaria-social");
   const currentPatient = portariaActivePatients.find(patient => Number(patient?.id) === numericId) || {};
@@ -4185,6 +5623,8 @@ async function savePortariaSocialSupport(patientId, card) {
   const payload = {
     contacts: formatPhone(currentPatient.phone || ""),
     admissionNotes: currentSupport.admissionNotes || "",
+    status: statusToSave,
+    attended: options.attended !== false && statusToSave === "EM_ACOMPANHAMENTO",
     socialRecord: hasSocialServiceFormContent(currentSupport.socialForm) ? "Concluído" : (currentSupport.socialRecord || "Pendente"),
     observation: card.querySelector('[data-field="observation"]')?.value.trim() || "",
     socialForm: currentSupport.socialForm
@@ -4210,23 +5650,31 @@ async function savePortariaSocialSupport(patientId, card) {
       renderCounts(computeLocalWardCounts(ward.beds));
       renderBeds(ward.beds);
     }
-    renderPortariaSocialList(portariaActivePatients.filter(hasServiceSocialRequest));
-    setPortariaSocialFeedback("Acompanhamento salvo com sucesso.");
+    renderPortariaSocialList(portariaActivePatients);
+    await loadSocialServiceAttendances({ silent: true });
+    setPortariaSocialFeedback(statusToSave === "SOLICITADO"
+      ? "Acompanhamento salvo como solicitado."
+      : "Acompanhamento salvo como em acompanhamento.");
   } catch (error) {
     setPortariaSocialFeedback(error.message || "Nao foi possivel salvar o acompanhamento.", true);
   } finally {
     if (button) {
       button.disabled = false;
-      button.textContent = "Salvar";
+      button.textContent = getAttendanceButtonLabel(card, "social");
     }
+    refreshAttendanceClaims();
   }
 }
 
-async function closePortariaSocialSupport(patientId, card) {
+async function closePortariaSocialSupport(patientId, card, category = "") {
   const numericId = Number(patientId);
   if (!numericId || !card) return;
 
-  const button = card.querySelector(".btn-close-portaria-social");
+  if (!getActiveServiceShift("SERVICO_SOCIAL")) {
+    setPortariaSocialFeedback("Abra o plantão do Serviço Social para dar baixa no atendimento.", true);
+    return;
+  }
+  const button = card.querySelector(".btn-save-portaria-social");
   const currentPatient = portariaActivePatients.find(patient => Number(patient?.id) === numericId) || {};
   if (!normalizePhone(currentPatient.phone)) {
     setPortariaSocialFeedback("Cadastre o telefone do paciente antes de dar baixa no atendimento.", true);
@@ -4234,18 +5682,17 @@ async function closePortariaSocialSupport(patientId, card) {
     return;
   }
 
-  if (!confirm("Dar baixa neste atendimento do Serviço Social?")) return;
-
   const payload = {
     contacts: formatPhone(currentPatient.phone || ""),
     socialRecord: "Concluído",
+    category,
     observation: card.querySelector('[data-field="observation"]')?.value.trim() || ""
   };
 
   try {
     if (button) {
       button.disabled = true;
-      button.textContent = "Baixando...";
+      button.textContent = "Finalizando...";
     }
     const data = await api(`/api/patients/${numericId}/social-support/close`, {
       method: "POST",
@@ -4257,15 +5704,70 @@ async function closePortariaSocialSupport(patientId, card) {
     );
     renderPortariaSocialList(portariaActivePatients.filter(hasServiceSocialRequest));
     await loadSocialServiceAttendances({ silent: true });
-    setPortariaSocialFeedback("Atendimento baixado e enviado para o histórico.");
+    setPortariaSocialFeedback(category === "OBITO"
+      ? "Atendimento de óbito registrado na produção e removido da planilha de acompanhamento."
+      : "Atendimento baixado e enviado para o histórico.");
     setSocialServiceFeedback("Histórico do Serviço Social atualizado.");
   } catch (error) {
     setPortariaSocialFeedback(error.message || "Nao foi possivel dar baixa no atendimento.", true);
   } finally {
     if (button) {
       button.disabled = false;
-      button.textContent = "Dar baixa";
+      button.textContent = getAttendanceButtonLabel(card, "social");
     }
+  }
+}
+
+async function registerSocialServiceCompanionAttendance(patientId, row, button) {
+  const numericId = Number(patientId);
+  if (!numericId || !row) return;
+  if (!getActiveServiceShift("SERVICO_SOCIAL")) {
+    setPortariaSocialFeedback("Abra o plantão do Serviço Social para registrar atendimento ao acompanhante.", true);
+    return;
+  }
+  const patient = portariaActivePatients.find(item => Number(item?.id) === numericId) || null;
+  if (!patient?.currentAdmission) {
+    setPortariaSocialFeedback("Não foi possível encontrar a internação ativa deste paciente.", true);
+    return;
+  }
+  const companionNameInput = row.querySelector('[data-field="companion-name"]');
+  const companionBirthDateInput = row.querySelector('[data-field="companion-birth-date"]');
+  const companionKinshipInput = row.querySelector('[data-field="companion-kinship"]');
+  const companionName = String(companionNameInput?.value || "").trim();
+  const companionBirthDate = String(companionBirthDateInput?.value || "").trim();
+  const companionKinship = String(companionKinshipInput?.value || "").trim();
+  if (!companionName || !companionBirthDate || !companionKinship) {
+    row.querySelector("[data-companion-attendance-form]")?.classList.remove("hidden");
+    setPortariaSocialFeedback("Preencha nome completo, data de nascimento e grau de parentesco do acompanhante.", true);
+    row.querySelector(".social-companion-attendance-form :invalid")?.focus();
+    return;
+  }
+  if (!window.confirm(`Registrar uma produção separada de atendimento ao acompanhante ${companionName}? O acompanhamento de ${patient.nome || "este paciente"} continuará ativo.`)) return;
+
+  button.disabled = true;
+  button.textContent = "Registrando...";
+  try {
+    const data = await api(`/api/patients/${numericId}/social-support/companion-attendance`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        companionName,
+        companionBirthDate,
+        companionKinship,
+        observation: row.querySelector('[data-field="observation"]')?.value.trim() || ""
+      })
+    });
+    portariaActivePatients = portariaActivePatients.map(item =>
+      Number(item.id) === numericId ? { ...item, ...data.patient } : item
+    );
+    renderPortariaSocialList(portariaActivePatients.filter(hasServiceSocialRequest));
+    await loadSocialServiceAttendances({ silent: true });
+    setPortariaSocialFeedback(`Atendimento ao acompanhante ${companionName} registrado como produção separada. O paciente continua na planilha.`);
+    setSocialServiceFeedback("Histórico do Serviço Social atualizado.");
+  } catch (error) {
+    setPortariaSocialFeedback(error.message || "Não foi possível registrar o atendimento ao acompanhante.", true);
+    button.disabled = false;
+    button.textContent = "Atender acompanhante";
   }
 }
 
@@ -4302,6 +5804,7 @@ async function openPortariaView() {
 async function openSocialServiceView() {
   const startedAt = performance.now();
   await refreshWards();
+  selectActiveServiceShift("SERVICO_SOCIAL");
   setWardPanelsEnabled(false, { showShift: false });
   showOnly("view-social-service");
   closeSidebarOnMobile();
@@ -4310,9 +5813,8 @@ async function openSocialServiceView() {
   await loadSocialServiceAttendances({ silent: true });
 
   try {
-    const socialQueue = await buildServiceSocialQueueFromWards(wards);
-    portariaActivePatients = socialQueue;
-    renderPortariaSocialList(socialQueue);
+    await loadSocialServiceManualRequests();
+    const socialQueue = await refreshSocialServiceQueueView();
     // #region debug-point D:social-view-success
     reportDebugEvent("D", "public/app.js:openSocialServiceView:success", "[DEBUG] Social service view opened", {
       totalPatients: socialQueue.length,
@@ -4320,7 +5822,7 @@ async function openSocialServiceView() {
     });
     // #endregion
     setPortariaSocialFeedback(socialQueue.length
-      ? `${socialQueue.length} paciente(s) com solicitação para o Serviço Social.`
+      ? `${socialQueue.length} solicitação(ões) ativa(s) para o Serviço Social.`
       : "Nenhuma solicitação para o Serviço Social no momento.");
   } catch (error) {
     // #region debug-point D:social-view-error
@@ -4352,7 +5854,6 @@ async function openPsychologyView() {
   setPsychologyActiveTab(currentPsychologyTab);
   renderPsychologyShiftPanel();
   await loadPsychologyManualRequests();
-  await loadPsychologyRecentAttendances();
   await loadPsychologyMonthlyAttendances({ silent: true });
 
   try {
@@ -4505,6 +6006,479 @@ function setNirReportFeedback(message = "", isError = false) {
   feedback.classList.toggle("error-text", Boolean(message && isError));
 }
 
+function renderNirCensusReports(wards = [], reports = [], month = "") {
+  const body = document.getElementById("nir-census-list");
+  const count = document.getElementById("nir-census-count");
+  const summaryBody = document.getElementById("nir-census-summary");
+  const daysHeader = document.getElementById("nir-census-days-header");
+  if (!body || !count || !summaryBody || !daysHeader) return;
+
+  body.innerHTML = "";
+  summaryBody.innerHTML = "";
+  const items = Array.isArray(reports) ? reports : [];
+  nirCensusMonthReports = items;
+  nirCensusMonthWards = Array.isArray(wards) ? wards : [];
+  nirCensusMonthSelected = month;
+  const [year, monthNumber] = String(month || "").split("-").map(Number);
+  const daysInMonth = year && monthNumber
+    ? new Date(year, monthNumber, 0).getDate()
+    : new Date().getDate();
+  daysHeader.innerHTML = `
+    <th scope="col">ESPECIFICAÇÃO</th>
+    ${Array.from({ length: daysInMonth }, (_, index) => `<th scope="col">${index + 1}</th>`).join("")}
+    <th scope="col">TOTAL</th>
+  `;
+
+  const fields = [
+    ["pacientes", "Nº pacientes"],
+    ["leitos", "Nº leitos"],
+    ["altas", "Nº altas"],
+    ["obitos", "Nº óbitos"],
+    ["transferencias_externas", "Nº transferências externas"],
+    ["transferencias_internas", "Nº transferências internas"],
+    ["evasoes", "Nº evasões"],
+    ["leitos_bloqueados", "Nº leitos bloqueados"]
+  ];
+
+  const sectorReports = new Map();
+  for (const report of items) {
+    const wardId = String(report.wardId);
+    if (!sectorReports.has(wardId)) sectorReports.set(wardId, new Map());
+    sectorReports.get(wardId).set(report.periodStartDate, report);
+  }
+
+  const sectors = new Map();
+  for (const ward of Array.isArray(wards) ? wards : []) {
+    sectors.set(String(ward.id), { id: String(ward.id), name: ward.nome || "Setor" });
+  }
+  for (const report of items) {
+    const id = String(report.wardId);
+    if (!sectors.has(id)) sectors.set(id, { id, name: report.wardName || "Setor arquivado" });
+  }
+  const orderedSectors = [...sectors.values()]
+    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+
+  count.classList.remove("error-text");
+  count.textContent = items.length
+    ? `${items.length} censo(s) atualizado(s) automaticamente em ${new Set(items.map(item => item.periodStartDate)).size} dia(s) do mês.`
+    : "Nenhuma movimentação de plantão registrada neste mês. Os setores aparecem abaixo; dias sem registro ficam como —.";
+  if (!orderedSectors.length) {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td colspan="${daysInMonth + 2}">Nenhum setor encontrado.</td>`;
+    body.appendChild(row);
+  }
+
+  const emptyValues = () => ({
+    pacientes: 0,
+    leitos: 0,
+    altas: 0,
+    obitos: 0,
+    transferencias_externas: 0,
+    transferencias_internas: 0,
+    leitos_bloqueados: 0,
+    admissoes: 0,
+    svd_realizadas: 0,
+    cvc_realizadas: 0,
+    sne_realizadas: 0,
+    sng_realizadas: 0,
+    intubacoes_realizadas: 0,
+    evasoes: 0,
+    reinternacoes: 0
+  });
+  const sumReports = reportsForSector => {
+    const totals = emptyValues();
+    for (const report of reportsForSector) {
+      for (const [field] of fields) {
+        totals[field] += Number(report.values?.[field]) || 0;
+      }
+    }
+    return totals;
+  };
+  const summaryFor = (values, reportedDays) => {
+    const exits = values.altas
+      + values.obitos
+      + values.transferencias_externas
+      + values.transferencias_internas
+      + values.evasoes;
+    const occupancy = values.leitos ? (values.pacientes / values.leitos) * 100 : null;
+    const averageBeds = reportedDays ? values.leitos / reportedDays : 0;
+    return {
+      ...values,
+      exits,
+      occupancy,
+      averageStay: exits ? values.pacientes / exits : null,
+      bedTurnover: averageBeds ? exits / averageBeds : null,
+      reportedDays
+    };
+  };
+  const formatRate = value => value === null
+    ? "—"
+    : Number(value).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const allReports = [];
+  const overallDays = new Set();
+
+  for (const sector of orderedSectors) {
+    const reportMap = sectorReports.get(sector.id) || new Map();
+    const reportsForSector = [...reportMap.values()];
+    allReports.push(...reportsForSector);
+    for (const report of reportsForSector) overallDays.add(report.periodStartDate);
+
+    const sectorHeading = document.createElement("tr");
+    sectorHeading.className = "nir-census-sector-heading";
+    sectorHeading.innerHTML = `<th colspan="${daysInMonth + 2}" scope="rowgroup">${escapeHtml(sector.name)}</th>`;
+    body.appendChild(sectorHeading);
+
+    const dayHeading = document.createElement("tr");
+    dayHeading.className = "nir-census-specification";
+    dayHeading.innerHTML = `
+      <th scope="row">ESPECIFICAÇÃO</th>
+      ${Array.from({ length: daysInMonth }, (_, index) => `<th scope="col">${index + 1}</th>`).join("")}
+      <th scope="col">TOTAL</th>
+    `;
+    body.appendChild(dayHeading);
+
+    for (const [field, label] of fields) {
+      const row = document.createElement("tr");
+      const dailyValues = Array.from({ length: daysInMonth }, (_, index) => {
+        const day = String(index + 1).padStart(2, "0");
+        const report = reportMap.get(`${month}-${day}`);
+        const value = report?.values?.[field];
+        return Number.isInteger(value) && value >= 0 ? value : null;
+      });
+      const total = dailyValues.reduce((sum, value) => sum + (value ?? 0), 0);
+      row.innerHTML = `
+        <th scope="row">${escapeHtml(label)}</th>
+        ${dailyValues.map(value => `<td>${value === null ? "—" : value}</td>`).join("")}
+        <td class="nir-census-total">${total}</td>
+      `;
+      body.appendChild(row);
+    }
+  }
+
+  const summaryValues = sumReports(allReports);
+  const summaryRows = [
+    ...orderedSectors.map(sector => {
+      const reportsForSector = [...(sectorReports.get(sector.id)?.values() || [])];
+      const totals = sumReports(reportsForSector);
+      return { name: sector.name, ...summaryFor(totals, reportsForSector.length) };
+    }),
+    { name: "TOTAL", ...summaryFor(summaryValues, overallDays.size) }
+  ];
+  for (const summary of summaryRows) {
+    const row = document.createElement("tr");
+    if (summary.name === "TOTAL") row.className = "nir-census-summary-total";
+    row.innerHTML = `
+      <th scope="row">${escapeHtml(summary.name)}</th>
+      <td>${summary.pacientes}</td>
+      <td>${summary.leitos}</td>
+      <td>${summary.obitos}</td>
+      <td>${summary.altas}</td>
+      <td>${summary.transferencias_externas}</td>
+      <td>${summary.transferencias_internas}</td>
+      <td>${summary.exits}</td>
+      <td>${formatRate(summary.occupancy)}</td>
+      <td>${formatRate(summary.averageStay)}</td>
+      <td>${formatRate(summary.bedTurnover)}</td>
+      <td>${summary.reportedDays}</td>
+    `;
+    summaryBody.appendChild(row);
+  }
+  renderNirCensusDayReports(items, nirCensusMonthWards, document.getElementById("nir-census-date")?.value || "");
+}
+
+function renderNirCensusDayReports(reports = [], censusWards = [], date = "") {
+  const container = document.getElementById("nir-census-day-results");
+  if (!container) return;
+  container.innerHTML = "";
+  if (!date) {
+    const hint = document.createElement("div");
+    hint.className = "history-hint";
+    hint.textContent = "Escolha uma data e pesquise para consultar ou reimprimir os censos daquele dia.";
+    container.appendChild(hint);
+    return;
+  }
+  if (nirCensusMonthSelected && date.slice(0, 7) !== nirCensusMonthSelected) {
+    const hint = document.createElement("div");
+    hint.className = "history-hint";
+    hint.textContent = `A data selecionada está fora de ${nirCensusMonthSelected}. Clique em “Pesquisar dia” para carregar esse mês.`;
+    container.appendChild(hint);
+    return;
+  }
+  const dayReports = (Array.isArray(reports) ? reports : [])
+    .filter(report => report.periodStartDate === date)
+    .sort((a, b) => String(a.wardName || "").localeCompare(String(b.wardName || ""), "pt-BR"));
+  if (!dayReports.length) {
+    const empty = document.createElement("div");
+    empty.className = "chart-empty";
+    empty.textContent = `Nenhum censo registrado em ${toBRDate(date)}.`;
+    container.appendChild(empty);
+    return;
+  }
+  const wardsById = new Map((Array.isArray(censusWards) ? censusWards : []).map(item => [String(item.id), item.nome]));
+  for (const report of dayReports) {
+    const item = document.createElement("div");
+    item.className = "nir-census-day-action";
+    const title = document.createElement("strong");
+    title.textContent = wardsById.get(String(report.wardId)) || report.wardName || "Setor";
+    const printButton = document.createElement("button");
+    printButton.type = "button";
+    printButton.className = "ghost btn-print-nir-census-day";
+    printButton.dataset.wardId = String(report.wardId);
+    printButton.dataset.date = date;
+    printButton.textContent = "Reimprimir censo";
+    item.append(title, printButton);
+    container.appendChild(item);
+  }
+}
+
+function printNirDailyCensus(report) {
+  if (!report) return;
+  const labels = [
+    ["pacientes", "Nº pacientes"],
+    ["leitos", "Nº leitos"],
+    ["altas", "Nº altas"],
+    ["obitos", "Nº óbitos"],
+    ["transferencias_externas", "Nº transferências externas"],
+    ["transferencias_internas", "Nº transferências internas"],
+    ["evasoes", "Nº evasões"],
+    ["leitos_bloqueados", "Nº leitos bloqueados"],
+    ["svd_realizadas", "SVD realizadas"],
+    ["cvc_realizadas", "CVC realizadas"],
+    ["sne_realizadas", "SNE realizadas"],
+    ["intubacoes_realizadas", "Intubações realizadas"]
+  ];
+  const rows = labels.map(([field, label]) => `
+    <tr><th>${escapeHtml(label)}</th><td>${Number(report.values?.[field]) || 0}</td></tr>
+  `).join("");
+  const printWindow = window.open("", "_blank", "width=800,height=700");
+  if (!printWindow) return;
+  printWindow.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Censo diário</title>
+    <style>body{font:14px Arial,sans-serif;color:#172b3a;padding:24px}h1{font-size:20px;margin:0 0 6px}p{color:#526173;margin:0 0 18px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #cbd5e1;padding:8px;text-align:left}td{text-align:center;width:100px}thead,th{background:#eef4fb}@media print{body{padding:0}}</style>
+    </head><body><h1>Censo diário — ${escapeHtml(report.wardName || "Setor")}</h1>
+    <p>Período: ${escapeHtml(toBRDate(report.periodStartDate) || "-")} às 07h até ${escapeHtml(toBRDate(report.periodEndDate) || "-")} às 07h</p>
+    <table><tbody>${rows}</tbody></table></body></html>`);
+  printWindow.document.close();
+  applyA4PrintLayout(printWindow, "portrait");
+}
+
+function getNirExternalRegulationDuration(item = {}, fallbackEnd = "") {
+  const start = new Date(item.startedAt || "");
+  if (!item.startedAt || Number.isNaN(start.getTime())) return "-";
+  const end = new Date(item.endedAt || fallbackEnd || "");
+  if (Number.isNaN(end.getTime())) return "Em andamento";
+  const minutes = Math.max(0, Math.floor((end.getTime() - start.getTime()) / 60000));
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const remainder = minutes % 60;
+  return `${days ? `${days}d ` : ""}${hours}h ${remainder}min`;
+}
+
+function normalizeNirExternalSelectValue(field, value, options = []) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const normalize = text => String(text || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "");
+  const key = normalize(raw);
+  if (field === "specialty" && ["ORT", "ORTO"].includes(key)) return "ORTOPEDIA";
+  return options.find(option => normalize(option) === key)
+    || (options.includes("OUTROS") ? "OUTROS" : "");
+}
+
+function renderNirExternalRegulations() {
+  const container = document.getElementById("nir-external-regulation-list");
+  const empty = document.getElementById("nir-external-regulation-empty");
+  const addButton = document.getElementById("btn-add-nir-external-regulation");
+  const canEdit = Boolean(selectActiveNirShift());
+  if (!container || !empty) return;
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", nirExternalRegulations.length > 0);
+  if (addButton) addButton.disabled = !canEdit;
+
+  const fields = [
+    ["patient", "Paciente", "text"],
+    ["age", "Idade", "number"],
+    ["specialty", "Especialidade", "select", ["ORTOPEDIA", "CIRURGICA", "CLÍNICA MÉDICA", "OBSTETRÍCIA", "VASCULAR", "UTI ADULTO", "UTI NEO", "HEMODINÂMICA", "NEUROLOGIA", "NEFROLOGIA", "OUTROS"]],
+    ["origin", "Origem", "select", ["CIDELÂNCIA", "SÃO FRANCISCO DO BREJÃO", "SÃO PEDRO DA ÁGUA BRANCA", "BOM JESUS DAS SELVAS", "ITINGA", "BURITICUPU", "VILA NOVA DOS MARTÍRIOS", "REGIONAL-AÇAILÂNDIA", "HMA", "OUTROS"]],
+    ["professional", "Profissional", "text"],
+    ["transferType", "Tipo de transferência", "select", ["INTERNA: PARA HMA", "EXTERNA: PARA OUTRAS UNIDADES", "HEMODINÂMICA"]],
+    ["regulator", "Regulador", "text"],
+    ["result", "Resultado", "select", ["AUTORIZADO", "NEGADO"]],
+    ["startedAt", "Início", "datetime-local"],
+    ["endedAt", "Fim", "datetime-local"]
+  ];
+
+  for (const item of nirExternalRegulations) {
+    const card = document.createElement("article");
+    card.className = `nir-external-regulation-card${item.closedAt ? " is-closed" : ""}`;
+    const isClosed = Boolean(item.closedAt);
+    for (const [field, label, type, options] of fields) {
+      const input = type === "select" ? document.createElement("select") : document.createElement("input");
+      if (type === "select") {
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "Selecione";
+        placeholder.disabled = true;
+        placeholder.selected = !item[field];
+        input.appendChild(placeholder);
+        for (const optionValue of options) {
+          const option = document.createElement("option");
+          option.value = optionValue;
+          option.textContent = optionValue;
+          input.appendChild(option);
+        }
+        input.value = normalizeNirExternalSelectValue(field, item[field], options);
+      } else {
+        input.type = type;
+      }
+      input.className = "nir-external-regulation-input";
+      input.dataset.id = String(item.id || "");
+      input.dataset.field = field;
+      input.setAttribute("aria-label", `${label} — ${item.patient || "regulação externa"}`);
+      if (type === "datetime-local") {
+        input.value = toDateTimeLocalValue(item[field]);
+      } else if (type !== "select") {
+        input.value = String(item[field] || "");
+      }
+      if (type === "number") {
+        input.min = "0";
+        input.max = "130";
+      } else if (type === "text") {
+        input.maxLength = field === "patient" || field === "professional" ? 180 : 120;
+      }
+      input.disabled = !canEdit || isClosed;
+      const fieldLabel = document.createElement("label");
+      fieldLabel.className = `nir-external-regulation-field field-${field}`;
+      fieldLabel.append(document.createTextNode(label), input);
+      card.appendChild(fieldLabel);
+    }
+    const footer = document.createElement("div");
+    footer.className = "nir-external-regulation-footer";
+    const durationCell = document.createElement("div");
+    durationCell.className = "nir-external-regulation-duration";
+    durationCell.setAttribute("aria-live", "polite");
+    durationCell.textContent = getNirExternalRegulationDuration(item);
+    footer.appendChild(durationCell);
+    const actionCell = document.createElement("div");
+    actionCell.className = "nir-external-regulation-actions";
+    const saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.className = "ghost btn-save-nir-external-regulation";
+    saveButton.dataset.id = String(item.id || "");
+    saveButton.textContent = isClosed ? "Salvo" : "Salvar";
+    saveButton.disabled = !canEdit || isClosed;
+    actionCell.appendChild(saveButton);
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "ghost btn-close-nir-external-regulation";
+    closeButton.dataset.id = String(item.id || "");
+    closeButton.textContent = isClosed ? "Baixado" : "Dar baixa";
+    closeButton.disabled = !canEdit || isClosed;
+    actionCell.appendChild(closeButton);
+    footer.appendChild(actionCell);
+    card.appendChild(footer);
+    container.appendChild(card);
+  }
+}
+
+async function saveNirExternalRegulations() {
+  if (!ensureNirShiftOpen()) return false;
+  const rows = nirExternalRegulations.map(item => ({ ...item }));
+  const operation = nirExternalRegulationSavePromise.then(() => api("/api/shifts/nir/external-regulations", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ regulations: rows })
+  }));
+  nirExternalRegulationSavePromise = operation.catch(() => {});
+  try {
+    const data = await operation;
+    currentUser = data.user || currentUser;
+    selectActiveNirShift();
+    setNirExternalRegulationFeedback("Regulação externa salva automaticamente.");
+    return true;
+  } catch (error) {
+    setNirExternalRegulationFeedback(error.message || "Não foi possível salvar a regulação externa.", true);
+    return false;
+  }
+}
+
+function setNirExternalRegulationFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("nir-external-regulation-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function setNirViewTab(tab) {
+  const showCensus = tab === "census";
+  const showExternal = tab === "external";
+  const mapTab = document.getElementById("nir-tab-map");
+  const censusTab = document.getElementById("nir-tab-census");
+  const externalTab = document.getElementById("nir-tab-external");
+  const mapPanel = document.getElementById("nir-map-panel");
+  const censusPanel = document.getElementById("nir-census-panel");
+  const externalPanel = document.getElementById("nir-external-panel");
+  const title = document.getElementById("nir-view-title");
+
+  mapTab?.setAttribute("aria-selected", String(!showCensus && !showExternal));
+  censusTab?.setAttribute("aria-selected", String(showCensus));
+  externalTab?.setAttribute("aria-selected", String(showExternal));
+  mapPanel?.classList.toggle("hidden", showCensus || showExternal);
+  censusPanel?.classList.toggle("hidden", !showCensus);
+  externalPanel?.classList.toggle("hidden", !showExternal);
+  if (title) {
+    title.textContent = showCensus
+      ? "RELATÓRIO MENSAL DO CENSO — TODOS OS SETORES"
+      : (showExternal ? "CONTROLE DE REGULAÇÃO EXTERNA/HMA" : "MAPA DE PACIENTES SINALIZADOS AO NIR");
+  }
+  if (showCensus) loadNirCensusReports();
+  if (showExternal) renderNirExternalRegulations();
+}
+
+async function loadNirCensusReports({ force = false } = {}) {
+  const monthInput = document.getElementById("nir-census-month");
+  if (!monthInput) return;
+  const dateInput = document.getElementById("nir-census-date");
+  if (dateInput && !dateInput.value) dateInput.value = getOperationalDayKey(new Date());
+  const month = monthInput.value || getOperationalDayKey(new Date()).slice(0, 7);
+  monthInput.value = month;
+  if (!force && nirCensusCacheMonth === month) {
+    if (Date.now() - nirCensusCacheLoadedAt > 15000) {
+      void loadNirCensusReports({ force: true });
+    }
+    return;
+  }
+  if (!force && nirCensusRequest?.month === month) return nirCensusRequest.promise;
+
+  const requestId = ++nirCensusRequestId;
+  const promise = (async () => {
+    try {
+      const data = await api(`/api/nir/census?month=${encodeURIComponent(month)}`);
+      if (requestId !== nirCensusRequestId || monthInput.value !== month) return;
+      renderNirCensusReports(data.wards || [], data.reports || [], month);
+      nirCensusCacheMonth = month;
+      nirCensusCacheLoadedAt = Date.now();
+    } catch (error) {
+      if (requestId !== nirCensusRequestId || monthInput.value !== month) return;
+      renderNirCensusReports([], [], month);
+      const count = document.getElementById("nir-census-count");
+      if (count) {
+        count.textContent = error.message || "Não foi possível carregar o histórico mensal do censo.";
+        count.classList.add("error-text");
+      }
+    }
+  })();
+  nirCensusRequest = { month, promise };
+  try {
+    await promise;
+  } finally {
+    if (nirCensusRequest?.promise === promise) nirCensusRequest = null;
+  }
+}
+
 function getPatientRegulationChannels() {
   const channels = [];
   if (document.getElementById("patient-regulation-email")?.checked) channels.push("EMAIL");
@@ -4558,6 +6532,178 @@ function renderNirPreviousReports(previousItems = [], otherItems = []) {
       <button type="button" class="ghost btn-open-previous-nir-report" data-report-id="${item.id || ""}">Abrir relatório</button>
     `;
     container.appendChild(card);
+  }
+}
+
+function setNirShiftReportsFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("nir-shift-reports-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+function renderNirShiftReports(reports = []) {
+  nirFinalizedShiftReports = Array.isArray(reports) ? reports : [];
+  const container = document.getElementById("nir-shift-reports-list");
+  const empty = document.getElementById("nir-shift-reports-empty");
+  if (!container || !empty) return;
+  container.innerHTML = "";
+  empty.classList.toggle("hidden", nirFinalizedShiftReports.length > 0);
+  for (const report of nirFinalizedShiftReports) {
+    const card = document.createElement("div");
+    card.className = "patient-history-card nir-finalized-shift-card";
+    const title = document.createElement("strong");
+    title.textContent = `Plantão NIR ${report.shiftLength || "12H"} • ${getShiftPeriodLabel(report.shiftPeriod)}`;
+    const meta = document.createElement("span");
+    meta.textContent = `Data: ${toBRDate(report.shiftDate) || "-"} • Enfermeiro: ${report.ownerName || "-"} • Encerrado em: ${toBRDateTime(report.closedAt) || "-"}`;
+    const requiresAdminPassword = report.ownerUsername !== currentUser?.username;
+    const access = document.createElement("span");
+    access.textContent = requiresAdminPassword
+      ? "Acesso de outro profissional: requer senha do administrador."
+      : "Seu plantão finalizado.";
+    access.classList.toggle("nir-report-access-required", requiresAdminPassword);
+    const actions = document.createElement("div");
+    actions.className = "shift-history-actions";
+    actions.innerHTML = `
+      <button type="button" class="ghost btn-view-nir-shift-report" data-shift-id="${escapeHtml(report.id)}">Visualizar ficha</button>
+      <button type="button" class="ghost btn-download-nir-shift-report" data-shift-id="${escapeHtml(report.id)}">Baixar / Imprimir</button>
+    `;
+    card.append(title, meta, access, actions);
+    container.appendChild(card);
+  }
+}
+
+async function loadNirShiftReports() {
+  const container = document.getElementById("nir-shift-reports-list");
+  if (!container) return;
+  setNirShiftReportsFeedback("");
+  try {
+    const data = await api("/api/nir/shift-reports");
+    renderNirShiftReports(data.reports || []);
+  } catch (error) {
+    renderNirShiftReports([]);
+    setNirShiftReportsFeedback(error.message || "Não foi possível carregar as fichas finalizadas do NIR.", true);
+  }
+}
+
+async function fetchNirHistoricalShiftReport(shiftId, adminPassword = "") {
+  const data = await api(`/api/nir/shift-reports/${encodeURIComponent(shiftId)}/open`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ adminPassword })
+  });
+  const report = data.report || null;
+  if (!report?.shift) throw new Error("A ficha finalizada do NIR não está disponível.");
+  nirHistoricalShiftReport = report;
+  return report;
+}
+
+function showNirHistoricalShiftReport(report) {
+  const shift = report.shift;
+  document.getElementById("nir-shift-report-view-title").textContent =
+    `Ficha NIR • ${shift.nome || shift.username || "-"}`;
+  document.getElementById("nir-shift-report-view-meta").textContent =
+    `Data: ${toBRDate(shift.shiftDate) || "-"} • ${shift.shiftLength || "12H"} / ${getShiftPeriodLabel(shift.shiftPeriod)} • Encerrado em ${toBRDateTime(shift.closedAt) || "-"}`;
+  document.getElementById("nir-shift-report-view-nursing").textContent =
+    shift.nursingReport || "Nenhum relatório do enfermeiro foi registrado neste plantão.";
+  const patients = Array.isArray(report.nirAcceptedSnapshot) ? report.nirAcceptedSnapshot : [];
+  const tbody = document.getElementById("nir-shift-report-view-patients");
+  const empty = document.getElementById("nir-shift-report-view-patients-empty");
+  const title = document.getElementById("nir-shift-report-view-patients-title");
+  tbody.innerHTML = "";
+  empty.classList.toggle("hidden", patients.length > 0);
+  title.textContent = `Pacientes aceitos no fechamento (${patients.length})`;
+  for (const patient of patients) {
+    const row = document.createElement("tr");
+    for (const value of [
+      patient.wardName || "-",
+      patient.patientName || "-",
+      patient.bedId || "-",
+      patient.nirSpecialty || "-",
+      patient.cil || "-",
+      toBRDateTime(patient.regulationAcceptedAt) || "-"
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = String(value);
+      row.appendChild(cell);
+    }
+    tbody.appendChild(row);
+  }
+  const externalRows = Array.isArray(report.nirExternalRegulations) ? report.nirExternalRegulations : [];
+  const externalBody = document.getElementById("nir-shift-report-view-external");
+  const externalEmpty = document.getElementById("nir-shift-report-view-external-empty");
+  const externalTitle = document.getElementById("nir-shift-report-view-external-title");
+  externalBody.innerHTML = "";
+  externalEmpty.classList.toggle("hidden", externalRows.length > 0);
+  externalTitle.textContent = `Regulação externa/HMA no fechamento (${externalRows.length})`;
+  for (const item of externalRows) {
+    const row = document.createElement("tr");
+    for (const value of [
+      item.patient || "-",
+      item.age || "-",
+      item.specialty || "-",
+      item.origin || "-",
+      item.professional || "-",
+      item.transferType || "-",
+      item.regulator || "-",
+      item.result || "-",
+      toBRDateTime(item.startedAt) || "-",
+      toBRDateTime(item.endedAt) || "-",
+      getNirExternalRegulationDuration(item, shift.closedAt)
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = String(value);
+      row.appendChild(cell);
+    }
+    externalBody.appendChild(row);
+  }
+  document.getElementById("modal-nir-shift-report")?.showModal();
+}
+
+function beginNirHistoricalReportAction(shiftId, action) {
+  const item = nirFinalizedShiftReports.find(report => String(report.id) === String(shiftId));
+  if (!item) {
+    setNirShiftReportsFeedback("A ficha selecionada não está mais na lista. Atualize e tente novamente.", true);
+    return;
+  }
+  nirPendingHistoricalReportAction = { shiftId: String(shiftId), action };
+  if (item.ownerUsername === currentUser?.username) {
+    void continueNirHistoricalReportAction("");
+    return;
+  }
+  const passwordInput = document.getElementById("nir-admin-password");
+  const feedback = document.getElementById("nir-admin-password-feedback");
+  if (passwordInput) passwordInput.value = "";
+  if (feedback) {
+    feedback.textContent = "";
+    feedback.classList.add("hidden");
+  }
+  document.getElementById("modal-nir-admin-password")?.showModal();
+  passwordInput?.focus();
+}
+
+async function continueNirHistoricalReportAction(adminPassword) {
+  const pending = nirPendingHistoricalReportAction;
+  if (!pending) return;
+  const button = document.getElementById("btn-confirm-nir-admin-password");
+  if (button) button.disabled = true;
+  const feedback = document.getElementById("nir-admin-password-feedback");
+  try {
+    const report = await fetchNirHistoricalShiftReport(pending.shiftId, adminPassword);
+    nirPendingHistoricalReportAction = null;
+    document.getElementById("modal-nir-admin-password")?.close();
+    if (pending.action === "view") showNirHistoricalShiftReport(report);
+    else printNirShiftReport(report);
+  } catch (error) {
+    if (feedback) {
+      feedback.textContent = error.message || "Não foi possível autorizar o acesso à ficha.";
+      feedback.classList.remove("hidden");
+    } else {
+      setNirShiftReportsFeedback(error.message || "Não foi possível autorizar o acesso à ficha.", true);
+    }
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 
@@ -4640,7 +6786,7 @@ function printNirReport() {
     return;
   }
 
-  setNirReportFeedback("Folha do relatório aberta. Na nova aba, clique em 'Imprimir / Salvar PDF'.");
+  setNirReportFeedback("Enviando relatório para impressão.");
 
   popup.document.write(`<!DOCTYPE html>
   <html lang="pt-BR">
@@ -4657,7 +6803,6 @@ function printNirReport() {
         .sheet { width: 297mm; min-height: 210mm; background: #fff; box-shadow: 0 12px 40px rgba(16, 42, 67, 0.18); padding: 10mm; }
         ${buildHospitalReportPrintStyles()}
         h1, h2, h3 { margin: 0; }
-        .nir-print-headline { margin: 0 0 8px; font-size: 22px; font-weight: 900; text-align: center; text-transform: uppercase; }
         .nir-print-meta { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #7f96b4; margin-bottom: 8px; }
         .nir-print-meta div { padding: 6px 8px; font-size: 11px; font-weight: 800; background: #dbe7f7; border-right: 1px solid #7f96b4; }
         .nir-print-meta div:last-child { border-right: 0; text-align: right; }
@@ -4696,7 +6841,6 @@ function printNirReport() {
             subtitle: "Relatório operacional com a mesma leitura da tabela do NIR.",
             metaHtml: `<div><strong>Gerado em:</strong> ${escapeHtml(toBRDateTime(new Date().toISOString()))}</div>`
           })}
-          <div class="nir-print-headline">Mapa de Pacientes Sinalizados ao NIR</div>
           <div class="nir-print-meta">
             <div>DATA: ${escapeHtml(operationalDate)}</div>
             <div>ENFERMEIRO: ${escapeHtml(currentUser?.nome || currentUser?.username || "-")}</div>
@@ -4723,14 +6867,7 @@ function printNirReport() {
     </body>
   </html>`);
   popup.document.close();
-  popup.focus();
-  window.setTimeout(() => {
-    try {
-      popup.print();
-    } catch (error) {
-      console.warn("Falha ao abrir a impressão do NIR", error);
-    }
-  }, 300);
+  applyA4PrintLayout(popup, "landscape");
 }
 
 function escapeHtml(value) {
@@ -4745,96 +6882,152 @@ function escapeHtml(value) {
 function buildHospitalReportPrintStyles() {
   return `
     .hma-report-brand {
-      margin: -14mm -14mm 18px;
-      padding: 18px 22px 16px;
-      background: linear-gradient(180deg, #020817, #06142f);
-      color: #fff;
+      margin: 0 0 10px;
+      padding: 0 0 8px;
+      background: #fff;
+      color: #123d73;
+      border-bottom: 2px solid #1e5ca8;
     }
     .hma-report-brand-shell {
       display: flex;
-      align-items: flex-end;
-      gap: 16px;
-      flex-wrap: wrap;
+      align-items: center;
+      gap: 14px;
     }
-    .hma-report-brand-mark {
-      font-size: 64px;
-      font-weight: 900;
-      line-height: 0.88;
-      letter-spacing: -3px;
-      color: #3b82f6;
-      text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+    .hma-report-logo {
+      display: block;
+      width: 68px;
+      height: auto;
+      flex: 0 0 68px;
     }
     .hma-report-brand-copy {
       display: grid;
-      gap: 4px;
+      gap: 2px;
     }
     .hma-report-brand-title {
-      font-size: 24px;
+      font-size: 19px;
       font-weight: 900;
       line-height: 1.1;
-      color: #eff6ff;
+      color: #123d73;
     }
     .hma-report-brand-subtitle {
-      font-size: 14px;
+      font-size: 10px;
       font-weight: 700;
-      color: #cbd5e1;
-    }
-    .hma-report-brand-divider {
-      height: 3px;
-      margin-top: 12px;
-      border-radius: 999px;
-      background: linear-gradient(90deg, #3b82f6, #bfdbfe);
+      color: #526b89;
     }
     .hma-report-heading {
       display: flex;
       justify-content: space-between;
       align-items: flex-start;
-      gap: 14px;
-      margin-bottom: 16px;
-      padding-bottom: 12px;
-      border-bottom: 2px solid #dbe4f0;
+      gap: 10px;
+      margin-bottom: 8px;
+      padding-bottom: 7px;
+      border-bottom: 1px solid #dbe4f0;
     }
     .hma-report-title {
-      font-size: 24px;
+      font-size: 18px;
       font-weight: 800;
       color: #0f172a;
       margin: 0;
     }
     .hma-report-subtitle {
       margin: 4px 0 0;
-      font-size: 13px;
+      font-size: 10px;
       color: #475569;
     }
     .hma-report-meta {
       display: grid;
-      gap: 4px;
+      gap: 2px;
       text-align: right;
-      font-size: 12px;
+      font-size: 9px;
       font-weight: 700;
       color: #0f172a;
     }
     .hma-report-meta strong {
       color: #0f172a;
     }
+  `;
+}
+
+function applyA4PrintLayout(printWindow, orientation = "landscape") {
+  const style = printWindow.document.createElement("style");
+  style.textContent = `
+    @page { size: A4 ${orientation}; margin: 8mm; }
     @media print {
-      .hma-report-brand {
-        margin: 0 0 18px;
+      html, body {
+        width: auto !important;
+        min-width: 0 !important;
+        height: auto !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: visible !important;
+        background: #fff !important;
       }
+      .page-wrap {
+        display: block !important;
+        width: auto !important;
+        min-width: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+      .sheet {
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+      }
+      .toolbar, .print-actions { display: none !important; }
+      table {
+        width: 100% !important;
+        max-width: 100% !important;
+        table-layout: fixed;
+      }
+      th, td { overflow-wrap: anywhere; }
+      thead { display: table-header-group; }
+      tfoot { display: table-footer-group; }
+      tr { break-inside: avoid; page-break-inside: avoid; }
+      img { max-width: 100% !important; height: auto !important; }
     }
   `;
+  printWindow.document.head.appendChild(style);
+  printWindow.onafterprint = () => printWindow.close();
+  printWindow.setTimeout(async () => {
+    try {
+      const imageLoads = Array.from(printWindow.document.images).map(image => {
+        if (image.complete) return Promise.resolve();
+        return new Promise(resolve => {
+          image.addEventListener("load", resolve, { once: true });
+          image.addEventListener("error", resolve, { once: true });
+        });
+      });
+      await Promise.race([
+        Promise.all(imageLoads),
+        new Promise(resolve => printWindow.setTimeout(resolve, 2000))
+      ]);
+      if (printWindow.closed) return;
+      printWindow.focus();
+      printWindow.print();
+    } catch (error) {
+      console.error("Falha ao iniciar a impressão do relatório.", error);
+    }
+  }, 250);
 }
 
 function buildHospitalReportTop({ title = "", subtitle = "", metaHtml = "" } = {}) {
   return `
     <div class="hma-report-brand">
       <div class="hma-report-brand-shell">
-        <div class="hma-report-brand-mark">HMA</div>
+        <img class="hma-report-logo" src="${escapeHtml(new URL("/logo-hma.webp", window.location.href).href)}" alt="HMA">
         <div class="hma-report-brand-copy">
           <div class="hma-report-brand-title">HOSPITAL MUNICIPAL DE AÇAILÂNDIA</div>
           <div class="hma-report-brand-subtitle">Rua João de Deus, s/n, Getat</div>
         </div>
       </div>
-      <div class="hma-report-brand-divider"></div>
     </div>
     <div class="hma-report-heading">
       <div>
@@ -4972,15 +7165,17 @@ function openPrintPreviewWindow(html, title = "Relatorio") {
     popup.document.open("text/html", "replace");
     popup.document.write(html);
     popup.document.close();
-    popup.focus();
+    applyA4PrintLayout(popup, "landscape");
     return popup;
   } catch (error) {
     try {
       const blob = new Blob([html], { type: "text/html;charset=utf-8" });
       const blobUrl = URL.createObjectURL(blob);
       popup.location.replace(blobUrl);
-      popup.document.title = title;
-      popup.focus();
+      popup.addEventListener("load", () => {
+        popup.document.title = title;
+        applyA4PrintLayout(popup, "landscape");
+      }, { once: true });
       window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
       return popup;
     } catch {
@@ -5253,8 +7448,122 @@ function openPreviousNirReport(reportId) {
   document.getElementById("modal-nir-report-view")?.showModal();
 }
 
+function selectActiveNirShift() {
+  if (!currentUser) return null;
+  const activeShift = (Array.isArray(currentUser.activeShifts) ? currentUser.activeShifts : [])
+    .find(shift => String(shift.serviceType || "").trim().toUpperCase() === "NIR") || null;
+  currentUser.activeShift = activeShift;
+  return activeShift;
+}
+
+function ensureNirShiftOpen() {
+  if (selectActiveNirShift()) return true;
+  window.alert("Para alterar os dados dos pacientes aceitos, primeiro abra o plantão NIR.");
+  return false;
+}
+
+function syncNirAcceptedEditingAvailability() {
+  const canEdit = Boolean(selectActiveNirShift());
+  const list = document.getElementById("nir-accepted-list");
+  if (!list) return;
+  list.classList.toggle("nir-editing-locked", !canEdit);
+  for (const input of list.querySelectorAll(".nir-specialty-input, .nir-sirel-input")) {
+    input.readOnly = !canEdit;
+    input.setAttribute("aria-disabled", String(!canEdit));
+    input.title = canEdit ? "" : "Abra o plantão NIR para editar.";
+  }
+  for (const control of list.querySelectorAll(".nir-regulation-date, .nir-channel-radio, .btn-save-nir-specialty, .btn-save-nir-sirel, .btn-nir-close, .btn-nir-cancel")) {
+    control.setAttribute("aria-disabled", String(!canEdit));
+    control.title = canEdit ? "" : "Abra o plantão NIR para editar.";
+    if (control.classList.contains("nir-regulation-date")) control.disabled = !canEdit;
+  }
+}
+
+function syncNirShiftControl() {
+  const nurseLabel = document.getElementById("nir-report-nurse");
+  const activeShift = selectActiveNirShift();
+  const shiftDate = document.getElementById("nir-shift-date");
+  const shiftLength = document.getElementById("nir-shift-length");
+  const reportInput = document.getElementById("nir-shift-nursing-report");
+  const openButton = document.getElementById("btn-open-nir-shift");
+  const closeButton = document.getElementById("btn-close-nir-shift");
+  const teamButton = document.getElementById("btn-open-nir-team-modal");
+  const saveReportButton = document.getElementById("btn-save-nir-shift-report");
+  const shiftStatus = document.getElementById("nir-shift-panel-status");
+
+  if (shiftDate && !shiftDate.value) shiftDate.value = getTodayIsoDate();
+  if (shiftLength) {
+    if (activeShift) shiftLength.value = activeShift.shiftLength || "";
+    shiftLength.disabled = Boolean(activeShift);
+  }
+  if (reportInput) {
+    reportInput.value = activeShift?.nursingReport || "";
+    reportInput.disabled = !activeShift;
+  }
+  if (openButton) {
+    openButton.disabled = Boolean(activeShift);
+    openButton.classList.toggle("shift-open-active", Boolean(activeShift));
+    openButton.textContent = activeShift ? "Plantão aberto" : "Abrir plantão";
+  }
+  if (closeButton) closeButton.disabled = !activeShift;
+  if (teamButton) teamButton.disabled = !activeShift;
+  if (saveReportButton) saveReportButton.disabled = !activeShift;
+  if (shiftStatus) {
+    shiftStatus.textContent = activeShift ? "Plantão em andamento" : "Plantão fechado";
+    shiftStatus.classList.toggle("is-active", Boolean(activeShift));
+  }
+  const currentShiftId = activeShift ? String(activeShift.id || "") : "";
+  if (currentShiftId !== nirExternalRegulationShiftId) {
+    nirExternalRegulationShiftId = currentShiftId;
+    nirExternalRegulations = Array.isArray(activeShift?.nirExternalRegulations)
+      ? activeShift.nirExternalRegulations.map(item => ({ ...item }))
+      : [];
+    renderNirExternalRegulations();
+  }
+
+  if (nurseLabel) {
+    const owner = activeShift?.ownerName || currentUser?.nome || currentUser?.username || "-";
+    nurseLabel.textContent = activeShift
+      ? `PLANTÃO NIR ABERTO POR: ${owner}`
+      : `ENFERMEIRO: ${currentUser?.nome || currentUser?.username || "-"}`;
+  }
+  syncNirAcceptedEditingAvailability();
+}
+
+function setNirShiftFeedback(message = "", isError = false) {
+  const feedback = document.getElementById("nir-shift-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+  feedback.classList.toggle("error-text", Boolean(message && isError));
+}
+
+async function openNirShift() {
+  const shiftLength = getSelectedShiftLength("nir-shift-length");
+  if (!shiftLength) {
+    setNirShiftFeedback("Selecione se o plantão será de 12H ou 24H para abrir o plantão NIR.", true);
+    return;
+  }
+  const shiftPeriod = getPsychologyAutoShiftPeriod(new Date(), shiftLength);
+  try {
+    const res = await api("/api/shifts/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ serviceType: "NIR", shiftLength, shiftPeriod })
+    });
+    currentUser = res.user || currentUser;
+    selectActiveNirShift();
+    renderCurrentUser();
+    syncNirShiftControl();
+    setNirShiftFeedback("Plantão NIR aberto com sucesso.");
+  } catch (error) {
+    setNirShiftFeedback(error.message || "Não foi possível abrir o plantão NIR.", true);
+  }
+}
+
 function getNirTrackingPresentation(patient = {}) {
   const request = patient?.currentAdmission?.nirRequest || {};
+  const requestStatus = String(request.status || "").trim().toUpperCase();
   const regulationChannels = Array.isArray(patient.regulationChannels) && patient.regulationChannels.length
     ? formatNirChannels(patient.regulationChannels)
     : (Array.isArray(patient.nirUpdateChannels) && patient.nirUpdateChannels.length
@@ -5265,6 +7574,15 @@ function getNirTrackingPresentation(patient = {}) {
       label: "Inativo",
       className: "none",
       meta: "Aguardando sinalização do setor."
+    };
+  }
+  if (requestStatus === "SOLICITADO") {
+    return {
+      label: "Solicitado",
+      className: "pending",
+      meta: request.requestedBy
+        ? `Solicitado por ${request.requestedBy}`
+        : `Solicitado em ${toBRDateTime(request.requestedAt) || "-"}`
     };
   }
   if (patient?.nirDischargePending) {
@@ -5278,18 +7596,9 @@ function getNirTrackingPresentation(patient = {}) {
     return {
       label: "Em acompanhamento",
       className: "in-progress",
-      meta: patient.nirAcceptedLocation
-        ? `Aceito para ${patient.nirAcceptedLocation} em ${toBRDateTime(patient.regulationAcceptedAt) || "-"}`
-        : `Aceito em ${toBRDateTime(patient.regulationAcceptedAt) || "-"}`
-    };
-  }
-  if (request.viewedAt) {
-    return {
-      label: "Visualizada",
-      className: "done",
-      meta: request.viewedBy
-        ? `Visto por ${request.viewedBy}`
-        : `Visto em ${toBRDateTime(request.viewedAt) || "-"}`
+      meta: patient.regulationAcceptedAt
+        ? `Regulado em ${toBRDateTime(patient.regulationAcceptedAt)}`
+        : "Aguardando data da regulação."
     };
   }
   return {
@@ -5303,31 +7612,27 @@ function getNirTrackingPresentation(patient = {}) {
 
 function buildNirChannelCell(patient = {}, channel = "") {
   const normalizedChannel = String(channel || "").toUpperCase();
-  const channels = Array.isArray(patient.nirUpdateChannels)
-    ? patient.nirUpdateChannels.map(item => String(item || "").toUpperCase())
-    : [];
+  const channels = [
+    ...(Array.isArray(patient.regulationChannels) ? patient.regulationChannels : []),
+    ...(Array.isArray(patient.nirUpdateChannels) ? patient.nirUpdateChannels : [])
+  ].map(item => String(item || "").trim().toUpperCase());
   const active = channels.includes(normalizedChannel);
   const meta = active
     ? `Salvo ${patient.nirLastUpdateAt ? `em ${toBRDateTime(patient.nirLastUpdateAt)}` : "automaticamente"}`
-    : "Clique para salvar.";
+    : "Clique para selecionar; salva automaticamente.";
   return `
     <div class="nir-support-cell">
       <label class="nir-channel-radio-wrap">
         <input type="checkbox" class="nir-channel-radio" data-id="${escapeHtml(String(patient.id || ""))}" data-channel="${escapeHtml(normalizedChannel)}" ${active ? "checked" : ""}>
         <span class="bed-request-chip ${active ? "done" : "none"}">${escapeHtml(getNirChannelLabel(normalizedChannel))}</span>
       </label>
-      ${normalizedChannel === "CIL" ? `<input type="text" inputmode="numeric" maxlength="20" class="nir-sirel-input" data-id="${escapeHtml(String(patient.id || ""))}" value="${escapeHtml(patient.cil || "")}" placeholder="Numero da SIREL">` : ""}
+      ${normalizedChannel === "CIL" ? `
+        <input type="text" inputmode="numeric" maxlength="20" class="nir-sirel-input" data-id="${escapeHtml(String(patient.id || ""))}" data-saved-value="${escapeHtml(patient.cil || "")}" value="${escapeHtml(patient.cil || "")}" placeholder="Número da regulação">
+        <button type="button" class="ghost btn-save-nir-sirel" data-id="${escapeHtml(String(patient.id || ""))}">Salvar número</button>
+      ` : ""}
       <div class="nir-support-meta">${escapeHtml(meta)}</div>
     </div>
   `;
-}
-
-function getSelectedNirChannels(patientId) {
-  const selectors = Array.from(document.querySelectorAll(`.nir-channel-radio[data-id="${String(patientId)}"]`));
-  return selectors
-    .filter(input => input.checked)
-    .map(input => String(input.dataset.channel || "").toUpperCase())
-    .filter(channel => channel === "EMAIL" || channel === "CIL");
 }
 
 function syncPatientAcrossViews(updatedPatient = {}) {
@@ -5345,18 +7650,21 @@ function syncPatientAcrossViews(updatedPatient = {}) {
 }
 
 async function saveNirSirelValue(patientId, value) {
+  if (!ensureNirShiftOpen()) return false;
   const patient = nirPatients.find(item => String(item.id) === String(patientId))
     || nirAcceptedPatients.find(item => String(item.id) === String(patientId))
     || registeredPatients.find(item => String(item.id) === String(patientId));
   if (!patient) return;
-  const timerKey = String(patientId || "");
-  const pendingTimer = nirSirelSaveTimers.get(timerKey);
-  if (pendingTimer) {
-    clearTimeout(pendingTimer);
-    nirSirelSaveTimers.delete(timerKey);
-  }
   const normalizedValue = String(value || "").replace(/\D/g, "").slice(0, 20);
-  if (String(patient.cil || "") === normalizedValue) return;
+  if (!normalizedValue) {
+    setNirFeedback("Informe o número da regulação antes de salvar.", true);
+    return false;
+  }
+
+  if (String(patient.cil || "") === normalizedValue) {
+    setNirFeedback("O número da regulação já está salvo.");
+    return true;
+  }
 
   try {
     const data = await api(`/api/patients/${patientId}/nir-update`, {
@@ -5367,25 +7675,57 @@ async function saveNirSirelValue(patientId, value) {
         channels: Array.isArray(patient.nirUpdateChannels) ? patient.nirUpdateChannels : []
       })
     });
-    if (data?.patient) {
-      syncPatientAcrossViews(data.patient);
-      await loadNirPatientsView();
-    }
+    patient.cil = normalizedValue;
+    if (data?.patient) syncPatientAcrossViews(data.patient);
     setNirFeedback(`Numero da SIREL salvo para ${patient.nome || "o paciente"}.`);
+    return true;
   } catch (error) {
     setNirFeedback(error.message || "Nao foi possivel salvar o numero da SIREL.", true);
+    return false;
   }
 }
 
-function scheduleNirSirelSave(patientId, value) {
-  const timerKey = String(patientId || "");
-  if (!timerKey) return;
-  const existingTimer = nirSirelSaveTimers.get(timerKey);
-  if (existingTimer) clearTimeout(existingTimer);
-  nirSirelSaveTimers.set(timerKey, window.setTimeout(async () => {
-    nirSirelSaveTimers.delete(timerKey);
-    await saveNirSirelValue(timerKey, value);
-  }, 450));
+async function saveNirSpecialtyValue(patientId, value) {
+  if (!ensureNirShiftOpen()) return false;
+  const patient = nirAcceptedPatients.find(item => String(item.id) === String(patientId));
+  if (!patient) return false;
+  const specialty = String(value || "").trim().slice(0, 80);
+  try {
+    const response = await api(`/api/patients/${patientId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nome: patient.nome || "", nirSpecialty: specialty })
+    });
+    patient.nirSpecialty = specialty;
+    if (response?.patient) syncPatientAcrossViews(response.patient);
+    setNirFeedback(`Especialidade salva para ${patient.nome || "o paciente"}.`);
+    return true;
+  } catch (error) {
+    setNirFeedback(error.message || "Não foi possível salvar a especialidade.", true);
+    return false;
+  }
+}
+
+async function saveNirRegulationDate(patientId, value) {
+  if (!ensureNirShiftOpen()) return false;
+  const patient = nirAcceptedPatients.find(item => String(item.id) === String(patientId));
+  if (!patient) return false;
+  const regulationAcceptedAt = dateTimeLocalToIso(value);
+  try {
+    const response = await api(`/api/patients/${encodeURIComponent(patientId)}/nir-regulation-date`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ regulationAcceptedAt })
+    });
+    if (response?.patient) syncPatientAcrossViews(response.patient);
+    setNirFeedback(regulationAcceptedAt
+      ? `Data de regulação salva para ${patient.nome || "o paciente"}.`
+      : `Data de regulação removida para ${patient.nome || "o paciente"}.`);
+    return true;
+  } catch (error) {
+    setNirFeedback(error.message || "Não foi possível salvar a data de regulação.", true);
+    return false;
+  }
 }
 
 function renderNirPatients(items) {
@@ -5393,13 +7733,12 @@ function renderNirPatients(items) {
   const container = document.getElementById("nir-list");
   const empty = document.getElementById("nir-list-empty");
   const dateLabel = document.getElementById("nir-report-date");
-  const nurseLabel = document.getElementById("nir-report-nurse");
   if (!container || !empty) return;
 
   container.innerHTML = "";
   empty.classList.toggle("hidden", nirPatients.length > 0);
   if (dateLabel) dateLabel.textContent = `DATA: ${toBRDate(getOperationalDayKey(new Date())) || "-"}`;
-  if (nurseLabel) nurseLabel.textContent = `ENFERMEIRO: ${currentUser?.nome || currentUser?.username || "-"}`;
+  syncNirShiftControl();
 
   for (const patient of nirPatients) {
     const row = document.createElement("tr");
@@ -5407,9 +7746,7 @@ function renderNirPatients(items) {
     const currentWard = current?.wardNome || "-";
     const currentBed = current?.bedId || "-";
     const admittedAt = current?.admittedAt ? toBRDate(current.admittedAt) : "-";
-    const regulationDate = patient.updatedAt ? toBRDate(String(patient.updatedAt).slice(0, 10)) : "-";
     const nirStatus = getNirTrackingPresentation(patient);
-    const acceptedLabel = patient.regulationAcceptedAt ? `Aceito em ${toBRDateTime(patient.regulationAcceptedAt)}` : "Ainda aguardando aceite";
     row.innerHTML = `
       <td>${currentWard}</td>
       <td>
@@ -5421,18 +7758,9 @@ function renderNirPatients(items) {
       <td>${admittedAt}</td>
       <td>
         <div class="nir-support-cell">
-          <div class="bed-request-chip ${nirStatus.className}">${escapeHtml(nirStatus.label)}</div>
+          <button type="button" class="nir-status-button is-pending btn-nir-accept" data-id="${escapeHtml(String(patient.id || ""))}">Aceitar</button>
           <div class="nir-support-meta">${escapeHtml(nirStatus.meta)}</div>
-          <div class="nir-support-meta">${escapeHtml(patient.nir || "-")}${patient.cil ? ` • SIREL ${escapeHtml(patient.cil)}` : ""}</div>
-        </div>
-      </td>
-      <td>${buildNirChannelCell(patient, "EMAIL")}</td>
-      <td>${buildNirChannelCell(patient, "CIL")}</td>
-      <td>${regulationDate}</td>
-      <td>
-        <div class="nir-actions">
-          <button type="button" class="ghost btn-nir-open" data-id="${patient.id}">Abrir</button>
-          <button type="button" class="ghost btn-nir-accept" data-id="${patient.id}" title="${acceptedLabel}">Aceitar</button>
+          <div class="nir-support-meta">${escapeHtml(patient.nir || "-")}</div>
         </div>
       </td>
     `;
@@ -5455,7 +7783,7 @@ function renderNirAcceptedPatients(items) {
     const currentWard = current?.wardNome || "-";
     const currentBed = current?.bedId || "-";
     const admittedAt = current?.admittedAt ? toBRDate(current.admittedAt) : "-";
-    const acceptedAt = patient.regulationAcceptedAt ? toBRDateTime(patient.regulationAcceptedAt) : "-";
+    const regulationDateValue = toDateTimeLocalValue(patient.regulationAcceptedAt);
     const nirStatus = getNirTrackingPresentation(patient);
     row.innerHTML = `
       <td>${currentWard}</td>
@@ -5469,16 +7797,23 @@ function renderNirAcceptedPatients(items) {
       <td>
         <div class="nir-support-cell">
           <div class="bed-request-chip ${nirStatus.className}">${escapeHtml(nirStatus.label)}</div>
-          <div class="nir-support-meta">${escapeHtml(nirStatus.meta)}</div>
+          <div class="nir-support-meta nir-status-meta">${escapeHtml(nirStatus.meta)}</div>
           <div class="nir-support-meta">${escapeHtml(patient.nir || "-")}${patient.cil ? ` • SIREL ${escapeHtml(patient.cil)}` : ""}</div>
+        </div>
+      </td>
+      <td>
+        <div class="nir-support-cell">
+          <input type="text" class="nir-specialty-input" data-id="${escapeHtml(String(patient.id || ""))}" data-saved-value="${escapeHtml(patient.nirSpecialty || "")}" value="${escapeHtml(patient.nirSpecialty || "")}" maxlength="80" aria-label="Especialidade de ${escapeHtml(patient.nome || "paciente")}" />
+          <button type="button" class="btn-save-nir-specialty" data-id="${escapeHtml(String(patient.id || ""))}" disabled>Salvar especialidade</button>
         </div>
       </td>
       <td>${buildNirChannelCell(patient, "EMAIL")}</td>
       <td>${buildNirChannelCell(patient, "CIL")}</td>
-      <td>${acceptedAt}</td>
+      <td>
+        <input type="datetime-local" class="nir-regulation-date" data-id="${escapeHtml(String(patient.id || ""))}" value="${escapeHtml(regulationDateValue)}" aria-label="Data em que ${escapeHtml(patient.nome || "o paciente")} foi regulado">
+      </td>
       <td>
         <div class="nir-actions">
-          <button type="button" class="ghost btn-nir-open" data-id="${patient.id}">Abrir</button>
           <button type="button" class="ghost btn-nir-close" data-id="${patient.id}">Dar baixa</button>
           <button type="button" class="ghost btn-nir-cancel" data-id="${patient.id}">Cancelado</button>
         </div>
@@ -5486,142 +7821,72 @@ function renderNirAcceptedPatients(items) {
     `;
     container.appendChild(row);
   }
+  syncNirAcceptedEditingAvailability();
 }
 
-async function markNirPatientUpdated(patientId, forcedChannels = []) {
+async function markNirPatientUpdated(patientId, channel, enabled) {
+  if (!ensureNirShiftOpen()) return;
   const patient = nirPatients.find(item => String(item.id) === String(patientId))
     || nirAcceptedPatients.find(item => String(item.id) === String(patientId))
     || registeredPatients.find(item => String(item.id) === String(patientId));
   if (!patient) return;
 
-  let channels = Array.isArray(forcedChannels)
-    ? forcedChannels.map(item => String(item || "").toUpperCase()).filter(item => item === "EMAIL" || item === "CIL")
-    : [];
-  if (!channels.length) {
-    const updatedSirel = window.confirm(`Paciente: ${patient.nome || "-"}\n\nHouve atualização no SIREL?`);
-    const updatedEmail = window.confirm(`Paciente: ${patient.nome || "-"}\n\nHouve atualização no EMAIL?`);
-    if (updatedSirel) channels.push("CIL");
-    if (updatedEmail) channels.push("EMAIL");
-  }
-  channels = Array.from(new Set(channels));
-
-  if (!channels.length) {
-    setNirFeedback("Nenhuma atualização foi registrada para este paciente.", true);
+  const normalizedChannel = String(channel || "").trim().toUpperCase();
+  if (!["EMAIL", "CIL"].includes(normalizedChannel)) {
+    setNirFeedback("Canal de atualização inválido.", true);
     return;
   }
 
   try {
-    await api(`/api/patients/${patientId}`, {
-      method: "PATCH",
+    const response = await api(`/api/patients/${encodeURIComponent(patientId)}/nir-update`, {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        nome: patient.nome || "",
-        cpf: normalizeCpf(patient.cpf || ""),
-        birthDate: patient.birthDate || "",
-        diagnostico: patient.diagnostico || "",
-        nir: patient.nir || "",
-        cil: patient.cil || "",
-        regulationChannels: patient.regulationChannels || [],
-        nirLastUpdateAt: new Date().toISOString(),
-        nirLastUpdateBy: currentUser?.nome || currentUser?.username || "",
-        nirUpdateChannels: channels,
-        nirHistory: [
-          {
-            status: `CANAL ${formatNirChannels(channels)}`,
-            at: new Date().toISOString(),
-            by: currentUser?.nome || currentUser?.username || "",
-            channel: formatNirChannels(channels)
-          },
-          ...(Array.isArray(patient.nirHistory) ? patient.nirHistory : [])
-        ].slice(0, 20)
+        channel: normalizedChannel,
+        enabled: Boolean(enabled)
       })
     });
-    await loadNirPatientsView();
-    setNirFeedback(`Atualização registrada para ${patient.nome || "o paciente"}: ${formatNirChannels(channels)}.`);
+    if (response?.patient) syncPatientAcrossViews(response.patient);
+    const updatedPatient = response?.patient || patient;
+    const channels = Array.isArray(updatedPatient.nirUpdateChannels) ? updatedPatient.nirUpdateChannels : [];
+    const cell = document.querySelector(`.nir-channel-radio[data-id="${String(patientId)}"][data-channel="${normalizedChannel}"]`)?.closest(".nir-support-cell");
+    const chip = cell?.querySelector(".bed-request-chip");
+    if (chip) {
+      const active = channels.includes(normalizedChannel);
+      chip.classList.toggle("done", active);
+      chip.classList.toggle("none", !active);
+    }
+    const meta = cell?.querySelector(".nir-support-meta");
+    if (meta) {
+      meta.textContent = channels.includes(normalizedChannel)
+        ? `Salvo ${updatedPatient.nirLastUpdateAt ? `em ${toBRDateTime(updatedPatient.nirLastUpdateAt)}` : "automaticamente"}`
+        : "Clique para selecionar; salva automaticamente.";
+    }
+    setNirFeedback(`${getNirChannelLabel(normalizedChannel)} ${enabled ? "selecionado" : "desmarcado"} e salvo automaticamente para ${patient.nome || "o paciente"}.`);
   } catch (error) {
+    const checkbox = document.querySelector(`.nir-channel-radio[data-id="${String(patientId)}"][data-channel="${normalizedChannel}"]`);
+    if (checkbox) checkbox.checked = (patient.nirUpdateChannels || []).includes(normalizedChannel);
     setNirFeedback(error.message || "Não foi possível registrar a atualização do NIR.", true);
   }
 }
 
 async function markNirPatientAccepted(patientId) {
-  const patient = nirPatients.find(item => String(item.id) === String(patientId))
-    || nirAcceptedPatients.find(item => String(item.id) === String(patientId))
-    || registeredPatients.find(item => String(item.id) === String(patientId));
-  if (!patient) return;
-  const location = window.prompt(`Paciente: ${patient.nome || "-"}\n\nInforme o local do aceite:`)?.trim() || "";
-  if (!location) {
-    setNirFeedback("Informe o local do aceite para salvar.", true);
-    return;
-  }
-
+  if (!ensureNirShiftOpen()) return;
   try {
-    const now = new Date().toISOString();
-    if (patient.currentAdmission?.wardId && patient.currentAdmission?.bedId) {
-      const currentRequest = patient.currentAdmission?.nirRequest || {};
-      await api(`/api/wards/${patient.currentAdmission.wardId}/beds/${patient.currentAdmission.bedId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          nirRequest: {
-            ...currentRequest,
-            requested: true,
-            requestedAt: currentRequest.requestedAt || new Date().toISOString(),
-            requestedBy: currentRequest.requestedBy || currentUser?.nome || currentUser?.username || "",
-            viewedAt: currentRequest.viewedAt || new Date().toISOString(),
-            viewedBy: currentRequest.viewedBy || currentUser?.nome || currentUser?.username || "",
-            startedAt: currentRequest.startedAt || new Date().toISOString(),
-            startedBy: currentRequest.startedBy || currentUser?.nome || currentUser?.username || "",
-            closedAt: "",
-            closedBy: "",
-            observation: location,
-            status: "EM_ACOMPANHAMENTO"
-          }
-        })
-      });
-    }
-    await api(`/api/patients/${patientId}`, {
+    const data = await api(`/api/patients/${encodeURIComponent(patientId)}/nir-accept`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        nome: patient.nome || "",
-        cpf: normalizeCpf(patient.cpf || ""),
-        birthDate: patient.birthDate || "",
-        diagnostico: patient.diagnostico || "",
-        nir: patient.nir || "",
-        cil: patient.cil || "",
-        regulationChannels: patient.regulationChannels || [],
-        regulationAcceptedAt: now,
-        nirLastUpdateAt: patient.nirLastUpdateAt || "",
-        nirLastUpdateBy: patient.nirLastUpdateBy || "",
-        nirUpdateChannels: patient.nirUpdateChannels || [],
-        nirWorkflowStatus: "EM_ACOMPANHAMENTO",
-        nirAcceptedLocation: location,
-        nirActionReason: "",
-        nirStatusUpdatedAt: now,
-        nirStatusUpdatedBy: currentUser?.nome || currentUser?.username || "",
-        nirDischargePending: false,
-        nirDischargeNote: "",
-        nirDischargeAt: "",
-        nirDischargeBy: "",
-        nirHistory: [
-          {
-            status: "ACEITO",
-            at: now,
-            by: currentUser?.nome || currentUser?.username || "",
-            location
-          },
-          ...(Array.isArray(patient.nirHistory) ? patient.nirHistory : [])
-        ].slice(0, 20)
-      })
+      headers: { "Content-Type": "application/json" }
     });
+    if (data?.patient) syncPatientAcrossViews(data.patient);
     await loadNirPatientsView();
-    setNirFeedback(`Paciente ${patient.nome || "-"} aceito para ${location}.`);
+    setNirFeedback(`Paciente ${data?.patient?.nome || "-"} aceito pelo NIR. Preencha a data em que foi regulado; ela será salva automaticamente.`);
   } catch (error) {
     setNirFeedback(error.message || "Não foi possível marcar o paciente como aceito.", true);
   }
 }
 
 async function finalizeNirPatient(patientId, mode = "") {
+  if (!ensureNirShiftOpen()) return;
   const patient = nirPatients.find(item => String(item.id) === String(patientId))
     || nirAcceptedPatients.find(item => String(item.id) === String(patientId))
     || registeredPatients.find(item => String(item.id) === String(patientId));
@@ -5824,8 +8089,8 @@ async function loadNirPatientsView() {
         || Number(a.currentAdmission?.bedId || a.lastAdmission?.bedId || 0) - Number(b.currentAdmission?.bedId || b.lastAdmission?.bedId || 0)
         || String(a.nome || "").localeCompare(String(b.nome || ""), "pt-BR")
       );
-    nirAcceptedPatients = signaledPatients.filter(patient => String(patient.regulationAcceptedAt || "").trim());
-    const activePatients = signaledPatients.filter(patient => !String(patient.regulationAcceptedAt || "").trim());
+    nirAcceptedPatients = signaledPatients.filter(isNirPatientAccepted);
+    const activePatients = signaledPatients.filter(patient => !isNirPatientAccepted(patient));
     renderNirPatients(activePatients);
     renderNirAcceptedPatients(nirAcceptedPatients);
     await loadNirReports();
@@ -5842,8 +8107,8 @@ async function loadNirPatientsView() {
           || Number(a.currentAdmission?.bedId || 0) - Number(b.currentAdmission?.bedId || 0)
           || String(a.nome || "").localeCompare(String(b.nome || ""), "pt-BR")
         );
-      nirAcceptedPatients = signaledPatients.filter(patient => String(patient.regulationAcceptedAt || "").trim());
-      const activePatients = signaledPatients.filter(patient => !String(patient.regulationAcceptedAt || "").trim());
+      nirAcceptedPatients = signaledPatients.filter(isNirPatientAccepted);
+      const activePatients = signaledPatients.filter(patient => !isNirPatientAccepted(patient));
       renderNirPatients(activePatients);
       renderNirAcceptedPatients(nirAcceptedPatients);
       renderNirPreviousReports([], []);
@@ -5956,10 +8221,17 @@ function renderPendingHistory(items) {
 }
 
 function renderProcedureHistory(items) {
-  const container = document.getElementById("modal-procedimentos-historico");
+  const container = document.getElementById("procedure-history-list");
   if (!container) return;
   container.innerHTML = "";
-  if (!items?.length) {
+  const history = [...(items || [])].sort((a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || ""));
+  const count = document.getElementById("procedure-history-count");
+  if (count) {
+    count.textContent = history.length
+      ? `${history.length} registro(s) salvo(s). O histórico é preservado entre os períodos.`
+      : "Nenhum procedimento registrado.";
+  }
+  if (!history.length) {
     const empty = document.createElement("div");
     empty.className = "chart-empty";
     empty.textContent = "Nenhum procedimento registrado.";
@@ -5967,18 +8239,46 @@ function renderProcedureHistory(items) {
     return;
   }
 
-  for (const item of items) {
+  for (const item of history) {
     const row = document.createElement("div");
-    row.className = "history-item";
+    row.className = `history-item procedure-history-item${isProcedureInCurrentCensusPeriod(item) ? " current-period" : ""}`;
     const content = document.createElement("div");
     content.className = "history-content";
     const title = document.createElement("strong");
     title.textContent = item.tipo;
     const meta = document.createElement("span");
-    meta.textContent = `Registrado por ${item.createdBy || "-"} em ${toBRDateTime(item.createdAt)}`;
+    meta.textContent = `Registrado por ${item.recordedByName || item.createdBy || "-"} em ${toBRDateTime(item.createdAt)}`;
+    const periodBadge = document.createElement("span");
+    periodBadge.className = "procedure-history-period";
+    periodBadge.textContent = isProcedureInCurrentCensusPeriod(item) ? "Período atual" : "Histórico";
     content.append(title, meta);
-    row.append(content);
+    row.append(content, periodBadge);
     container.appendChild(row);
+  }
+}
+
+function renderProcedureAvailability(items, enabled) {
+  const period = getCensusPeriod();
+  const bedHistory = Array.isArray(items) ? items : [];
+  const linkedHistory = (ward?.procedimentosCenso || []).filter(item => Number(item.bedId) === Number(currentBedId));
+  const history = [...bedHistory, ...linkedHistory];
+  const hint = document.getElementById("procedure-period-hint");
+  const activeShift = Boolean(ward?.censusShiftOpen);
+  if (hint) {
+    hint.textContent = activeShift
+      ? `Cada procedimento pode ser registrado uma vez por paciente no período de 24h (${toBRDate(period.startDate)} às 07h até ${toBRDate(period.endDate)} às 07h).`
+      : "Abra o plantão do setor para registrar procedimentos no censo.";
+  }
+  for (const checkbox of document.querySelectorAll(".proc-check")) {
+    const alreadyRegistered = history.some(item =>
+      String(item.tipo || "").toUpperCase() === checkbox.value
+      && Boolean(item.shiftId)
+      && isProcedureInCurrentCensusPeriod(item, period)
+    );
+    checkbox.disabled = !enabled || !activeShift || alreadyRegistered;
+    checkbox.closest(".proc-item")?.classList.toggle("is-registered", alreadyRegistered);
+    checkbox.closest(".proc-item")?.classList.toggle("is-period-disabled", !activeShift || alreadyRegistered);
+    checkbox.title = alreadyRegistered ? "Já registrado neste período de 24 horas" : "";
   }
 }
 
@@ -5986,7 +8286,33 @@ function renderCurrentUser() {
   const userName = currentUser?.nome || currentUser?.username || "-";
   const role = currentUser?.role || "-";
   const activeShift = currentUser?.activeShift || null;
+  syncGlobalShiftToolbar();
+  syncSocialServiceEditingAvailability();
   syncAdminAccess();
+  const dashboardUserName = document.getElementById("dashboard-user-name");
+  if (dashboardUserName) dashboardUserName.textContent = userName;
+  const dashboardUserRole = document.getElementById("dashboard-user-role");
+  if (dashboardUserRole) {
+    dashboardUserRole.textContent = `${userRoleLabel(role)} · Acompanhamento diário dos indicadores assistenciais.`;
+  }
+  const authorizationStatus = document.getElementById("shift-authorization-status");
+  const latestAuthorization = (Array.isArray(currentUser?.shiftAuthorizationRequests)
+    ? currentUser.shiftAuthorizationRequests
+    : []).slice(-1)[0];
+  if (authorizationStatus) {
+    const decisionMaker = latestAuthorization?.decidedBy || "coordenador";
+    const labels = {
+      pending: "Solicitação de abertura enviada; aguardando análise do coordenador.",
+      approved: `Abertura autorizada por ${decisionMaker}. Volte ao setor e tente abrir o plantão.`,
+      rejected: `Solicitação negada por ${decisionMaker}.${latestAuthorization?.decisionNote ? ` Motivo: ${latestAuthorization.decisionNote}` : ""}`,
+      used: `Autorização utilizada para abrir o plantão em ${latestAuthorization?.wardName || "setor"}.`
+    };
+    authorizationStatus.textContent = latestAuthorization ? (labels[latestAuthorization.status] || "") : "";
+    authorizationStatus.classList.toggle("hidden", !authorizationStatus.textContent);
+    authorizationStatus.classList.toggle("error-text", latestAuthorization?.status === "rejected");
+  }
+  document.getElementById("coordinator-shift-authorization-section")
+    ?.classList.toggle("hidden", !currentUser?.canApproveShiftAuthorizations);
   const topbarUser = document.getElementById("topbar-user");
   if (topbarUser) topbarUser.textContent = userName;
   const avatar = document.getElementById("profile-avatar");
@@ -6008,18 +8334,14 @@ function renderCurrentUser() {
 
   const shiftWard = document.getElementById("shift-ward");
   const shiftLength = document.getElementById("shift-length");
-  const shiftPeriod = document.getElementById("shift-period");
   if (shiftWard) {
     if (activeShift) shiftWard.value = String(activeShift.wardId);
     else if (currentWardId) shiftWard.value = String(currentWardId);
     shiftWard.disabled = Boolean(activeShift);
   }
   if (shiftLength) {
-    shiftLength.value = activeShift?.shiftLength || "12H";
+    shiftLength.value = activeShift?.shiftLength || "";
     shiftLength.disabled = Boolean(activeShift);
-  }
-  if (shiftPeriod) {
-    shiftPeriod.value = activeShift?.shiftPeriod || "DIA";
   }
   const shiftNursingReport = document.getElementById("shift-nursing-report");
   const saveShiftNursingReportButton = document.getElementById("btn-save-shift-nursing-report");
@@ -6031,21 +8353,31 @@ function renderCurrentUser() {
   const openButton = document.getElementById("btn-open-shift");
   const closeButton = document.getElementById("btn-close-shift");
   const openTeamButton = document.getElementById("btn-open-team-modal");
+  const shiftPanelStatus = document.getElementById("shift-panel-status");
   if (openButton) {
     openButton.disabled = Boolean(activeShift);
     openButton.classList.toggle("shift-open-active", Boolean(activeShift));
     openButton.textContent = activeShift ? "Plantão aberto" : "Abrir plantão";
   }
   if (closeButton) closeButton.disabled = !activeShift;
+  if (shiftPanelStatus) {
+    shiftPanelStatus.textContent = activeShift ? "Plantão em andamento" : "Plantão fechado";
+    shiftPanelStatus.classList.toggle("is-active", Boolean(activeShift));
+  }
   if (openTeamButton) openTeamButton.disabled = !activeShift;
   if (saveShiftNursingReportButton) saveShiftNursingReportButton.disabled = !activeShift;
   syncWardShiftEntryState();
   syncShiftFormVisibility();
+  renderCensusSubmissionStatus(ward?.censusSubmission || null);
   renderPsychologyShiftPanel();
   renderSocialServiceShiftPanel();
   renderShiftTeamForm();
   renderShiftTeamSummary();
   renderShiftHistory();
+  if (currentUser?.canApproveShiftAuthorizations
+    && !document.getElementById("view-home")?.classList.contains("hidden")) {
+    void loadCoordinatorShiftAuthorizationRequests();
+  }
 }
 
 async function refreshCurrentUser() {
@@ -6074,16 +8406,19 @@ function buildPsychologyPrintRows(items = []) {
 function buildSocialServicePrintRows(items = []) {
   return (Array.isArray(items) ? items : []).map(patient => {
     const socialSupport = createSocialSupportState(patient?.socialSupport);
+    const request = patient?.currentAdmission?.serviceSocialRequest || {};
     const socialRecordMeta = socialSupport.socialRecord === "Concluído" && socialSupport.socialRecordUpdatedAt
       ? `Concluído por ${socialSupport.socialRecordUpdatedBy || "-"} em ${toBRDateTime(socialSupport.socialRecordUpdatedAt) || "-"}`
       : "";
     return {
       bed: String(patient?.currentAdmission?.bedId || "-"),
       sector: patient?.currentAdmission?.wardNome || "-",
+      category: String(patient?.socialServiceCategory || "").trim().toUpperCase(),
       patient: patient?.nome || "-",
       age: getPatientAgeLabel(patient?.birthDate) || "-",
       contacts: getSocialServiceContactValue(patient),
       admission: toBRDate(patient?.currentAdmission?.admittedAt) || "-",
+      serviceStatus: request.status === "BAIXA" || request.closedAt ? "Baixa" : "Em acompanhamento",
       socialRecord: socialSupport.socialRecord || "",
       socialRecordMeta,
       observation: socialSupport.observation || "",
@@ -6093,28 +8428,64 @@ function buildSocialServicePrintRows(items = []) {
   });
 }
 
+function buildSocialServiceClosureRows() {
+  const patients = portariaActivePatients.filter(hasServiceSocialRequest);
+  const rows = buildSocialServicePrintRows(patients);
+  const renderedRows = new Map(
+    Array.from(document.querySelectorAll("#portaria-social-list tr")).map(row => {
+      const key = row.dataset.manualRequestId
+        ? `manual:${row.dataset.manualRequestId}`
+        : `patient:${row.dataset.id || ""}`;
+      return [key, row];
+    })
+  );
+
+  return rows.map((row, index) => {
+    const patient = patients[index];
+    const key = patient?.isManualRequest
+      ? `manual:${patient.manualRequestId || ""}`
+      : `patient:${patient?.id || ""}`;
+    const tableRow = renderedRows.get(key);
+    if (!tableRow) return row;
+
+    const status = String(tableRow.querySelector('[data-field="social-status"]')?.value || "").trim().toUpperCase();
+    const statusLabels = {
+      SOLICITADO: "Solicitado",
+      EM_ACOMPANHAMENTO: "Em acompanhamento",
+      ATENDIMENTO_OBITO: "Atendimento de óbito",
+      BAIXA: "Baixa"
+    };
+    const statusMeta = String(tableRow.querySelector("[data-social-status-meta]")?.textContent || "").trim();
+    const contactsInput = tableRow.querySelector('[data-field="manual-contacts"], [data-field="contacts"]');
+    const contacts = String(contactsInput?.value || "").trim();
+    const observation = String(tableRow.querySelector('[data-field="manual-observation"], [data-field="observation"]')?.value || "").trim();
+
+    return {
+      ...row,
+      ...(statusLabels[status] ? { serviceStatus: statusLabels[status], serviceStatusMeta: statusMeta } : {}),
+      ...(contactsInput ? { contacts } : {}),
+      observation,
+      category: row.category || String(patient?.socialServiceCategory || "").trim().toUpperCase()
+    };
+  });
+}
+
 function printPsychologyShiftReport(report) {
   if (!report) return;
   const rows = Array.isArray(report.psychologyRows) ? report.psychologyRows : [];
-  const fixedRows = Array.from({ length: 14 }, (_, index) => rows[index] || {
-    number: String(index + 1).padStart(2, "0"),
-    sector: "",
-    bed: "",
-    patient: "",
-    age: "",
-    interventions: "",
-    observation: ""
-  });
+  const filledRows = rows.filter(row => String(row.patient || "").trim());
   const shiftDate = report.shift?.shiftDate || String(report.shift?.closedAt || "").slice(0, 10) || getTodayIsoDate();
   const shiftPeriod = String(report.shift?.shiftPeriod || "DIA").trim().toUpperCase();
   const markTurn = option => shiftPeriod === option || shiftPeriod === "COMPLETO" ? "X" : " ";
-  const totalPatients = rows.filter(item => String(item.patient || "").trim()).length;
+  const totalPatients = filledRows.length;
+  const professionalName = currentUser?.nome || currentUser?.username || "-";
+  const professionalRole = userRoleLabel(currentUser?.role);
   const legendColumns = [
     ["AP - Avaliacao Psicologica", "RP - Reavaliacao Psicologica", "AQ - Acolhimento / Escuta Qualificada", "PE - Psicoeducacao / Orientacao"],
     ["AF - Atendimento Familiar", "IC - Intervencao em Crise", "RS - Avaliacao de Risco Suicida", "LO - Acolhimento ao Obito / Luto"],
     ["AM - Articulacao Multiprofissional", "EN - Encaminhamento", "CM - Comunicacao de Mas Noticias", "OU - Outros"]
   ];
-  const tableRows = fixedRows.map(row => `
+  const tableRows = filledRows.map(row => `
     <tr>
       <td class="num">${escapeHtml(row.number)}</td>
       <td>${escapeHtml(row.sector)}</td>
@@ -6131,15 +8502,19 @@ function printPsychologyShiftReport(report) {
     </div>
   `).join("");
   const win = window.open("", "_blank", "width=1200,height=900");
-  if (!win) return;
+  if (!win) {
+    setPsychologyShiftFeedback("O navegador bloqueou a janela do relatório. Permita pop-ups para este sistema e tente novamente.", true);
+    return;
+  }
   win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Mapa Diario de Atividades - Psicologia</title><style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, sans-serif; background: #f3f6fb; color: #0f172a; padding: 18px; }
+    .print-actions { width: 1120px; margin: 0 auto 12px; display: flex; justify-content: flex-end; }
+    .print-button { padding: 10px 16px; border: 0; border-radius: 6px; background: #315fca; color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
     .sheet { width: 1120px; margin: 0 auto; background: #fff; padding: 18px 18px 14px; border: 1px solid #a6b7d0; }
     .top { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 14px; align-items: start; }
-    .logo { display: grid; place-items: center; text-align: center; color: #0f4c81; font-weight: 900; }
-    .logo-mark { font-size: 54px; line-height: 0.9; letter-spacing: -2px; }
-    .logo-sub { font-size: 10px; line-height: 1.1; }
+    .logo { display: grid; place-items: center; }
+    .logo-image { display: block; width: 120px; height: auto; }
     .title { text-align: center; }
     .title .line-1 { font-size: 18px; font-weight: 900; color: #143b63; }
     .title .line-2 { font-size: 18px; font-weight: 900; color: #143b63; }
@@ -6165,17 +8540,24 @@ function printPsychologyShiftReport(report) {
     .general-box { border: 1px solid #a8b8cf; }
     .general-body { min-height: 72px; padding: 8px; display: grid; gap: 12px; }
     .general-line { border-bottom: 1px solid #7e93ae; }
+    .signature { width: 360px; max-width: 100%; margin: 42px auto 0; text-align: center; font-size: 12px; }
+    .signature-line { border-top: 1px solid #243b53; padding-top: 6px; }
+    .signature-name { font-weight: 800; }
+    .signature-role { margin-top: 3px; }
     .footer-note { margin-top: 8px; text-align: right; font-size: 10px; font-weight: 700; color: #274c77; }
     @media print {
       body { background: #fff; padding: 0; }
+      .print-actions { display: none; }
       .sheet { width: auto; margin: 0; border: 0; }
     }
   </style></head><body>
+    <div class="print-actions">
+      <button class="print-button" type="button" onclick="window.print()">Imprimir / Salvar PDF</button>
+    </div>
     <div class="sheet">
       <div class="top">
         <div class="logo">
-          <div class="logo-mark">HMA</div>
-          <div class="logo-sub">HOSPITAL MUNICIPAL DE ACAILANDIA<br>URGENCIA E EMERGENCIA</div>
+          <img class="logo-image" src="${escapeHtml(new URL("/logo-hma.webp", window.location.href).href)}" alt="HMA">
         </div>
         <div class="title">
           <div class="line-1">HOSPITAL MUNICIPAL DE ACAILANDIA - HMA</div>
@@ -6193,11 +8575,11 @@ function printPsychologyShiftReport(report) {
           <span>(${markTurn("NOITE")}) Noite</span>
         </div>
         <div>Psicologo(a):</div>
-        <div class="line">${escapeHtml(currentUser?.nome || currentUser?.username || report.shift?.nome || report.shift?.username || "-")}</div>
+        <div class="line">${escapeHtml(report.shift?.nome || report.shift?.username || currentUser?.nome || currentUser?.username || "-")}</div>
         <div>CRP:</div>
         <div class="line"></div>
       </div>
-      <div class="table-wrap">
+      ${filledRows.length ? `<div class="table-wrap">
         <table>
           <thead>
             <tr>
@@ -6212,7 +8594,7 @@ function printPsychologyShiftReport(report) {
           </thead>
           <tbody>${tableRows}</tbody>
         </table>
-      </div>
+      </div>` : ""}
       <div class="footer">
         <div class="legend">
           <div class="box-title">LEGENDA - INTERVENCOES PSICOLOGICAS (SIGLAS)</div>
@@ -6232,47 +8614,86 @@ function printPsychologyShiftReport(report) {
         </div>
       </div>
       <div class="footer-note">HMA - A servico da vida.</div>
+      <div class="signature">
+        <div class="signature-line">
+          <div class="signature-name">${escapeHtml(professionalName)}</div>
+          <div class="signature-role">${escapeHtml(professionalRole)}</div>
+        </div>
+      </div>
     </div>
   </body></html>`);
   win.document.close();
+  applyA4PrintLayout(win, "landscape");
   win.focus();
 }
 
 function printSocialServiceShiftReport(report) {
   if (!report) return;
   const rows = Array.isArray(report.socialServiceRows) ? report.socialServiceRows : [];
-  const fixedRows = Array.from({ length: 10 }, (_, index) => rows[index] || {
-    bed: String(index + 1),
-    patient: "",
-    age: "",
-    contacts: "",
-    admission: "",
-    socialRecord: "",
-    observation: ""
-  });
+  const activePatients = Array.isArray(report.socialServiceActivePatients)
+    ? report.socialServiceActivePatients
+    : rows.filter(row => String(row.bed || "") !== "Avulso" && !String(row.serviceStatus || "").toLowerCase().includes("baixa"));
+  const filledRows = activePatients.filter(row => String(row.patient || "").trim());
+  const updates = Array.isArray(report.socialServiceFormUpdates) ? report.socialServiceFormUpdates : [];
+  const manualAttendances = Array.isArray(report.socialServiceManualAttendances) ? report.socialServiceManualAttendances : [];
+  const narrative = report.shift?.socialServiceReport || {};
   const shiftDate = report.shift?.shiftDate || String(report.shift?.closedAt || "").slice(0, 10) || getTodayIsoDate();
   const shiftPeriod = String(report.shift?.shiftPeriod || "DIA").trim().toUpperCase();
   const markTurn = option => shiftPeriod === option || shiftPeriod === "COMPLETO" ? "X" : " ";
-  const tableRows = fixedRows.map(row => `
-    <tr>
-      <td class="bed">${escapeHtml(row.bed)}</td>
-      <td>${escapeHtml(row.patient)}</td>
-      <td class="age">${escapeHtml(row.age)}</td>
-      <td>${escapeHtml(row.contacts)}</td>
-      <td class="admission">${escapeHtml(toBRDate(row.admission) || row.admission || "-")}</td>
-      <td>${escapeHtml(row.socialRecord)}${row.socialRecordMeta ? `<div class="status-meta">${escapeHtml(row.socialRecordMeta)}</div>` : ""}</td>
-      <td>${escapeHtml(row.observation)}</td>
-    </tr>
-  `).join("");
+  const professionalName = currentUser?.nome || currentUser?.username || "-";
+  const professionalRole = userRoleLabel(currentUser?.role);
+  const patientNarratives = filledRows.map((row, index) => {
+    const location = [row.sector, row.bed && row.bed !== "-" ? `leito ${row.bed}` : ""].filter(Boolean).join(", ");
+    const details = [
+      row.contacts ? `Contatos: ${row.contacts}.` : "",
+      row.admission ? `Admissão: ${toBRDate(row.admission) || row.admission}.` : "",
+      row.serviceStatus ? `Status: ${row.serviceStatus}${row.serviceStatusMeta ? ` (${row.serviceStatusMeta})` : ""}.` : "",
+      row.socialRecord ? `Ficha social: ${row.socialRecord}${row.socialRecordMeta ? ` (${row.socialRecordMeta})` : ""}.` : ""
+    ].filter(Boolean).join(" ");
+    return `<p class="patient-entry"><strong>${index + 1}. ${escapeHtml(location ? `${location}, ` : "")}${escapeHtml(row.patient)}${row.age && row.age !== "-" ? `, ${escapeHtml(row.age)}` : ""}:</strong> ${escapeHtml(row.observation || "Em acompanhamento pelo Serviço Social.")}${details ? ` ${escapeHtml(details)}` : ""}</p>`;
+  }).join("");
+  const updateNarratives = updates.map((item, index) => {
+    const details = [
+      item.location ? `Local: ${item.location}.` : "",
+      item.updatedAt ? `Atualizada em ${toBRDateTime(item.updatedAt) || item.updatedAt}.` : "",
+      item.updatedBy ? `Profissional: ${item.updatedBy}.` : ""
+    ].filter(Boolean).join(" ");
+    return `<p class="patient-entry"><strong>${index + 1}. Ficha social de ${escapeHtml(item.patient || "Paciente")}.</strong> ${escapeHtml(details)}</p>`;
+  }).join("");
+  const manualCategoryLabels = {
+    AVULSO: "Pacientes avulsos",
+    ACOMPANHANTE: "Acompanhantes",
+    FAMILIAR: "Familiares",
+    OBITO: "Óbitos"
+  };
+  const manualAttendanceNarratives = Object.entries(manualCategoryLabels).map(([category, label]) => {
+    const entries = manualAttendances.filter(item => String(item.category || "").trim().toUpperCase() === category);
+    if (!entries.length) return "";
+    const lines = entries.map((item, index) => {
+      const details = [
+        item.location ? `Local/motivo: ${item.location}.` : "",
+        item.age ? `Idade: ${item.age}.` : "",
+        item.contacts ? `Contato: ${item.contacts}.` : "",
+        item.status ? `Status: ${item.status}.` : "",
+        item.socialRecord ? `Ficha social: ${item.socialRecord}.` : "",
+        item.observation ? `Registro: ${item.observation}` : ""
+      ].filter(Boolean).join(" ");
+      return `<p class="patient-entry"><strong>${index + 1}. ${escapeHtml(item.patient || label)}.</strong> ${escapeHtml(details || "Atendimento em acompanhamento.")}</p>`;
+    }).join("");
+    return `<section class="report-section"><h4>${escapeHtml(label)}</h4>${lines}</section>`;
+  }).join("");
+  const manualAttendanceSection = manualAttendanceNarratives
+    ? `<section class="report-section"><h3>2. Atendimentos avulsos</h3>${manualAttendanceNarratives}</section>`
+    : "";
   const win = window.open("", "_blank", "width=1280,height=900");
   if (!win) return;
-  win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Mapa Diario do Serviço Social</title><style>
+  win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Relatório de Registro do Serviço Social</title><style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, sans-serif; background: #f3f6fb; color: #0f172a; padding: 18px; }
-    .sheet { width: 1220px; margin: 0 auto; background: #fff; padding: 14px 16px; border: 1px solid #a6b7d0; }
+    .sheet { width: 1000px; margin: 0 auto; background: #fff; padding: 14px 16px; border: 1px solid #a6b7d0; }
     .header { display: grid; grid-template-columns: 220px minmax(0, 1fr) 120px; gap: 8px; align-items: start; border-bottom: 1px solid #7e93ae; padding-bottom: 6px; }
-    .brand { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 8px; align-items: start; }
-    .brand-mark { font-size: 40px; font-weight: 900; color: #10283d; line-height: 1; }
+    .brand { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 8px; align-items: center; }
+    .brand-logo { display: block; width: 80px; height: auto; }
     .brand-text { font-size: 11px; font-weight: 800; text-align: center; color: #10283d; }
     .title { text-align: center; padding-top: 8px; }
     .title .line-1 { font-size: 14px; font-weight: 900; color: #10283d; }
@@ -6282,13 +8703,16 @@ function printSocialServiceShiftReport(report) {
     .sub-box { border: 1px solid #7e93ae; padding: 4px 6px; min-height: 38px; }
     .sub-box.center { text-align: center; }
     .shift-marks { margin-top: 4px; font-size: 10px; display: flex; justify-content: center; gap: 12px; }
-    .table-wrap { margin-top: 8px; border: 1px solid #7e93ae; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border: 1px solid #7e93ae; padding: 4px 5px; font-size: 11px; vertical-align: top; }
-    th { background: #ead0c2; color: #10283d; font-size: 10px; font-weight: 900; text-transform: uppercase; text-align: center; }
-    td { height: 28px; }
-    td.bed, td.age, td.admission { text-align: center; white-space: nowrap; }
-    .status-meta { margin-top: 4px; font-size: 9px; line-height: 1.3; color: #475569; }
+    .occurrences-heading { margin-top: 8px; padding: 5px; border: 1px solid #7e93ae; background: #e8e8e8; font-size: 12px; font-weight: 900; text-align: center; }
+    .signature { width: 360px; max-width: 100%; margin: 42px auto 0; text-align: center; font-size: 12px; break-inside: avoid; }
+    .signature-line { border-top: 1px solid #243b53; padding-top: 6px; }
+    .signature-name { font-weight: 800; }
+    .signature-role { margin-top: 3px; }
+    .report-section { margin-top: 12px; }
+    .report-section h3 { margin: 0 0 8px; padding: 5px 7px; border: 1px solid #7e93ae; background: #e8e8e8; font-size: 12px; text-transform: uppercase; text-align: center; break-after: avoid; }
+    .report-section h4 { margin: 8px 0; font-size: 12px; text-transform: uppercase; break-after: avoid; }
+    .narrative, .patient-entry { margin: 0 0 9px; font-size: 12px; line-height: 1.5; text-align: justify; white-space: pre-wrap; overflow-wrap: anywhere; orphans: 3; widows: 3; }
+    .patient-entry { padding-left: 12px; text-indent: 0; }
     @media print {
       body { background: #fff; padding: 0; }
       .sheet { width: auto; margin: 0; border: 0; }
@@ -6297,18 +8721,18 @@ function printSocialServiceShiftReport(report) {
     <div class="sheet">
       <div class="header">
         <div class="brand">
-          <div class="brand-mark">HMA</div>
+          <img class="brand-logo" src="${escapeHtml(new URL("/logo-hma.webp", window.location.href).href)}" alt="HMA">
           <div class="brand-text">HOSPITAL MUNICIPAL DE ACAILANDIA<br>URGENCIA E EMERGENCIA</div>
         </div>
         <div class="title">
           <div class="line-1">UNIDADE: HOSPITAL MUNICIPAL DE ACAILANDIA - HMA</div>
-          <div class="line-2">MAPA DIARIO DO SERVICO SOCIAL</div>
+          <div class="line-2">RELATORIO DE REGISTRO DO SERVICO SOCIAL<br>PLANTAO SOCIAL</div>
         </div>
         <div class="meta">DATA ${escapeHtml(toBRDate(shiftDate) || "-")}</div>
       </div>
       <div class="subheader">
         <div class="sub-box">UNIDADE: HOSPITAL MUNICIPAL DE ACAILANDIA - HMA</div>
-        <div class="sub-box center">PLANTONISTA<br><strong>${escapeHtml(currentUser?.nome || currentUser?.username || report.shift?.nome || report.shift?.username || "-")}</strong></div>
+        <div class="sub-box center">PLANTONISTA<br><strong>${escapeHtml(report.shift?.nome || report.shift?.username || currentUser?.nome || currentUser?.username || "-")}</strong></div>
         <div class="sub-box center">
           <div class="shift-marks">
             <span>(P) ${markTurn("DIA")}</span>
@@ -6316,26 +8740,30 @@ function printSocialServiceShiftReport(report) {
           </div>
         </div>
       </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Leito</th>
-              <th>Paciente</th>
-              <th>Idade</th>
-              <th>Contatos</th>
-              <th>Admissão</th>
-              <th>Ficha social</th>
-              <th>Observação</th>
-            </tr>
-          </thead>
-          <tbody>${tableRows}</tbody>
-        </table>
+      <div class="occurrences-heading">OCORRENCIAS E INTERCORRENCIAS</div>
+      <section class="report-section">
+        <h3>1. Atendimentos a pacientes internados</h3>
+        ${filledRows.length ? patientNarratives : `<p class="narrative">Nenhum paciente internado em acompanhamento no fechamento do plantão.</p>`}
+      </section>
+      ${manualAttendanceSection}
+      ${updates.length ? `<section class="report-section">
+        <h3>3. Atualizações de fichas sociais durante o plantão</h3>
+        ${updateNarratives}
+      </section>` : ""}
+      <section class="report-section">
+        <h3>4. Pendências</h3>
+        <p class="narrative">${escapeHtml(String(narrative.pending || "").trim() || "Nenhuma pendência registrada neste plantão.")}</p>
+      </section>
+      <div class="signature">
+        <div class="signature-line">
+          <div class="signature-name">${escapeHtml(professionalName)}</div>
+          <div class="signature-role">${escapeHtml(professionalRole)}</div>
+        </div>
       </div>
     </div>
   </body></html>`);
   win.document.close();
-  win.focus();
+  applyA4PrintLayout(win, "portrait");
 }
 
 function printSocialServiceSectorReport(items = []) {
@@ -6355,6 +8783,7 @@ function printSocialServiceSectorReport(items = []) {
       <td class="age">${escapeHtml(row.age)}</td>
       <td>${escapeHtml(row.contacts)}</td>
       <td class="admission">${escapeHtml(row.admission)}</td>
+      <td>${escapeHtml(row.serviceStatus || "-")}</td>
       <td>${escapeHtml(row.socialRecord)}${row.socialRecordMeta ? `<div class="status-meta">${escapeHtml(row.socialRecordMeta)}</div>` : ""}</td>
       <td>${escapeHtml(row.observation)}</td>
     </tr>
@@ -6366,8 +8795,8 @@ function printSocialServiceSectorReport(items = []) {
     body { margin: 0; font-family: Arial, sans-serif; background: #f3f6fb; color: #0f172a; padding: 18px; }
     .sheet { width: 1320px; margin: 0 auto; background: #fff; padding: 16px 18px; border: 1px solid #a6b7d0; }
     .header { display: grid; grid-template-columns: 220px minmax(0, 1fr) 200px; gap: 10px; align-items: start; border-bottom: 1px solid #7e93ae; padding-bottom: 8px; }
-    .brand { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 8px; align-items: start; }
-    .brand-mark { font-size: 40px; font-weight: 900; color: #10283d; line-height: 1; }
+    .brand { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 8px; align-items: center; }
+    .brand-logo { display: block; width: 80px; height: auto; }
     .brand-text { font-size: 11px; font-weight: 800; text-align: center; color: #10283d; }
     .title { text-align: center; padding-top: 6px; }
     .title .line-1 { font-size: 14px; font-weight: 900; color: #10283d; }
@@ -6388,7 +8817,7 @@ function printSocialServiceSectorReport(items = []) {
     <div class="sheet">
       <div class="header">
         <div class="brand">
-          <div class="brand-mark">HMA</div>
+          <img class="brand-logo" src="${escapeHtml(new URL("/logo-hma.webp", window.location.href).href)}" alt="HMA">
           <div class="brand-text">HOSPITAL MUNICIPAL DE ACAILANDIA<br>URGENCIA E EMERGENCIA</div>
         </div>
         <div class="title">
@@ -6411,6 +8840,7 @@ function printSocialServiceSectorReport(items = []) {
               <th>Idade</th>
               <th>Contatos</th>
               <th>Admissão</th>
+              <th>Status do atendimento</th>
               <th>Ficha social</th>
               <th>Observação</th>
             </tr>
@@ -6422,12 +8852,170 @@ function printSocialServiceSectorReport(items = []) {
     </div>
   </body></html>`);
   win.document.close();
+  applyA4PrintLayout(win, "landscape");
   win.focus();
-  win.print();
+}
+
+function printNirShiftReport(report) {
+  if (!report) return;
+  const shift = report.shift || {};
+  const workPeriods = Array.isArray(shift.workPeriods) && shift.workPeriods.length
+    ? shift.workPeriods
+    : [{ openedAt: shift.openedAt, closedAt: shift.closedAt }];
+  const periodLabel = workPeriods.map(period =>
+    `${toBRDateTime(period.openedAt) || "-"} até ${toBRDateTime(period.closedAt) || "-"}`
+  ).join("<br>");
+  const team = shift.team || {};
+  const teamEntries = [
+    ["Enfermeiro(a) responsável", shift.nome || shift.username || "-"],
+    ["Auxiliar administrativo", team.auxiliarAdministrativo || "-"]
+  ].map(([label, value]) => `<span><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value || "-")}</span>`).join("");
+  const patients = Array.isArray(report.nirAcceptedSnapshot) ? report.nirAcceptedSnapshot : [];
+  const externalRegulations = Array.isArray(report.nirExternalRegulations) ? report.nirExternalRegulations : [];
+  const patientRows = patients.map(patient => {
+    const channels = Array.isArray(patient.nirUpdateChannels)
+      ? patient.nirUpdateChannels.map(channel => String(channel || "").trim().toUpperCase())
+      : [];
+    const status = String(patient.nirWorkflowStatus || "").trim().toUpperCase();
+    const statusLabel = patient.nirDischargePending
+      ? "Alta pendente"
+      : (status === "BAIXA" ? "Baixa" : (status === "CANCELADO" ? "Cancelado" : "Em acompanhamento"));
+    const statusDetail = [patient.nirActionReason, patient.nir ? `NIR: ${patient.nir}` : ""].filter(Boolean).join(" • ");
+    const action = status === "BAIXA" ? "Baixa" : (status === "CANCELADO" ? "Cancelado" : "Em acompanhamento");
+    return `
+      <tr>
+        <td>${escapeHtml(patient.wardName || "-")}</td>
+        <td><strong>${escapeHtml(patient.patientName || "-")}</strong><br><small>CPF ${escapeHtml(formatCpf(patient.cpf || "") || "-")}<br>${escapeHtml(patient.diagnosis || "-")}</small></td>
+        <td>${escapeHtml(patient.bedId || "-")}</td>
+        <td>${escapeHtml(toBRDate(patient.admittedAt) || "-")}</td>
+        <td><strong>${escapeHtml(statusLabel)}</strong>${statusDetail ? `<br><small>${escapeHtml(statusDetail)}</small>` : ""}</td>
+        <td>${escapeHtml(patient.nirSpecialty || "-")}</td>
+        <td>${channels.includes("EMAIL") ? "Sim" : "-"}</td>
+        <td>${escapeHtml(patient.cil || "-")}</td>
+        <td>${escapeHtml(toBRDateTime(patient.regulationAcceptedAt) || "-")}</td>
+        <td>${escapeHtml(action)}</td>
+      </tr>
+    `;
+  }).join("");
+  const externalRows = externalRegulations.map(item => `
+    <tr>
+      <td>${escapeHtml(item.patient || "-")}</td>
+      <td>${escapeHtml(item.age || "-")}</td>
+      <td>${escapeHtml(item.specialty || "-")}</td>
+      <td>${escapeHtml(item.origin || "-")}</td>
+      <td>${escapeHtml(item.professional || "-")}</td>
+      <td>${escapeHtml(item.transferType || "-")}</td>
+      <td>${escapeHtml(item.regulator || "-")}</td>
+      <td>${escapeHtml(item.result || "-")}</td>
+      <td>${escapeHtml(toBRDateTime(item.startedAt) || "-")}</td>
+      <td>${escapeHtml(toBRDateTime(item.endedAt) || "-")}</td>
+      <td>${escapeHtml(getNirExternalRegulationDuration(item, shift.closedAt))}</td>
+    </tr>
+  `).join("");
+  const win = window.open("", "_blank", "width=1100,height=800");
+  if (!win) return;
+  win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Ficha de Fechamento do Plantão NIR</title><style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: #eef3f8; color: #111827; padding: 10px; }
+    h1, h2, h3, p { margin: 0; }
+    .sheet { max-width: 1080px; margin: 0 auto; background: #fff; border: 1px solid #dbe4f0; border-radius: 12px; padding: 12px; }
+    ${buildHospitalReportPrintStyles()}
+    .section { margin-top: 8px; padding: 8px; border: 1px solid #dbe4f0; border-radius: 10px; background: #fff; }
+    .section-title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+    .section-title h2 { font-size: 12px; color: #0f172a; }
+    .section-title span { font-size: 10px; color: #64748b; }
+    .section-subtitle { margin-bottom: 6px; font-size: 9px; color: #64748b; }
+    .team-inline { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; font-size: 8px; line-height: 1.15; }
+    .team-inline span { min-width: 0; overflow-wrap: anywhere; }
+    .team-inline strong { color: #334155; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { border: 1px solid #d7deea; padding: 4px 5px; font-size: 8px; text-align: center; vertical-align: middle; line-height: 1.2; overflow-wrap: anywhere; }
+    th { background: #c4d8f4; color: #102a43; font-size: 7px; text-transform: uppercase; }
+    tbody tr:nth-child(even) td { background: #f6f9fd; }
+    td small { color: #475569; font-size: 7px; }
+    .report-text { min-height: 32px; white-space: pre-wrap; font-size: 9px; line-height: 1.3; }
+    @media print {
+      body { background: #fff; padding: 0; }
+      .sheet { max-width: none; border: 0; border-radius: 0; padding: 0; }
+      .section { break-inside: avoid; }
+    }
+  </style></head><body><div class="sheet">
+    ${buildHospitalReportTop({
+      title: "Ficha de Fechamento de Plantão",
+      subtitle: `${escapeHtml(shift.shiftLength || "12H")} / ${escapeHtml(getShiftPeriodLabel(shift.shiftPeriod))}`,
+      metaHtml: `
+        <div><strong>Setor:</strong> NIR</div>
+        <div><strong>Período:</strong> ${periodLabel}</div>
+        <div><strong>Responsável:</strong> ${escapeHtml(shift.nome || shift.username || "-")}</div>
+      `
+    })}
+    <div class="section">
+      <div class="section-title"><h2>Equipe do plantão</h2></div>
+      <div class="team-inline">${teamEntries || "Equipe não informada."}</div>
+    </div>
+    <div class="section">
+      <div class="section-title"><h2>Relatório de enfermagem</h2><span>${escapeHtml(toBRDateTime(shift.nursingReportUpdatedAt) || "Sem horário salvo")}</span></div>
+      <div class="section-subtitle">Texto digitado pelo responsável do plantão para compor a ficha final do NIR.</div>
+      <div class="report-text">${shift.nursingReport ? escapeHtml(shift.nursingReport) : "Nenhum relatório de enfermagem registrado neste plantão."}</div>
+    </div>
+    <div class="section">
+      <div class="section-title"><h2>Pacientes aceitos pelo NIR</h2><span>${patients.length} paciente(s)</span></div>
+      <table>
+        <thead><tr><th>Setor</th><th>Paciente</th><th>Leito</th><th>Data da internação</th><th>NIR</th><th>Especialidade</th><th>Email</th><th>SIREL</th><th>Regulado em</th><th>Ação</th></tr></thead>
+        <tbody>${patientRows || '<tr><td colspan="10">Nenhum paciente aceito no fechamento deste plantão.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div class="section">
+      <div class="section-title"><h2>Controle de regulação externa/HMA</h2><span>${externalRegulations.length} registro(s)</span></div>
+      <table>
+        <thead><tr><th>Paciente</th><th>Idade</th><th>Especialidade</th><th>Origem</th><th>Profissional</th><th>Tipo de transferência</th><th>Regulador</th><th>Resultado</th><th>Início</th><th>Fim</th><th>Tempo de espera</th></tr></thead>
+        <tbody>${externalRows || '<tr><td colspan="11">Nenhuma regulação externa registrada neste plantão.</td></tr>'}</tbody>
+      </table>
+    </div>
+  </div></body></html>`);
+  win.document.close();
+  applyA4PrintLayout(win, "landscape");
+  win.focus();
 }
 
 function printShiftReport(report) {
   if (!report) return;
+  if (report.printMode === "nir") {
+    printNirShiftReport(report);
+    return;
+  }
+  const censusItems = [
+    ["Nº de pacientes", "pacientes"],
+    ["Nº de leitos", "leitos"],
+    ["Nº de altas", "altas"],
+    ["Nº de óbitos", "obitos"],
+    ["Transferências externas", "transferencias_externas"],
+    ["Transferências internas", "transferencias_internas"],
+    ["Leitos bloqueados", "leitos_bloqueados"],
+    ["Admissões", "admissoes"],
+    ["SVD realizadas", "svd_realizadas"],
+    ["CVC realizadas", "cvc_realizadas"],
+    ["SNE realizadas", "sne_realizadas"],
+    ["SNG realizadas", "sng_realizadas"],
+    ["Intubações realizadas", "intubacoes_realizadas"],
+    ["Evasões", "evasoes"],
+    ["Reinternações", "reinternacoes"]
+  ];
+  const censusTable = items => `
+    <table class="census-print-table">
+      <thead><tr><th>Indicador</th><th>Qtd.</th></tr></thead>
+      <tbody>${items.map(([label, key]) => `
+        <tr><td>${escapeHtml(label)}</td><td>${escapeHtml(report.census?.values?.[key] ?? 0)}</td></tr>
+      `).join("")}</tbody>
+    </table>
+  `;
+  const censusSection = report.census ? `
+    <div class="section census-print-section">
+      <div class="section-title"><h2>Censo diário do plantão</h2><span>${escapeHtml(report.census.period || "")}</span></div>
+      <div class="section-subtitle">${escapeHtml(report.census.authors || "")}</div>
+      <div class="census-print-grid">${censusTable(censusItems.slice(0, 7))}${censusTable(censusItems.slice(7))}</div>
+    </div>
+  ` : "";
   const buildMovementLines = (items = [], emptyLabel = "Nenhum registro no plantão.") => {
     if (!Array.isArray(items) || !items.length) {
       return `<div class="movement-empty">${escapeHtml(emptyLabel)}</div>`;
@@ -6449,21 +9037,16 @@ function printShiftReport(report) {
       `;
     }).join("");
   };
-  const devices = (report.summary?.dispositivos || []).map(item => `
-    <div class="device-chip">
-      <strong>${item.label}</strong>
-      <span>${item.value}</span>
-    </div>
-  `).join("") || '<div class="empty-box">Sem dispositivos registrados.</div>';
   const team = report.shift?.team || {};
-  const teamRows = [
-    ["Medico do plantao", team.medicoPlantao || "-"],
-    ["Enfermeiro(a) dia", team.enfermeiroDia || "-"],
-    ["Tecnicos(as) dia", team.tecnicosDia || "-"],
-    ["Enfermeiro(a) noite", team.enfermeiroNoite || "-"],
-    ["Tecnicos(as) noite", team.tecnicosNoite || "-"],
-    ["Faltosos", team.faltosos || "-"]
-  ].map(([label, value]) => `<tr><th>${label}</th><td>${value}</td></tr>`).join("");
+  const teamEntries = [
+    ["Médico", team.medicoPlantao],
+    ["Enf. dia", team.enfermeiroDia],
+    ["Téc. dia", team.tecnicosDia],
+    ["Enf. noite", team.enfermeiroNoite],
+    ["Téc. noite", team.tecnicosNoite],
+    ["Faltosos", team.faltosos]
+  ].map(([label, value]) => `<span><strong>${label}:</strong> ${escapeHtml(value || "-")}</span>`)
+    .join("");
   const patients = (report.patients || []).map(patient => `
     <tr>
       <td><strong>${patient.leito || "-"}</strong><br><small>${patient.enfermaria || "-"}</small></td>
@@ -6498,7 +9081,20 @@ function printShiftReport(report) {
       <td>${toBRDateTime(item.finishedAt)}</td>
     </tr>
   `).join("");
+  const activityRows = (report.actions || []).map(action => `
+    <tr>
+      <td>${escapeHtml(toBRDateTime(action.at) || "-")}</td>
+      <td>${escapeHtml(action.authorName || action.username || "-")}</td>
+      <td>${escapeHtml(action.description || action.type || "Alteração registrada")}</td>
+    </tr>
+  `).join("");
   const movements = report.movements || {};
+  const workPeriods = Array.isArray(report.shift?.workPeriods) && report.shift.workPeriods.length
+    ? report.shift.workPeriods
+    : [{ openedAt: report.shift?.openedAt, closedAt: report.shift?.closedAt }];
+  const workPeriodLabel = workPeriods.map(period =>
+    `${escapeHtml(toBRDateTime(period.openedAt) || "-")} até ${escapeHtml(toBRDateTime(period.closedAt) || "-")}`
+  ).join("<br>");
   const win = window.open("", "_blank", "width=1100,height=800");
   if (!win) return;
   win.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Ficha de Plantão</title><style>
@@ -6507,14 +9103,11 @@ function printShiftReport(report) {
     h1, h2, h3, p { margin: 0; }
     .sheet { max-width: 1080px; margin: 0 auto; background: #fff; border: 1px solid #dbe4f0; border-radius: 12px; padding: 12px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08); }
     ${buildHospitalReportPrintStyles()}
-    .meta-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-bottom: 8px; }
-    .meta-card { border: 1px solid #d7deea; border-radius: 8px; padding: 6px 8px; background: #f8fbff; min-height: 0; }
-    .meta-card strong { display: block; font-size: 8px; text-transform: uppercase; letter-spacing: 0.5px; color: #64748b; margin-bottom: 3px; }
-    .meta-card span { display: block; font-size: 10px; font-weight: 700; color: #0f172a; line-height: 1.15; }
-    .summary-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; margin-bottom: 8px; }
-    .summary-card { border: 1px solid #d7deea; border-radius: 8px; padding: 6px 8px; background: linear-gradient(180deg, #ffffff, #f8fbff); }
-    .summary-card strong { display: block; margin-bottom: 5px; font-size: 9px; color: #475569; text-transform: uppercase; letter-spacing: 0.5px; }
-    .summary-card div { font-size: 12px; font-weight: 800; color: #0f172a; line-height: 1; }
+    .hma-report-logo { width: 180px; flex-basis: 180px; }
+    .team-inline { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; font-size: 8px; line-height: 1.15; }
+    .team-inline span { min-width: 0; overflow-wrap: anywhere; }
+    .team-inline strong { color: #334155; }
+    .team-updated { margin-top: 4px; font-size: 7px; color: #64748b; }
     .section { margin-top: 8px; padding: 8px; border: 1px solid #dbe4f0; border-radius: 10px; background: #fff; }
     .section-title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 6px; }
     .section-title h2 { font-size: 12px; color: #0f172a; }
@@ -6525,10 +9118,16 @@ function printShiftReport(report) {
     th { background: #eef4fb; color: #334155; font-size: 8px; text-transform: uppercase; letter-spacing: 0.3px; }
     td small { font-size: 8px; color: #475569; }
     tbody tr:nth-child(even) td { background: #fbfdff; }
-    .device-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
-    .device-chip { border: 1px solid #d7deea; border-radius: 8px; padding: 6px; background: #f8fbff; display: grid; gap: 2px; }
-    .device-chip strong { font-size: 9px; color: #334155; }
-    .device-chip span { font-size: 11px; font-weight: 800; color: #0f172a; }
+    .census-print-section { padding: 5px; margin-top: 5px; }
+    .census-print-section .section-title { margin-bottom: 4px; }
+    .census-print-section .section-title h2 { font-size: 10px; }
+    .census-print-section .section-title span { font-size: 8px; }
+    .census-print-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+    .census-print-table th, .census-print-table td { padding: 2px 4px; font-size: 7px; line-height: 1.1; }
+    .census-print-table th { font-size: 7px; }
+    .census-print-table th:last-child, .census-print-table td:last-child { width: 35px; text-align: center; }
+    .activity-table th, .activity-table td { padding: 3px 5px; font-size: 8px; }
+    .activity-table tbody tr { break-inside: avoid; }
     .empty-box { border: 1px dashed #cbd5e1; border-radius: 8px; padding: 8px; color: #64748b; background: #f8fafc; font-size: 9px; }
     .movements-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
     .movement-card { border: 1px solid #d7deea; border-radius: 8px; min-height: 112px; overflow: hidden; background: #fbfdff; }
@@ -6548,50 +9147,23 @@ function printShiftReport(report) {
     <div class="sheet">
       ${buildHospitalReportTop({
         title: "Ficha de Fechamento de Plantão",
-        subtitle: "Relatório consolidado do plantão com equipe, pacientes, pendências e histórico de alterações.",
+        subtitle: `${report.shift?.shiftLength || "12H"} / ${getShiftPeriodLabel(report.shift?.shiftPeriod)}`,
         metaHtml: `
           <div><strong>Setor:</strong> ${escapeHtml(report.shift?.wardNome || "-")}</div>
-          <div><strong>Fechado em:</strong> ${escapeHtml(toBRDateTime(report.shift?.closedAt))}</div>
+          <div><strong>Período:</strong> ${workPeriodLabel}</div>
           <div><strong>Responsável:</strong> ${escapeHtml(report.shift?.nome || report.shift?.username || "-")}</div>
         `
       })}
-      <div class="meta-grid">
-        <div class="meta-card"><strong>Profissional</strong><span>${report.shift?.nome || report.shift?.username || "-"} (${report.shift?.username || "-"})</span></div>
-        <div class="meta-card"><strong>Setor</strong><span>${report.shift?.wardNome || "-"}</span></div>
-        <div class="meta-card"><strong>Plantão</strong><span>${report.shift?.shiftLength || "12H"} / ${getShiftPeriodLabel(report.shift?.shiftPeriod)}</span></div>
-        <div class="meta-card"><strong>Período</strong><span>${toBRDateTime(report.shift?.openedAt)}<br>até ${toBRDateTime(report.shift?.closedAt)}</span></div>
-      </div>
-      <div class="summary-grid">
-        <div class="summary-card"><strong>Ativos no fechamento</strong><div>${report.summary?.pacientesAtivos ?? report.patients?.length ?? 0}</div></div>
-        <div class="summary-card"><strong>Admissões</strong><div>${report.summary?.admissoes ?? 0}</div></div>
-        <div class="summary-card"><strong>Transf. internas</strong><div>${report.summary?.transferenciasInternas ?? 0}</div></div>
-        <div class="summary-card"><strong>Transf. externas</strong><div>${report.summary?.transferenciasExternas ?? 0}</div></div>
-        <div class="summary-card"><strong>Altas</strong><div>${report.summary?.altas ?? 0}</div></div>
-        <div class="summary-card"><strong>Óbitos</strong><div>${report.summary?.obitos ?? 0}</div></div>
-        <div class="summary-card"><strong>Evasões</strong><div>${report.summary?.evasoes ?? 0}</div></div>
-        <div class="summary-card"><strong>Pendências ativas</strong><div>${report.summary?.pendenciasAtivas ?? 0}</div></div>
-        <div class="summary-card"><strong>Pendências solucionadas</strong><div>${report.summary?.pendenciasSolucionadas ?? 0}</div></div>
-      </div>
       <div class="section">
-        <div class="section-title"><h2>Equipe do plantao</h2><span>${report.shift?.shiftLength || "12H"} / ${getShiftPeriodLabel(report.shift?.shiftPeriod)}</span></div>
-        <div class="section-subtitle">Equipe registrada para este plantão e profissional responsável pelo fechamento.</div>
-        <table>
-          <tbody>
-            <tr><th>Plantão vinculado ao login</th><td>${report.shift?.nome || report.shift?.username || "-"} (${report.shift?.username || "-"})</td></tr>
-            ${teamRows}
-            <tr><th>Equipe atualizada por</th><td>${report.shift?.teamUpdatedBy || "-"}${report.shift?.teamUpdatedAt ? ` em ${toBRDateTime(report.shift.teamUpdatedAt)}` : ""}</td></tr>
-          </tbody>
-        </table>
+        <div class="section-title"><h2>Equipe do plantão</h2></div>
+        <div class="team-inline">${teamEntries || "Equipe não informada."}</div>
+        ${report.shift?.teamUpdatedBy ? `<div class="team-updated">Equipe atualizada por ${escapeHtml(report.shift.teamUpdatedBy)}${report.shift.teamUpdatedAt ? ` em ${escapeHtml(toBRDateTime(report.shift.teamUpdatedAt))}` : ""}</div>` : ""}
       </div>
+      ${censusSection}
       <div class="section">
         <div class="section-title"><h2>Relatório de enfermagem</h2><span>${report.shift?.nursingReportUpdatedAt ? toBRDateTime(report.shift.nursingReportUpdatedAt) : "Sem horário salvo"}</span></div>
         <div class="section-subtitle">Texto digitado pelo responsável do plantão para compor a ficha final do setor.</div>
         <div class="empty-box" style="white-space: pre-wrap;">${report.shift?.nursingReport ? escapeHtml(report.shift.nursingReport) : "Nenhum relatório de enfermagem registrado neste plantão."}</div>
-      </div>
-      <div class="section">
-        <div class="section-title"><h2>Dispositivos e procedimentos</h2><span>${(report.summary?.dispositivos || []).length} item(ns)</span></div>
-        <div class="section-subtitle">Resumo dos principais dispositivos e procedimentos registrados no plantão.</div>
-        <div class="device-grid">${devices}</div>
       </div>
       <div class="section">
         <div class="section-title"><h2>Pacientes ativos no fechamento</h2><span>${(report.patients || []).length} paciente(s)</span></div>
@@ -6643,15 +9215,27 @@ function printShiftReport(report) {
           </div>
         </div>
       </div>
+      <div class="section">
+        <div class="section-title"><h2>Atividades do plantão</h2><span>${(report.actions || []).length} registro(s)</span></div>
+        <table class="activity-table">
+          <thead><tr><th>Data e hora</th><th>Profissional</th><th>Atividade</th></tr></thead>
+          <tbody>${activityRows || '<tr><td colspan="3">Nenhuma atividade registrada neste plantão.</td></tr>'}</tbody>
+        </table>
+      </div>
     </div>
   </body></html>`);
   win.document.close();
+  applyA4PrintLayout(win, "landscape");
   win.focus();
-  win.print();
 }
 
 function renderDashboard(data) {
   const overview = data.overview || {};
+  const services = data.services || {};
+  const nir = services.nir || {};
+  const nirProduction = nir.production || {};
+  const socialService = services.socialService || {};
+  const psychology = services.psychology || {};
   document.getElementById("dash-pacientes").textContent = overview.pacientesInternados ?? 0;
   document.getElementById("dash-leitos").textContent = overview.leitosTotais ?? 0;
   document.getElementById("dash-admissoes").textContent = overview.admissoesNoPeriodo ?? 0;
@@ -6662,17 +9246,28 @@ function renderDashboard(data) {
   document.getElementById("dash-obitos").textContent = overview.obitosAcumuladas ?? overview.obitosAcumulados ?? 0;
   document.getElementById("dash-rotatividade").textContent = `${overview.taxaRotatividade ?? 0}%`;
   document.getElementById("dash-evasao").textContent = `${overview.taxaEvasao ?? 0}%`;
+  document.getElementById("dash-nir-attendances").textContent = nir.activeAttendances ?? 0;
+  document.getElementById("dash-nir-census").textContent = nirProduction.censusReports ?? 0;
+  document.getElementById("dash-nir-accepted").textContent = nirProduction.acceptedPatients ?? 0;
+  document.getElementById("dash-nir-external").textContent = nirProduction.externalRegulations ?? 0;
+  document.getElementById("dash-social-attendances").textContent = socialService.activeAttendances ?? 0;
+  document.getElementById("dash-social-production").textContent = socialService.production ?? 0;
+  document.getElementById("dash-psychology-attendances").textContent = psychology.activeAttendances ?? 0;
+  document.getElementById("dash-psychology-production").textContent = psychology.production ?? 0;
 
   renderBarGroup("dashboard-pathology", data.charts?.patologias || [], {
     emptyText: "Sem patologias registradas no período.",
+    formatValue: item => String(item.value),
     getColorClass: (item, index) => getDashboardColorClass("pathology", item, index)
   });
   renderBarGroup("dashboard-stay", data.charts?.permanencia || [], {
     emptyText: "Sem tempo de permanência no período.",
+    formatValue: item => String(item.value),
     getColorClass: item => getDashboardColorClass("stay", item, 0)
   });
   renderBarGroup("dashboard-procedures", data.charts?.procedimentos || [], {
     emptyText: "Sem procedimentos registrados no período.",
+    formatValue: item => String(item.value),
     getColorClass: (item, index) => getDashboardColorClass("procedures", item, index)
   });
   renderBarGroup("dashboard-sectors", data.charts?.setores || [], {
@@ -6682,7 +9277,11 @@ function renderDashboard(data) {
     getColorClass: item => getDashboardColorClass("sectors", item, 0)
   });
 
-  setDashboardFeedback(data.scope?.label ? `Exibindo: ${data.scope.label}` : "", false);
+  const dashboardSnapshotDate = data.period?.to || getCurrentIsoDate();
+  const snapshotLabel = dashboardSnapshotDate.split("-").reverse().join("/");
+  setDashboardFeedback(data.scope?.label
+    ? `Exibindo: ${data.scope.label} • Internados em ${snapshotLabel}; movimentações no período selecionado.`
+    : "", false);
 
   const headerTitle = document.getElementById("header-title");
   if (headerTitle) headerTitle.textContent = "Dashboard Hospitalar";
@@ -6720,6 +9319,28 @@ function getBedRequestStatus(request = {}, requestKey = "") {
       className: psychologyStatus.state ? psychologyStatus.chipClassName : "none",
       meta: psychologyStatus.meta || "Clique para solicitar"
     };
+  }
+
+  if (requestKey === "nirRequest") {
+    const status = String(request.status || "").trim().toUpperCase();
+    if (status === "EM_ACOMPANHAMENTO" || (!status && request.startedAt)) {
+      return {
+        label: "Em acompanhamento",
+        className: "in-progress",
+        meta: request.startedBy
+          ? `Em acompanhamento por ${request.startedBy}`
+          : `Iniciado em ${toBRDateTime(request.startedAt) || "-"}`
+      };
+    }
+    if (status === "SOLICITADO" || (!status && (request.requested || request.requestedAt || request.viewedAt))) {
+      return {
+        label: "Solicitado",
+        className: "pending",
+        meta: request.requestedBy
+          ? `Solicitado por ${request.requestedBy}`
+          : `Solicitado em ${toBRDateTime(request.requestedAt) || "-"}`
+      };
+    }
   }
 
   if (!request?.requested) {
@@ -6771,7 +9392,23 @@ async function updateBedRequestField(bedId, requestKey) {
   const current = bed[requestKey] || {};
   let next = null;
 
-  if (requestKey === "psychologyRequest") {
+  if (requestKey === "nirRequest") {
+    const currentStatus = String(current.status || "").trim().toUpperCase();
+    if (current.requested || ["SOLICITADO", "EM_ACOMPANHAMENTO"].includes(currentStatus)) return;
+    next = {
+      requested: true,
+      requestedAt: new Date().toISOString(),
+      requestedBy: currentUser?.nome || currentUser?.username || "",
+      viewedAt: "",
+      viewedBy: "",
+      startedAt: "",
+      startedBy: "",
+      closedAt: "",
+      closedBy: "",
+      observation: "",
+      status: "SOLICITADO"
+    };
+  } else if (requestKey === "psychologyRequest") {
     const currentState = getPsychologyRequestState(current);
     if (currentState === "SOLICITADO" || currentState === "EM_ACOMPANHAMENTO") return;
     next = {
@@ -6832,6 +9469,20 @@ function computeLocalWardCounts(beds = []) {
   return counts;
 }
 
+function compareEnfermarias(first, second) {
+  return String(first || "").localeCompare(String(second || ""), "pt-BR", {
+    numeric: true,
+    sensitivity: "base"
+  });
+}
+
+function hasActiveShiftForCurrentWard() {
+  return Boolean(
+    currentUser?.activeShift
+    && Number(currentUser.activeShift.wardId) === Number(currentWardId)
+  );
+}
+
 function renderBeds(beds) {
   const tbody = document.getElementById("tbody-leitos");
   tbody.innerHTML = "";
@@ -6843,7 +9494,7 @@ function renderBeds(beds) {
     bedsByEnf[enf].push(b);
   }
 
-  const ordered = Object.keys(bedsByEnf).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  const ordered = Object.keys(bedsByEnf).sort(compareEnfermarias);
   for (const enf of ordered) {
     const enfBeds = bedsByEnf[enf];
     const enfKey = `enf-${enf.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
@@ -6874,16 +9525,28 @@ function renderBeds(beds) {
       const tdAdm = document.createElement("td");
       tdAdm.textContent = toBRDate(b.admissao);
       const tdNome = document.createElement("td");
-      tdNome.className = "clickable";
       if (b.nome) {
+        tdNome.className = "clickable patient-name-cell";
         tdNome.textContent = b.nome;
+        tdNome.addEventListener("click", () => openPatientModal(b.id));
       } else {
-        const span = document.createElement("span");
-        span.className = "placeholder";
-        span.textContent = "CLIQUE PARA CADASTRAR";
-        tdNome.appendChild(span);
+        const registerButton = document.createElement("button");
+        registerButton.type = "button";
+        registerButton.className = "bed-register-link";
+        registerButton.textContent = "CLIQUE PARA CADASTRAR";
+        registerButton.setAttribute("aria-disabled", String(!hasActiveShiftForCurrentWard()));
+        registerButton.title = hasActiveShiftForCurrentWard()
+          ? "Cadastrar paciente neste leito"
+          : "Assuma o plantão deste setor para cadastrar um paciente.";
+        registerButton.addEventListener("click", () => {
+          if (!hasActiveShiftForCurrentWard()) {
+            setShiftFeedback("Assuma o plantão deste setor para cadastrar um paciente.", true);
+            return;
+          }
+          openPatientModal(b.id, true);
+        });
+        tdNome.appendChild(registerButton);
       }
-      tdNome.addEventListener("click", () => openPatientModal(b.id));
       const tdDiag = document.createElement("td");
       tdDiag.textContent = b.diagnostico || "";
       const tdSocial = document.createElement("td");
@@ -6921,15 +9584,19 @@ function renderBeds(beds) {
   }
 }
 
-async function openPatientModal(bedId) {
+async function openPatientModal(bedId, startRegistration = false) {
   if (!ward) return;
   const bed = ward.beds.find(b => b.id === bedId);
   if (!bed) return;
+  if (startRegistration && !hasActiveShiftForCurrentWard()) {
+    setShiftFeedback("Assuma o plantão deste setor para cadastrar um paciente.", true);
+    return;
+  }
   currentBedId = bedId;
   selectedRegistryPatient = null;
   document.getElementById("modal-title").textContent = `Leito ${bed.id}`;
   document.getElementById("modal-leito").value = `LEITO ${bed.id}`;
-  document.getElementById("modal-status").value = bed.status;
+  document.getElementById("modal-status").value = startRegistration ? "OCUPADO" : bed.status;
   document.getElementById("modal-nome").value = formatCpf(bed.cpf || "");
   document.getElementById("modal-admissao").value = bed.admissao || "";
   document.getElementById("modal-diagnostico").value = bed.diagnostico || "";
@@ -6958,7 +9625,10 @@ async function openPatientModal(bedId) {
   renderPendingHistory(Array.isArray(bed.pendenciasHistorico) ? bed.pendenciasHistorico : []);
   renderProcedureHistory(Array.isArray(bed.procedimentosHistorico) ? bed.procedimentosHistorico : []);
   await updateTransferOptions(bed.id, currentWardId);
-  setPatientFieldsEnabled(bed.status === "OCUPADO");
+  setPatientFieldsEnabled(document.getElementById("modal-status").value === "OCUPADO");
+  updatePatientBedStatusPreview();
+  document.getElementById("procedure-history-title").textContent = `Histórico de procedimentos — Leito ${bed.id}`;
+  document.body.classList.add("patient-dialog-open");
   document.getElementById("modal-paciente").showModal();
 }
 
@@ -7171,7 +9841,7 @@ async function registrarOutcome(type) {
     : "";
   if (normalizedType === "TRANSFERENCIA_EXTERNA" && !note) {
     toggleExternalTransferPanel(true);
-    setPatientLookupFeedback("Descreva a transferência externa antes de registrar.", true);
+    setOutcomeFeedback("Descreva a transferência externa antes de registrar.", true);
     return;
   }
   if (bed) {
@@ -7190,8 +9860,13 @@ async function registrarOutcome(type) {
     body: JSON.stringify({ type: normalizedType, note })
   });
   transferWardCache.clear();
-  await load();
   document.getElementById("modal-paciente").close();
+  try {
+    await load();
+  } catch (error) {
+    console.error("A movimentação foi salva, mas não foi possível atualizar o setor.", error);
+    showUnexpectedError(new Error("A transferência foi salva, mas a tela não atualizou. Recarregue o setor."));
+  }
 }
 
 async function load() {
@@ -7235,7 +9910,11 @@ document.getElementById("salvar-equipe").addEventListener("click", async () => {
     return;
   }
   const saveButton = document.getElementById("salvar-equipe");
-  const payload = {
+  const isNirShift = String(currentUser.activeShift.serviceType || "").trim().toUpperCase() === "NIR";
+  const payload = isNirShift ? {
+    enfermeiroResponsavel: currentUser.activeShift.ownerName || currentUser.nome || currentUser.username || "",
+    auxiliarAdministrativo: document.getElementById("eq-nir-admin").value.trim()
+  } : {
     medicoPlantao: document.getElementById("eq-medico").value.trim(),
     enfermeiroDia: document.getElementById("field-eq-enf-dia")?.classList.contains("hidden") ? "" : document.getElementById("eq-enf-dia").value.trim(),
     tecnicosDia: document.getElementById("field-eq-tec-dia")?.classList.contains("hidden") ? "" : document.getElementById("eq-tec-dia").value.trim(),
@@ -7267,7 +9946,23 @@ document.getElementById("salvar-equipe").addEventListener("click", async () => {
 
 document.getElementById("modal-salvar").addEventListener("click", async (e) => {
   e.preventDefault();
-  await salvarPaciente();
+  try {
+    await salvarPaciente();
+  } catch (error) {
+    showUnexpectedError(error);
+  }
+});
+
+document.getElementById("modal-paciente").addEventListener("close", () => {
+  document.body.classList.remove("patient-dialog-open");
+});
+
+document.getElementById("btn-view-procedure-history")?.addEventListener("click", () => {
+  document.getElementById("modal-procedimentos-historico")?.showModal();
+});
+
+document.getElementById("btn-close-procedure-history")?.addEventListener("click", () => {
+  document.getElementById("modal-procedimentos-historico")?.close();
 });
 
 document.getElementById("modal-transferir")?.addEventListener("click", async (e) => {
@@ -7290,6 +9985,7 @@ document.getElementById("modal-alta")?.addEventListener("click", async (e) => {
 
 document.getElementById("modal-transferencia-externa")?.addEventListener("click", async (e) => {
   e.preventDefault();
+  const button = e.currentTarget;
   const panel = document.getElementById("modal-external-transfer-panel");
   const note = document.getElementById("modal-external-transfer-note")?.value.trim() || "";
   if (panel?.classList.contains("hidden")) {
@@ -7297,11 +9993,23 @@ document.getElementById("modal-transferencia-externa")?.addEventListener("click"
     return;
   }
   if (!note) {
-    setPatientLookupFeedback("Descreva a transferência externa antes de registrar.", true);
+    setOutcomeFeedback("Descreva a transferência externa antes de registrar.", true);
     return;
   }
   if (!confirm("Registrar TRANSFERÊNCIA EXTERNA e liberar o leito?")) return;
-  await registrarOutcome("TRANSFERENCIA_EXTERNA");
+  button.disabled = true;
+  const originalText = button.textContent;
+  button.textContent = "Salvando...";
+  setOutcomeFeedback("Salvando transferência externa...");
+  try {
+    await registrarOutcome("TRANSFERENCIA_EXTERNA");
+  } catch (error) {
+    console.error("Não foi possível salvar a transferência externa.", error);
+    setOutcomeFeedback(error.message || "Não foi possível salvar a transferência externa. Tente novamente.", true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
 });
 
 document.getElementById("modal-evasao")?.addEventListener("click", async (e) => {
@@ -7321,6 +10029,7 @@ document.getElementById("modal-obito")?.addEventListener("click", async (e) => {
 document.getElementById("modal-status").addEventListener("change", () => {
   const status = document.getElementById("modal-status").value;
   const isOcupado = status === "OCUPADO";
+  updatePatientBedStatusPreview();
   setPatientFieldsEnabled(isOcupado);
   if (!isOcupado) toggleExternalTransferPanel(false);
   updateTransferOptions(
@@ -7337,6 +10046,19 @@ document.getElementById("modal-transfer-ward")?.addEventListener("change", async
   );
 });
 
+document.getElementById("dashboard-month")?.addEventListener("change", event => {
+  if (!event.target.value) return;
+  document.getElementById("dashboard-from").value = "";
+  document.getElementById("dashboard-to").value = "";
+});
+
+for (const id of ["dashboard-from", "dashboard-to"]) {
+  document.getElementById(id)?.addEventListener("change", event => {
+    if (!event.target.value) return;
+    document.getElementById("dashboard-month").value = "";
+  });
+}
+
 document.getElementById("btn-dashboard-apply")?.addEventListener("click", async () => {
   dashboardFilters = {
     wardId: document.getElementById("dashboard-ward").value,
@@ -7348,7 +10070,7 @@ document.getElementById("btn-dashboard-apply")?.addEventListener("click", async 
 });
 
 document.getElementById("btn-dashboard-clear")?.addEventListener("click", async () => {
-  dashboardFilters = { wardId: "", month: "", from: "", to: "" };
+  dashboardFilters = { wardId: "", month: getCurrentMonthValue(), from: "", to: "" };
   updateDashboardFilterInputs();
   await loadDashboard();
 });
@@ -7535,7 +10257,9 @@ function renderAdminBedList() {
   const list = document.createElement("div");
   list.className = "bed-group-list";
 
-  for (const [enfermaria, groupBeds] of groups.entries()) {
+  for (const [enfermaria, groupBeds] of [...groups.entries()].sort(([first], [second]) =>
+    compareEnfermarias(first, second)
+  )) {
     const card = document.createElement("div");
     card.className = "bed-group-card";
     const rows = groupBeds.map(bed => `
@@ -7577,7 +10301,7 @@ function openAdminBedEditModal(bedId) {
   document.getElementById("admin-bed-edit-id").value = String(bed.id);
   const select = document.getElementById("admin-bed-edit-enfermaria");
   select.innerHTML = "";
-  for (const enfermaria of currentAdminWardDetails?.enfermarias || []) {
+  for (const enfermaria of [...(currentAdminWardDetails?.enfermarias || [])].sort(compareEnfermarias)) {
     select.appendChild(new Option(enfermaria, enfermaria));
   }
   if (bed.enfermaria) select.value = bed.enfermaria;
@@ -7776,7 +10500,7 @@ function updateAdminEnfDropdown() {
   if (!select) return;
   select.innerHTML = "";
   if (w && w.enfermarias) {
-    for (const enf of w.enfermarias) {
+    for (const enf of [...w.enfermarias].sort(compareEnfermarias)) {
       select.appendChild(new Option(enf, enf));
     }
   }
@@ -7797,7 +10521,7 @@ function updateDeleteEnfDropdown() {
   if (!select) return;
   select.innerHTML = "";
   if (w && w.enfermarias) {
-    for (const enf of w.enfermarias) {
+    for (const enf of [...w.enfermarias].sort(compareEnfermarias)) {
       select.appendChild(new Option(enf, enf));
     }
   }
@@ -7831,7 +10555,7 @@ function updateTopbarEnfSelect() {
   enfSelect.innerHTML = "";
   enfSelect.appendChild(new Option("Todas", ""));
 
-  for (const enf of selectedWard?.enfermarias || []) {
+  for (const enf of [...(selectedWard?.enfermarias || [])].sort(compareEnfermarias)) {
     enfSelect.appendChild(new Option(enf, enf));
   }
 }
@@ -7855,17 +10579,9 @@ function syncStartupShiftForm() {
   const serviceSelect = document.getElementById("modal-start-service-select");
   const shiftLength = document.getElementById("modal-start-shift-length");
   const wardField = document.getElementById("modal-start-ward-field");
-  const periodField = document.getElementById("modal-start-period-field");
   const isWardShift = serviceSelect?.value === "ward";
   wardField?.classList.toggle("hidden", !isWardShift);
-  periodField?.classList.toggle("hidden", !isWardShift);
-
-  const fullDay = shiftLength?.value === "24H";
-  const periodSelect = document.getElementById("modal-start-shift-period");
-  if (periodSelect) {
-    if (fullDay) periodSelect.value = "COMPLETO";
-    periodSelect.disabled = !isWardShift || fullDay;
-  }
+  if (shiftLength) shiftLength.required = true;
 }
 
 function setStartupShiftFeedback(message, isError = false) {
@@ -7879,6 +10595,7 @@ function setStartupShiftFeedback(message, isError = false) {
 async function openSelectedWard(wardId) {
   if (!wardId) return;
   currentWardId = wardId;
+  selectActiveWardShift(wardId);
   wardShiftPanelRequested = hasActiveWardShiftForCurrentWard();
   renderHeaderWardTabs();
   renderWardDetailToolbar();
@@ -7899,6 +10616,7 @@ async function openSelectedWard(wardId) {
 async function openWardInsideHome(wardId) {
   if (!wardId) return;
   currentWardId = wardId;
+  selectActiveWardShift(wardId);
   wardShiftPanelRequested = hasActiveWardShiftForCurrentWard();
   renderHeaderWardTabs();
   renderWardDetailToolbar();
@@ -7931,6 +10649,7 @@ async function openTopbarWard() {
   const wardId = parseInt(document.getElementById("topbar-ward-select")?.value, 10);
   if (!wardId) return;
   currentWardId = wardId;
+  selectActiveWardShift(wardId);
   wardShiftPanelRequested = hasActiveWardShiftForCurrentWard();
   renderWardDetailToolbar();
   setAppEnabled(true);
@@ -7982,8 +10701,13 @@ async function openPatientsView() {
 
 async function openNirView() {
   await refreshWards();
+  selectActiveNirShift();
   setAppEnabled(false);
   showOnly("view-nir");
+  syncNirShiftControl();
+  setNirViewTab("map");
+  void loadNirCensusReports({ force: true });
+  void loadNirShiftReports();
   await loadNirPatientsView();
   closeSidebarOnMobile();
 }
@@ -8021,8 +10745,13 @@ async function savePatientRegistry() {
     if (pendingLink?.bedId && normalizeCpf(payload.cpf) === normalizeCpf(pendingLink.cpf)) {
       pendingBedRegistryLink = null;
       await openPatientModal(pendingLink.bedId);
+      const statusSelect = document.getElementById("modal-status");
+      if (statusSelect && pendingLink.status) {
+        statusSelect.value = pendingLink.status;
+        statusSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      }
       applyRegistryPatientToBedForm(saved?.patient || currentPatientRecord);
-      setPatientLookupFeedback("CPF cadastrado com sucesso. Agora conclua o registro do leito.");
+      setPatientLookupFeedback("CPF cadastrado. Confira os dados e clique em Salvar leito para registrar a ocupação.");
     }
   } catch (error) {
     setPatientRegistryFeedback(error.message || "Não foi possível salvar o paciente.", true);
@@ -8049,9 +10778,34 @@ async function deletePatientRegistry() {
   }
 }
 
+function showFirstPasswordChangeDialog() {
+  setAppEnabled(false);
+  showOnly("view-login");
+  const dialog = document.getElementById("modal-first-password");
+  const feedback = document.getElementById("first-password-feedback");
+  const form = document.getElementById("first-password-form");
+  if (form && !dialog?.open) form.reset();
+  if (feedback) {
+    feedback.textContent = "";
+    feedback.classList.add("hidden");
+  }
+  if (dialog && !dialog.open) dialog.showModal();
+}
+
+function setFirstPasswordFeedback(message = "") {
+  const feedback = document.getElementById("first-password-feedback");
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle("hidden", !message);
+}
+
 async function startApp(options = {}) {
   if (!options.skipUserRefresh) {
     await refreshCurrentUser();
+  }
+  if (currentUser?.mustChangePassword) {
+    showFirstPasswordChangeDialog();
+    return;
   }
   await Promise.all([
     refreshStaffSuggestions(),
@@ -8066,6 +10820,10 @@ async function startApp(options = {}) {
   }
   if (activeServiceType === "SERVICO_SOCIAL") {
     await openSocialServiceView();
+    return;
+  }
+  if (activeServiceType === "NIR") {
+    await openNirView();
     return;
   }
   if (activeShift?.wardId) {
@@ -8083,6 +10841,10 @@ async function checkAuth() {
     // #endregion
     const data = await api("/api/me");
     currentUser = data.user || null;
+    if (currentUser?.mustChangePassword) {
+      showFirstPasswordChangeDialog();
+      return;
+    }
     await startApp({ skipUserRefresh: true });
     // #region debug-point E:check-auth-success
     reportDebugEvent("E", "public/app.js:checkAuth:success", "[DEBUG] Auth check success", {
@@ -8098,7 +10860,9 @@ async function checkAuth() {
     showOnly("view-login");
     setLoginFeedback(error?.isAuthError
       ? ""
-      : "Banco central indisponível. O acesso e as gravações ficam bloqueados até a conexão voltar.");
+      : (error?.status === 503
+        ? "Banco central indisponível. O acesso e as gravações ficam bloqueados até a conexão voltar."
+        : (error.message || "Não foi possível iniciar o sistema.")));
   }
 }
 
@@ -8119,15 +10883,54 @@ document.getElementById("btn-login").addEventListener("click", async () => {
     currentUser = res.user || null;
     document.getElementById("login-password").value = "";
     setLoginFeedback("");
-    await startApp({ skipUserRefresh: true });
+    if (currentUser?.mustChangePassword) {
+      showFirstPasswordChangeDialog();
+    } else {
+      await startApp({ skipUserRefresh: true });
+    }
   } catch (e) {
     setLoginFeedback(e?.status === 401
       ? e.message
-      : "Banco central indisponível. O acesso e as gravações ficam bloqueados até a conexão voltar.");
+      : (e?.status === 503
+        ? "Banco central indisponível. O acesso e as gravações ficam bloqueados até a conexão voltar."
+        : (e.message || "Não foi possível entrar no sistema.")));
   }
 });
 
+document.getElementById("first-password-form")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  const password = document.getElementById("first-password-new").value;
+  const confirmation = document.getElementById("first-password-confirm").value;
+  if (password.length < 6) {
+    setFirstPasswordFeedback("A nova senha deve ter pelo menos 6 caracteres.");
+    return;
+  }
+  if (password !== confirmation) {
+    setFirstPasswordFeedback("As senhas não conferem.");
+    return;
+  }
+  try {
+    const result = await api("/api/me/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password })
+    });
+    currentUser = result.user || currentUser;
+    document.getElementById("modal-first-password").close();
+    setFirstPasswordFeedback("");
+    await startApp({ skipUserRefresh: true });
+  } catch (error) {
+    setFirstPasswordFeedback(error.message || "Não foi possível alterar a senha.");
+  }
+});
+
+document.getElementById("modal-first-password")?.addEventListener("cancel", event => {
+  event.preventDefault();
+});
+document.getElementById("btn-first-password-logout")?.addEventListener("click", doLogout);
+
 async function doLogout() {
+  document.getElementById("modal-first-password")?.close();
   await api("/api/logout", { method: "POST" }).catch(() => {});
   sessionId = null;
   sessionStorage.removeItem("sid");
@@ -8141,6 +10944,166 @@ async function doLogout() {
 
 document.getElementById("btn-logout-side")?.addEventListener("click", doLogout);
 document.getElementById("btn-logout-top")?.addEventListener("click", doLogout);
+document.getElementById("nav-my-shifts")?.addEventListener("click", async () => {
+  try {
+    await refreshCurrentUser();
+    if (isAdminUser()) {
+      const data = await api("/api/shifts/history");
+      teamShiftHistory = Array.isArray(data.shifts) ? data.shifts : [];
+      document.getElementById("shift-history-title").textContent = "Plantões da equipe";
+      document.getElementById("shift-history-hint").textContent = "Consulte os plantões de todos os profissionais por mês e reimprima relatórios encerrados. A consulta não reabre plantões encerrados.";
+    } else {
+      document.getElementById("shift-history-title").textContent = "Meus plantões";
+      document.getElementById("shift-history-hint").textContent = "Pesquise seus plantões por mês, consulte o resumo e reimprima uma ficha anterior.";
+    }
+    renderShiftHistory();
+    setAppEnabled(false);
+    showOnly("view-my-shifts");
+    setMyShiftsFeedback("");
+    closeSidebarOnMobile();
+  } catch (error) {
+    setMyShiftsFeedback(error.message || "Não foi possível carregar o histórico dos plantões.", true);
+  }
+});
+document.getElementById("btn-refresh-my-shifts")?.addEventListener("click", async () => {
+  const hadActiveShift = Boolean(currentUser?.activeShift);
+  try {
+    await refreshCurrentUser();
+    if (!hadActiveShift && currentUser?.activeShift) {
+      await startApp({ skipUserRefresh: true });
+      setShiftFeedback("O coordenador autorizou a reabertura. O plantão está ativo.");
+      return;
+    }
+    if (isAdminUser()) {
+      const data = await api("/api/shifts/history");
+      teamShiftHistory = Array.isArray(data.shifts) ? data.shifts : [];
+    }
+    renderShiftHistory();
+    setMyShiftsFeedback("Histórico atualizado.");
+  } catch (error) {
+    setMyShiftsFeedback(error.message || "Não foi possível atualizar o histórico.", true);
+  }
+});
+document.getElementById("shift-history-list")?.addEventListener("click", async event => {
+  const reprintButton = event.target.closest(".btn-reprint-shift");
+  if (reprintButton) {
+    await reprintHistoricalShift(reprintButton.dataset.shiftId, reprintButton.dataset.ownerUsername);
+    return;
+  }
+  const reopenButton = event.target.closest(".btn-request-reopen");
+  if (reopenButton) openShiftReopenDialog(reopenButton.dataset.shiftId);
+});
+document.getElementById("shift-reopen-form")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const dialog = document.getElementById("modal-reopen-shift");
+  const reasonInput = document.getElementById("shift-reopen-reason");
+  const feedback = document.getElementById("shift-reopen-feedback");
+  const submitButton = form.querySelector('button[type="submit"]');
+  if (!dialog || !reasonInput || !feedback || !submitButton) return;
+
+  const reason = reasonInput.value.trim();
+  if (reason.length < 10) {
+    feedback.textContent = "Descreva o motivo com pelo menos 10 caracteres.";
+    feedback.classList.remove("hidden");
+    reasonInput.focus();
+    return;
+  }
+
+  submitButton.disabled = true;
+  feedback.textContent = "";
+  feedback.classList.add("hidden");
+  try {
+    await requestShiftReopen(dialog.dataset.shiftId, reason);
+    dialog.close();
+  } catch (error) {
+    feedback.textContent = error.message || "Não foi possível solicitar a reabertura.";
+    feedback.classList.remove("hidden");
+  } finally {
+    submitButton.disabled = false;
+  }
+});
+document.getElementById("btn-cancel-shift-reopen")?.addEventListener("click", () => {
+  document.getElementById("modal-reopen-shift")?.close();
+});
+document.getElementById("btn-refresh-shift-reopen-requests")?.addEventListener("click", async () => {
+  const feedback = document.getElementById("admin-shift-reopen-feedback");
+  try {
+    await loadAdminShiftReopenRequests();
+    if (feedback) {
+      feedback.textContent = "Solicitações atualizadas.";
+      feedback.classList.remove("hidden", "error-text");
+    }
+  } catch (error) {
+    if (feedback) {
+      feedback.textContent = error.message || "Não foi possível carregar as solicitações.";
+      feedback.classList.remove("hidden");
+      feedback.classList.add("error-text");
+    }
+  }
+});
+document.getElementById("btn-request-shift-authorization")?.addEventListener("click", requestShiftAuthorization);
+document.getElementById("btn-refresh-shift-authorization-requests")?.addEventListener("click", async () => {
+  await loadCoordinatorShiftAuthorizationRequests();
+});
+document.getElementById("shift-authorization-queue")?.addEventListener("click", async event => {
+  const button = event.target.closest(".btn-decide-shift-authorization");
+  if (!button) return;
+  const decision = button.dataset.decision;
+  if (!["approve", "reject"].includes(decision)) return;
+  if (decision === "approve" && !window.confirm("Autorizar este profissional a abrir o plantão neste setor?")) return;
+  const note = decision === "reject" ? window.prompt("Informe o motivo da negativa (opcional):") : "";
+  if (note === null) return;
+  button.disabled = true;
+  try {
+    await api(`/api/shifts/authorization-requests/${encodeURIComponent(button.dataset.requestId)}/decision`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision, note })
+    });
+    await loadCoordinatorShiftAuthorizationRequests();
+    setShiftAuthorizationQueueFeedback(decision === "approve"
+      ? "Abertura autorizada. O profissional já pode tentar abrir o plantão."
+      : "Solicitação negada.");
+  } catch (error) {
+    button.disabled = false;
+    setShiftAuthorizationQueueFeedback(error.message || "Não foi possível registrar a decisão.", true);
+  }
+});
+document.getElementById("admin-shift-reopen-list")?.addEventListener("click", async event => {
+  const approveButton = event.target.closest(".btn-approve-shift-reopen");
+  const rejectButton = event.target.closest(".btn-reject-shift-reopen");
+  const button = approveButton || rejectButton;
+  if (!button) return;
+  const decision = approveButton ? "approve" : "reject";
+  if (decision === "approve" && !window.confirm("Autorizar a reabertura deste plantão?")) return;
+  const note = decision === "reject" ? window.prompt("Informe o motivo da negativa (opcional):") : "";
+  if (note === null) return;
+  try {
+    button.disabled = true;
+    await api(`/api/shifts/reopen-requests/${encodeURIComponent(button.dataset.requestId)}/decision`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision, note })
+    });
+    await loadAdminShiftReopenRequests();
+    const feedback = document.getElementById("admin-shift-reopen-feedback");
+    if (feedback) {
+      feedback.textContent = decision === "approve"
+        ? "Reabertura autorizada. O profissional já pode continuar o plantão."
+        : "Solicitação negada.";
+      feedback.classList.remove("hidden", "error-text");
+    }
+  } catch (error) {
+    button.disabled = false;
+    const feedback = document.getElementById("admin-shift-reopen-feedback");
+    if (feedback) {
+      feedback.textContent = error.message || "Não foi possível registrar a decisão.";
+      feedback.classList.remove("hidden");
+      feedback.classList.add("error-text");
+    }
+  }
+});
 document.getElementById("topbar-ward-select")?.addEventListener("change", async () => {
   updateTopbarEnfSelect();
   await refreshSidebarPatients();
@@ -8156,14 +11119,31 @@ document.getElementById("header-ward-tabs")?.addEventListener("click", async eve
 
 document.getElementById("btn-gerenciar").addEventListener("click", async () => {
   if (!isAdminUser()) {
-    setShiftFeedback("Somente administrador pode acessar o cadastro.", true);
+    setShiftFeedback("Somente administrador pode controlar os setores e leitos.", true);
     return;
   }
-  await refreshWards();
-  await loadAdminUsers();
-  clearAdminUserForm();
-  setAppEnabled(false);
-  showOnly("view-admin");
+  try {
+    await refreshWards();
+    await loadAdminShiftReopenRequests();
+    const management = document.getElementById("admin-ward-management");
+    const slot = document.getElementById("home-ward-management-slot");
+    if (!management || !slot) return;
+    if (management.parentElement !== slot) slot.appendChild(management);
+    management.classList.toggle("hidden");
+    document.getElementById("btn-gerenciar").textContent = management.classList.contains("hidden")
+      ? "Controle dos leitos"
+      : "Fechar controle dos leitos";
+    if (!management.classList.contains("hidden")) {
+      management.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  } catch (error) {
+    const feedback = document.getElementById("admin-ward-feedback");
+    if (feedback) {
+      feedback.textContent = error.message || "Não foi possível carregar o controle dos leitos.";
+      feedback.classList.remove("hidden");
+      feedback.classList.add("error-text");
+    }
+  }
 });
 
 document.getElementById("nav-gerenciar")?.addEventListener("click", async () => {
@@ -8171,12 +11151,17 @@ document.getElementById("nav-gerenciar")?.addEventListener("click", async () => 
     setShiftFeedback("Somente administrador pode acessar o cadastro.", true);
     return;
   }
-  await refreshWards();
-  await loadAdminUsers();
-  clearAdminUserForm();
-  setAppEnabled(false);
-  showOnly("view-admin");
-  closeSidebarOnMobile();
+  try {
+    await loadAdminUsers();
+    clearAdminUserForm();
+    document.getElementById("admin-ward-management")?.classList.add("hidden");
+    document.getElementById("btn-gerenciar").textContent = "Controle dos leitos";
+    setAppEnabled(false);
+    showOnly("view-admin");
+    closeSidebarOnMobile();
+  } catch (error) {
+    setAdminUsersFeedback(error.message || "Não foi possível carregar os profissionais.", true);
+  }
 });
 
 document.getElementById("nav-dashboard")?.addEventListener("click", async () => {
@@ -8201,12 +11186,54 @@ document.getElementById("nav-portaria")?.addEventListener("click", openPortariaV
 document.getElementById("nav-travel")?.addEventListener("click", openTravelView);
 document.getElementById("nav-patients")?.addEventListener("click", openPatientsView);
 document.getElementById("nav-nir")?.addEventListener("click", openNirView);
+document.getElementById("btn-refresh-bpa-i")?.addEventListener("click", loadBpaIAttendances);
+document.getElementById("bpa-i-month")?.addEventListener("change", loadBpaIAttendances);
+document.getElementById("btn-print-bpa-i")?.addEventListener("click", () => printBpaReport("psychology-bpa-panel"));
+document.getElementById("btn-print-social-service-bpa")?.addEventListener("click", () => printBpaReport("social-service-bpa-panel"));
+function printBpaReport(panelId) {
+  const panel = document.getElementById(panelId);
+  if (!panel?.parentNode) return;
+  const printRoot = document.createElement("div");
+  printRoot.id = "bpa-print-root";
+  bpaPrintPanel = panel;
+  bpaPrintPlaceholder = document.createComment("BPA report location");
+  panel.parentNode.insertBefore(bpaPrintPlaceholder, panel);
+  panel.classList.add("active-bpa-report");
+  printRoot.appendChild(panel);
+  document.body.appendChild(printRoot);
+  document.body.classList.add("print-bpa-i");
+  try {
+    window.print();
+  } catch (error) {
+    restoreBpaPrintPanel();
+    throw error;
+  }
+}
+function restoreBpaPrintPanel() {
+  const printRoot = document.getElementById("bpa-print-root");
+  if (bpaPrintPanel && bpaPrintPlaceholder?.parentNode) {
+    bpaPrintPlaceholder.parentNode.insertBefore(bpaPrintPanel, bpaPrintPlaceholder);
+    bpaPrintPanel.classList.remove("active-bpa-report");
+  }
+  bpaPrintPlaceholder?.remove();
+  printRoot?.remove();
+  bpaPrintPanel = null;
+  bpaPrintPlaceholder = null;
+  document.body.classList.remove("print-bpa-i");
+}
+window.addEventListener("afterprint", () => {
+  restoreBpaPrintPanel();
+});
 document.getElementById("btn-psychology-tab-queue")?.addEventListener("click", () => {
   setPsychologyActiveTab("queue");
 });
 document.getElementById("btn-psychology-tab-monthly")?.addEventListener("click", async () => {
   setPsychologyActiveTab("monthly");
   await loadPsychologyMonthlyAttendances();
+});
+document.getElementById("btn-psychology-tab-bpa")?.addEventListener("click", async () => {
+  setPsychologyActiveTab("bpa");
+  await loadBpaIAttendances();
 });
 document.getElementById("btn-social-service-tab-queue")?.addEventListener("click", () => {
   setSocialServiceActiveTab("queue");
@@ -8232,6 +11259,9 @@ document.getElementById("social-service-age-filter")?.addEventListener("change",
 document.getElementById("btn-close-social-service-patient-history")?.addEventListener("click", () => {
   document.getElementById("modal-social-service-patient-history")?.close();
 });
+document.getElementById("btn-close-psychology-patient-history")?.addEventListener("click", () => {
+  document.getElementById("modal-psychology-patient-history")?.close();
+});
 document.getElementById("social-service-history-list")?.addEventListener("click", async event => {
   const deleteButton = event.target.closest(".btn-delete-social-service-attendance");
   if (!deleteButton) return;
@@ -8239,6 +11269,10 @@ document.getElementById("social-service-history-list")?.addEventListener("click"
 });
 document.getElementById("btn-refresh-psychology-monthly")?.addEventListener("click", loadPsychologyMonthlyAttendances);
 document.getElementById("psychology-monthly-filter")?.addEventListener("change", loadPsychologyMonthlyAttendances);
+document.getElementById("psychology-monthly-list")?.addEventListener("click", async event => {
+  const button = event.target.closest(".btn-delete-psychology-attendance");
+  if (button) await deletePsychologyAttendanceEntry(button.dataset.id);
+});
 document.getElementById("btn-save-psychology-manual")?.addEventListener("click", savePsychologyManualRequest);
 
 document.getElementById("btn-patient-new")?.addEventListener("click", openNewPatientRegistry);
@@ -8272,6 +11306,16 @@ document.getElementById("tbody-leitos")?.addEventListener("click", async event =
 });
 
 document.getElementById("psychology-list")?.addEventListener("click", async event => {
+  const historyButton = event.target.closest(".btn-open-psychology-history");
+  if (historyButton) {
+    await openPsychologyPatientHistory(historyButton.closest("tr"));
+    return;
+  }
+  const deleteButton = event.target.closest(".btn-delete-active-service-request");
+  if (deleteButton) {
+    await deleteActiveServiceRequest(deleteButton);
+    return;
+  }
   const button = event.target.closest(".btn-save-psychology-record");
   if (!button) return;
   const card = button.closest("tr");
@@ -8281,7 +11325,21 @@ document.getElementById("psychology-list")?.addEventListener("click", async even
 document.getElementById("psychology-list")?.addEventListener("change", async event => {
   const select = event.target.closest(".psychology-status-select");
   if (!select) return;
-  syncPsychologyStatusDraft(select.closest("tr"));
+  const row = select.closest("tr");
+  if (!row) return;
+  syncPsychologyStatusDraft(row);
+  if (
+    String(select.value || "").trim().toUpperCase() !== "EM_ACOMPANHAMENTO"
+    || String(row.dataset.currentStatus || "").trim().toUpperCase() === "EM_ACOMPANHAMENTO"
+  ) return;
+  const saveButton = row.querySelector(".btn-save-psychology-record");
+  if (!saveButton) return;
+  select.disabled = true;
+  try {
+    await savePsychologyRecord(saveButton.dataset.id, row, { attended: false });
+  } finally {
+    if (select.isConnected) select.disabled = false;
+  }
 });
 
 document.getElementById("portaria-list")?.addEventListener("click", async event => {
@@ -8304,6 +11362,36 @@ document.getElementById("btn-save-portaria-registry")?.addEventListener("click",
 });
 
 document.getElementById("portaria-social-list")?.addEventListener("click", async event => {
+  const manualHistoryButton = event.target.closest(".btn-open-social-manual-history");
+  if (manualHistoryButton) {
+    await openSocialServiceManualHistory(manualHistoryButton.dataset.id);
+    return;
+  }
+  const deleteButton = event.target.closest(".btn-delete-active-service-request");
+  if (deleteButton) {
+    await deleteActiveServiceRequest(deleteButton);
+    return;
+  }
+  const manualFormButton = event.target.closest(".btn-open-social-manual-form");
+  if (manualFormButton) {
+    openSocialServiceManualFormModal(manualFormButton.dataset.id);
+    return;
+  }
+  const manualPrintButton = event.target.closest(".btn-print-social-manual-form");
+  if (manualPrintButton) {
+    const entry = socialServiceManualEntries.find(item => String(item.id || "") === String(manualPrintButton.dataset.id)) || null;
+    if (entry && hasSocialServiceFormContent(entry.socialForm)) {
+      printSocialServiceForm(buildSocialServiceManualFormPatient(entry));
+    }
+    return;
+  }
+  const manualSaveButton = event.target.closest(".btn-save-social-manual");
+  if (manualSaveButton) {
+    const row = manualSaveButton.closest(".portaria-social-row");
+    const status = String(row?.querySelector('[data-field="social-status"]')?.value || "EM_ACOMPANHAMENTO").trim().toUpperCase();
+    await updateSocialServiceManualRequest(manualSaveButton.dataset.id, row, status);
+    return;
+  }
   const registryButton = event.target.closest(".btn-open-social-patient-registry");
   if (registryButton) {
     await openSocialPatientRegistry(registryButton.dataset.id);
@@ -8316,7 +11404,45 @@ document.getElementById("portaria-social-list")?.addEventListener("click", async
   }
   const printFormButton = event.target.closest(".btn-print-social-form");
   if (printFormButton) {
-    printSocialServiceForm(printFormButton.dataset.id);
+    const patient = portariaActivePatients.find(item => String(item?.id || "") === String(printFormButton.dataset.id)) || null;
+    printSocialServiceForm(patient || printFormButton.dataset.id);
+    if (patient) setPortariaSocialFeedback("Ficha social preparada para impressão.");
+    return;
+  }
+  const deathButton = event.target.closest(".btn-register-social-death");
+  if (deathButton) {
+    const row = deathButton.closest(".portaria-social-row");
+    const patient = portariaActivePatients.find(item => Number(item?.id) === Number(deathButton.dataset.id)) || null;
+    if (!patient) {
+      setPortariaSocialFeedback("Não foi possível localizar o paciente para registrar o atendimento de óbito.", true);
+      return;
+    }
+    if (!window.confirm(`Registrar atendimento de óbito para ${patient.nome || "este paciente"}? Isso gera uma produção do Serviço Social e remove o acompanhamento da planilha, mas não registra o desfecho de óbito no leito.`)) return;
+    await closePortariaSocialSupport(deathButton.dataset.id, row, "OBITO");
+    return;
+  }
+  const companionButton = event.target.closest(".btn-register-social-companion");
+  if (companionButton) {
+    const row = companionButton.closest(".portaria-social-row");
+    const companionForm = row?.querySelector("[data-companion-attendance-form]");
+    companionForm?.classList.remove("hidden");
+    companionForm?.querySelector('[data-field="companion-name"]')?.focus();
+    return;
+  }
+  const cancelCompanionButton = event.target.closest(".btn-cancel-social-companion");
+  if (cancelCompanionButton) {
+    const companionForm = cancelCompanionButton.closest("[data-companion-attendance-form]");
+    companionForm?.querySelectorAll("input").forEach(input => { input.value = ""; });
+    companionForm?.classList.add("hidden");
+    return;
+  }
+  const submitCompanionButton = event.target.closest(".btn-submit-social-companion");
+  if (submitCompanionButton) {
+    await registerSocialServiceCompanionAttendance(
+      submitCompanionButton.dataset.id,
+      submitCompanionButton.closest(".portaria-social-row"),
+      submitCompanionButton
+    );
     return;
   }
   const historyButton = event.target.closest(".btn-open-social-history");
@@ -8324,23 +11450,46 @@ document.getElementById("portaria-social-list")?.addEventListener("click", async
     await openSocialServicePatientHistory(historyButton.dataset.id);
     return;
   }
-  const closeButton = event.target.closest(".btn-close-portaria-social");
-  if (closeButton) {
-    const row = closeButton.closest(".portaria-social-row");
-    await closePortariaSocialSupport(closeButton.dataset.id, row);
-    return;
-  }
   const button = event.target.closest(".btn-save-portaria-social");
   if (!button) return;
   const row = button.closest(".portaria-social-row");
   await savePortariaSocialSupport(button.dataset.id, row);
 });
+document.getElementById("portaria-social-list")?.addEventListener("change", async event => {
+  const select = event.target.closest('[data-field="social-status"]');
+  if (!select) return;
+  const row = select.closest(".portaria-social-row");
+  if (!row) return;
+  syncSocialServiceStatusDraft(row);
+  if (
+    String(select.value || "").trim().toUpperCase() !== "EM_ACOMPANHAMENTO"
+    || String(row.dataset.currentStatus || "").trim().toUpperCase() === "EM_ACOMPANHAMENTO"
+  ) return;
+  select.disabled = true;
+  try {
+    if (row.classList.contains("social-service-manual-row")) {
+      await updateSocialServiceManualRequest(row.dataset.manualRequestId, row, select.value, { attended: false });
+      return;
+    }
+    await savePortariaSocialSupport(row.dataset.id, row, { attended: false });
+  } finally {
+    if (select.isConnected) select.disabled = false;
+  }
+});
+document.getElementById("btn-save-social-service-manual")?.addEventListener("click", saveSocialServiceManualRequest);
 document.getElementById("btn-save-social-service-form")?.addEventListener("click", saveSocialServiceFormModal);
 document.getElementById("btn-close-social-service-form")?.addEventListener("click", () => {
   document.getElementById("modal-social-service-form")?.close();
+  currentSocialServiceFormPatientId = null;
+  currentSocialServiceFormManualRequestId = "";
   setSocialServiceFormFeedback("");
 });
 document.getElementById("btn-print-social-service-form")?.addEventListener("click", () => {
+  if (currentSocialServiceFormManualRequestId) {
+    const entry = socialServiceManualEntries.find(item => String(item.id || "") === currentSocialServiceFormManualRequestId) || null;
+    if (entry) printSocialServiceForm(buildSocialServiceManualFormPatient(entry), collectSocialServiceFormModalData());
+    return;
+  }
   const patient = portariaActivePatients.find(item => Number(item?.id) === Number(currentSocialServiceFormPatientId)) || null;
   if (!patient) return;
   printSocialServiceForm(patient, collectSocialServiceFormModalData());
@@ -8450,27 +11599,67 @@ document.getElementById("nir-list")?.addEventListener("click", async event => {
   await openPatientRegistry(openButton.dataset.id);
 });
 
-document.getElementById("nir-list")?.addEventListener("change", async event => {
-  const channelButton = event.target.closest(".nir-channel-radio");
-  if (!channelButton) return;
-  await markNirPatientUpdated(channelButton.dataset.id, getSelectedNirChannels(channelButton.dataset.id));
+document.getElementById("btn-open-nir-shift")?.addEventListener("click", openNirShift);
+document.getElementById("btn-close-nir-shift")?.addEventListener("click", async () => {
+  selectActiveNirShift();
+  await closeActiveShift({
+    expectedServiceType: "NIR",
+    emptyMessage: "Não há plantão NIR aberto para encerrar.",
+    mismatchMessage: "O plantão aberto não pertence ao NIR.",
+    keepCurrentView: true,
+    feedback: setNirShiftFeedback
+  });
 });
-
-document.getElementById("nir-list")?.addEventListener("input", event => {
-  const sirelInput = event.target.closest(".nir-sirel-input");
-  if (!sirelInput) return;
-  sirelInput.value = String(sirelInput.value || "").replace(/\D/g, "").slice(0, 20);
-  scheduleNirSirelSave(sirelInput.dataset.id, sirelInput.value);
+document.getElementById("btn-open-nir-team-modal")?.addEventListener("click", () => {
+  selectActiveNirShift();
+  openShiftTeamModal(setNirShiftFeedback);
 });
-
-document.getElementById("nir-list")?.addEventListener("change", async event => {
-  const sirelInput = event.target.closest(".nir-sirel-input");
-  if (!sirelInput) return;
-  sirelInput.value = String(sirelInput.value || "").replace(/\D/g, "").slice(0, 20);
-  await saveNirSirelValue(sirelInput.dataset.id, sirelInput.value);
+document.getElementById("btn-save-nir-shift-report")?.addEventListener("click", async () => {
+  selectActiveNirShift();
+  await saveShiftNursingReport({
+    inputId: "nir-shift-nursing-report",
+    feedback: setNirShiftFeedback
+  });
+});
+document.getElementById("nir-shift-length")?.addEventListener("change", () => {
+  syncNirShiftControl();
+});
+document.getElementById("nir-shift-nursing-report")?.addEventListener("input", event => {
+  const activeShift = selectActiveNirShift();
+  if (activeShift) activeShift.nursingReport = String(event.target.value || "");
 });
 
 document.getElementById("nir-accepted-list")?.addEventListener("click", async event => {
+  const saveSpecialtyButton = event.target.closest(".btn-save-nir-specialty");
+  if (saveSpecialtyButton) {
+    const input = saveSpecialtyButton.closest(".nir-support-cell")?.querySelector(".nir-specialty-input");
+    if (!input) return;
+    saveSpecialtyButton.disabled = true;
+    const saved = await saveNirSpecialtyValue(input.dataset.id, input.value);
+    if (saved) {
+      input.dataset.savedValue = input.value.trim();
+    } else {
+      saveSpecialtyButton.disabled = false;
+    }
+    return;
+  }
+
+  const saveSirelButton = event.target.closest(".btn-save-nir-sirel");
+  if (saveSirelButton) {
+    const input = saveSirelButton.closest(".nir-support-cell")?.querySelector(".nir-sirel-input");
+    if (!input) return;
+    input.value = String(input.value || "").replace(/\D/g, "").slice(0, 20);
+    saveSirelButton.disabled = true;
+    const saved = await saveNirSirelValue(input.dataset.id, input.value);
+    if (saved) {
+      input.dataset.savedValue = input.value;
+      saveSirelButton.disabled = true;
+    } else {
+      saveSirelButton.disabled = false;
+    }
+    return;
+  }
+
   const closeButton = event.target.closest(".btn-nir-close");
   if (closeButton) {
     await finalizeNirPatient(closeButton.dataset.id, "BAIXA");
@@ -8480,38 +11669,80 @@ document.getElementById("nir-accepted-list")?.addEventListener("click", async ev
   const cancelButton = event.target.closest(".btn-nir-cancel");
   if (cancelButton) {
     await finalizeNirPatient(cancelButton.dataset.id, "CANCELADO");
-    return;
   }
-
-  const openButton = event.target.closest(".btn-nir-open");
-  if (!openButton) return;
-  await openPatientRegistry(openButton.dataset.id);
 });
 
+document.getElementById("nir-accepted-list")?.addEventListener("click", event => {
+  const control = event.target.closest(".nir-specialty-input, .nir-sirel-input, .nir-channel-radio, .btn-save-nir-specialty, .btn-save-nir-sirel, .btn-nir-close, .btn-nir-cancel");
+  if (!control || selectActiveNirShift()) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  ensureNirShiftOpen();
+}, true);
+
 document.getElementById("nir-accepted-list")?.addEventListener("change", async event => {
+  const regulationDateInput = event.target.closest(".nir-regulation-date");
+  if (regulationDateInput) {
+    const saved = await saveNirRegulationDate(regulationDateInput.dataset.id, regulationDateInput.value);
+    if (!saved) {
+      const patient = nirAcceptedPatients.find(item => String(item.id) === String(regulationDateInput.dataset.id));
+      regulationDateInput.value = toDateTimeLocalValue(patient?.regulationAcceptedAt || "");
+    }
+    return;
+  }
   const channelButton = event.target.closest(".nir-channel-radio");
   if (!channelButton) return;
-  await markNirPatientUpdated(channelButton.dataset.id, getSelectedNirChannels(channelButton.dataset.id));
+  await markNirPatientUpdated(channelButton.dataset.id, channelButton.dataset.channel, channelButton.checked);
 });
 
 document.getElementById("nir-accepted-list")?.addEventListener("input", event => {
+  const specialtyInput = event.target.closest(".nir-specialty-input");
+  if (specialtyInput) {
+    const saveButton = specialtyInput.closest(".nir-support-cell")?.querySelector(".btn-save-nir-specialty");
+    if (saveButton) saveButton.disabled = specialtyInput.value.trim() === (specialtyInput.dataset.savedValue || "");
+    return;
+  }
   const sirelInput = event.target.closest(".nir-sirel-input");
   if (!sirelInput) return;
   sirelInput.value = String(sirelInput.value || "").replace(/\D/g, "").slice(0, 20);
-  scheduleNirSirelSave(sirelInput.dataset.id, sirelInput.value);
-});
-
-document.getElementById("nir-accepted-list")?.addEventListener("change", async event => {
-  const sirelInput = event.target.closest(".nir-sirel-input");
-  if (!sirelInput) return;
-  sirelInput.value = String(sirelInput.value || "").replace(/\D/g, "").slice(0, 20);
-  await saveNirSirelValue(sirelInput.dataset.id, sirelInput.value);
+  const saveButton = sirelInput.closest(".nir-support-cell")?.querySelector(".btn-save-nir-sirel");
+  if (saveButton) saveButton.disabled = sirelInput.value === sirelInput.dataset.savedValue;
 });
 
 document.getElementById("nir-previous-reports")?.addEventListener("click", event => {
   const button = event.target.closest(".btn-open-previous-nir-report");
   if (!button) return;
   openPreviousNirReport(button.dataset.reportId);
+});
+
+document.getElementById("btn-refresh-nir-shift-reports")?.addEventListener("click", loadNirShiftReports);
+document.getElementById("nir-shift-reports-list")?.addEventListener("click", async event => {
+  const viewButton = event.target.closest(".btn-view-nir-shift-report");
+  if (viewButton) {
+    beginNirHistoricalReportAction(viewButton.dataset.shiftId, "view");
+    return;
+  }
+  const downloadButton = event.target.closest(".btn-download-nir-shift-report");
+  if (downloadButton) beginNirHistoricalReportAction(downloadButton.dataset.shiftId, "download");
+});
+document.getElementById("btn-print-nir-shift-report")?.addEventListener("click", () => {
+  if (nirHistoricalShiftReport) printNirShiftReport(nirHistoricalShiftReport);
+});
+document.getElementById("nir-admin-password-form")?.addEventListener("submit", event => {
+  event.preventDefault();
+  void continueNirHistoricalReportAction(document.getElementById("nir-admin-password")?.value || "");
+});
+document.getElementById("btn-confirm-nir-admin-password")?.addEventListener("click", () => {
+  void continueNirHistoricalReportAction(document.getElementById("nir-admin-password")?.value || "");
+});
+document.getElementById("btn-cancel-nir-admin-password")?.addEventListener("click", () => {
+  nirPendingHistoricalReportAction = null;
+  document.getElementById("modal-nir-admin-password")?.close();
+});
+document.getElementById("modal-nir-admin-password")?.addEventListener("close", () => {
+  nirPendingHistoricalReportAction = null;
+  const passwordInput = document.getElementById("nir-admin-password");
+  if (passwordInput) passwordInput.value = "";
 });
 
 document.getElementById("patients-search")?.addEventListener("keydown", async event => {
@@ -8536,10 +11767,6 @@ document.getElementById("modal-nome")?.addEventListener("input", event => {
   toggleCreatePatientButton(false);
 });
 
-document.getElementById("modal-nome")?.addEventListener("blur", async () => {
-  await resolvePatientFromBedCpf({ openRegistryIfMissing: true });
-});
-
 document.getElementById("btn-modal-search-patient")?.addEventListener("click", async event => {
   event.preventDefault();
   await resolvePatientFromBedCpf({ openRegistryIfMissing: true });
@@ -8548,10 +11775,6 @@ document.getElementById("btn-modal-search-patient")?.addEventListener("click", a
 document.getElementById("btn-modal-create-patient")?.addEventListener("click", event => {
   event.preventDefault();
   openPatientRegistryFromBedCpf();
-});
-
-document.getElementById("admin-user-cpf")?.addEventListener("input", event => {
-  event.target.value = formatCpf(event.target.value);
 });
 
 document.getElementById("patient-registry-save")?.addEventListener("click", async event => {
@@ -8569,6 +11792,115 @@ document.getElementById("btn-save-nir-report")?.addEventListener("click", async 
   await saveNirReport();
 });
 
+document.getElementById("nir-census-month")?.addEventListener("change", async () => {
+  await loadNirCensusReports({ force: true });
+});
+document.getElementById("btn-nir-census-day-search")?.addEventListener("click", async () => {
+  const date = document.getElementById("nir-census-date")?.value || "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    const results = document.getElementById("nir-census-day-results");
+    if (results) results.textContent = "Selecione um dia válido para consultar o censo.";
+    return;
+  }
+  const monthInput = document.getElementById("nir-census-month");
+  if (monthInput) monthInput.value = date.slice(0, 7);
+  await loadNirCensusReports({ force: true });
+});
+document.getElementById("btn-send-census")?.addEventListener("click", sendCensusToNir);
+document.getElementById("nir-census-day-results")?.addEventListener("click", event => {
+  const button = event.target.closest(".btn-print-nir-census-day");
+  if (!button) return;
+  const report = nirCensusMonthReports.find(item =>
+    String(item.wardId) === button.dataset.wardId
+    && item.periodStartDate === button.dataset.date
+  );
+  if (report) printNirDailyCensus(report);
+});
+document.getElementById("shift-history-month")?.addEventListener("change", renderShiftHistory);
+
+document.getElementById("nir-tab-map")?.addEventListener("click", () => {
+  setNirViewTab("map");
+});
+
+document.getElementById("nir-tab-census")?.addEventListener("click", () => {
+  setNirViewTab("census");
+});
+
+document.getElementById("nir-tab-external")?.addEventListener("click", () => {
+  setNirViewTab("external");
+});
+
+document.getElementById("btn-add-nir-external-regulation")?.addEventListener("click", async () => {
+  if (!ensureNirShiftOpen()) return;
+  nirExternalRegulations.push({
+    id: `nir-ext-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    patient: "",
+    age: "",
+    specialty: "",
+    origin: "",
+    professional: "",
+    transferType: "",
+    regulator: "",
+    result: "",
+    startedAt: "",
+    endedAt: "",
+    closedAt: ""
+  });
+  renderNirExternalRegulations();
+  await saveNirExternalRegulations();
+});
+
+document.getElementById("nir-external-regulation-list")?.addEventListener("click", async event => {
+  const saveButton = event.target.closest(".btn-save-nir-external-regulation");
+  if (saveButton) {
+    if (await saveNirExternalRegulations()) {
+      saveButton.textContent = "Salvo";
+      window.setTimeout(() => {
+        if (saveButton.isConnected && !saveButton.disabled) saveButton.textContent = "Salvar";
+      }, 1500);
+    }
+    return;
+  }
+  const closeButton = event.target.closest(".btn-close-nir-external-regulation");
+  if (!closeButton || !ensureNirShiftOpen()) return;
+  const item = nirExternalRegulations.find(row => String(row.id) === String(closeButton.dataset.id));
+  if (!item) return;
+  if (!String(item.patient || "").trim()) {
+    setNirExternalRegulationFeedback("Informe o paciente antes de dar baixa.", true);
+    return;
+  }
+  const now = new Date().toISOString();
+  const previousEndedAt = item.endedAt;
+  item.closedAt = now;
+  if (!item.endedAt) item.endedAt = now;
+  renderNirExternalRegulations();
+  if (await saveNirExternalRegulations()) {
+    setNirExternalRegulationFeedback(`Regulação externa de ${item.patient} baixada e salva.`);
+  } else {
+    item.closedAt = "";
+    item.endedAt = previousEndedAt;
+    renderNirExternalRegulations();
+  }
+});
+
+document.getElementById("nir-external-regulation-list")?.addEventListener("input", event => {
+  const input = event.target.closest(".nir-external-regulation-input");
+  if (!input) return;
+  const item = nirExternalRegulations.find(row => String(row.id) === String(input.dataset.id));
+  if (!item) return;
+  item[input.dataset.field] = input.type === "datetime-local"
+    ? dateTimeLocalToIso(input.value)
+    : input.value;
+  const card = input.closest(".nir-external-regulation-card");
+  const duration = card?.querySelector(".nir-external-regulation-duration");
+  if (duration) duration.textContent = getNirExternalRegulationDuration(item);
+});
+
+document.getElementById("nir-external-regulation-list")?.addEventListener("change", async event => {
+  if (!event.target.closest(".nir-external-regulation-input")) return;
+  await saveNirExternalRegulations();
+});
+
 document.getElementById("btn-print-nir-report")?.addEventListener("click", event => {
   event.preventDefault();
   printNirReport();
@@ -8583,12 +11915,28 @@ document.getElementById("btn-save-user")?.addEventListener("click", async () => 
   await saveAdminUser();
 });
 
+document.getElementById("admin-user-cpf")?.addEventListener("input", event => {
+  event.target.value = formatCpf(event.target.value);
+});
+
 document.getElementById("btn-cancel-user-edit")?.addEventListener("click", () => {
   clearAdminUserForm();
   setAdminUsersFeedback("");
 });
 
 document.getElementById("admin-users-list")?.addEventListener("click", event => {
+  const resetPasswordButton = event.target.closest(".btn-admin-user-reset-password");
+  if (resetPasswordButton) {
+    const user = adminUsers.find(item => String(item.id) === String(resetPasswordButton.dataset.id));
+    if (!user || !window.confirm(`Redefinir a senha de ${user.nome || user.username} para 123456?`)) return;
+    api(`/api/users/${user.id}/password/reset`, { method: "POST" })
+      .then(async () => {
+        await loadAdminUsers();
+        setAdminUsersFeedback(`Senha de ${user.nome || user.username} redefinida. A pessoa deverá trocá-la ao entrar.`);
+      })
+      .catch(error => setAdminUsersFeedback(error.message || "Não foi possível redefinir a senha.", true));
+    return;
+  }
   const editButton = event.target.closest(".btn-admin-user-edit");
   if (!editButton) return;
   const user = adminUsers.find(item => String(item.id) === String(editButton.dataset.id));
@@ -8622,18 +11970,35 @@ document.getElementById("btn-back-to-sectors-inline")?.addEventListener("click",
   closeSidebarOnMobile();
 });
 
+document.getElementById("btn-global-shift-menu")?.addEventListener("click", openGlobalShiftDialog);
+document.getElementById("btn-close-global-shift")?.addEventListener("click", () => {
+  document.getElementById("modal-global-shift")?.close();
+});
+document.getElementById("btn-confirm-global-shift")?.addEventListener("click", () => {
+  void confirmGlobalShiftAction();
+});
 document.getElementById("btn-start-workshift")?.addEventListener("click", maybeOpenStartWardModal);
 
 document.getElementById("btn-assume-ward-shift")?.addEventListener("click", () => {
-  wardShiftPanelRequested = true;
-  syncWardShiftEntryState();
+  openAssumeWardShiftDialog();
   setShiftFeedback("");
+});
+document.getElementById("btn-cancel-assume-ward-shift")?.addEventListener("click", () => {
+  document.getElementById("modal-assume-ward-shift")?.close();
+});
+document.getElementById("btn-confirm-assume-ward-shift")?.addEventListener("click", confirmAssumeWardShift);
+document.getElementById("btn-request-assume-ward-shift-authorization")?.addEventListener("click", () => {
+  void requestShiftAuthorization({ fromAssumeDialog: true });
 });
 
 async function openShiftForSelectedWard(wardId, options = {}) {
   const { openTeamModal = true, feedbackMessage = "Plantão aberto com sucesso." } = options;
-  const shiftLength = normalizeShiftLength(document.getElementById("shift-length")?.value);
-  const shiftPeriod = normalizeShiftPeriod(document.getElementById("shift-period")?.value, shiftLength);
+  const shiftLength = getSelectedShiftLength("shift-length");
+  if (!shiftLength) {
+    setShiftFeedback("Selecione se o plantão será de 12H ou 24H para abrir o plantão.", true);
+    return false;
+  }
+  const shiftPeriod = getPsychologyAutoShiftPeriod(new Date(), shiftLength);
   if (!wardId) {
     setShiftFeedback("Selecione um setor para abrir o plantão.", true);
     return false;
@@ -8653,19 +12018,24 @@ async function openShiftForSelectedWard(wardId, options = {}) {
     if (openTeamModal) openShiftTeamModal();
     return true;
   } catch (error) {
-    setShiftFeedback(error.message || "Nao foi possivel abrir o plantao.", true);
+    const message = error.message || "Não foi possível abrir o plantão.";
+    setShiftFeedback(message, true, /já foi aberto por .* somente esse acesso/i.test(message));
     return false;
   }
 }
 
 async function openPsychologyShift() {
-  if (currentUser?.activeShift) {
-    const activeLabel = currentUser.activeShift.wardNome || "outro setor";
-    setPsychologyShiftFeedback(`Ja existe um plantao aberto em ${activeLabel}. Feche o plantao atual para abrir o da Psicologia.`, true);
+  if (selectActiveServiceShift("PSICOLOGIA")) {
+    renderPsychologyShiftPanel();
+    setPsychologyShiftFeedback("O plantão da Psicologia já estava aberto e foi carregado.");
     return false;
   }
 
-  const shiftLength = normalizeShiftLength(document.getElementById("psychology-shift-length")?.value);
+  const shiftLength = getSelectedShiftLength("psychology-shift-length");
+  if (!shiftLength) {
+    setPsychologyShiftFeedback("Selecione se o plantão será de 12H ou 24H para abrir o plantão da Psicologia.", true);
+    return false;
+  }
   const shiftPeriod = getPsychologyAutoShiftPeriod(new Date(), shiftLength);
 
   try {
@@ -8692,13 +12062,17 @@ async function openPsychologyShift() {
 }
 
 async function openSocialServiceShift() {
-  if (currentUser?.activeShift) {
-    const activeLabel = currentUser.activeShift.wardNome || "outro setor";
-    setSocialServiceShiftFeedback(`Ja existe um plantao aberto em ${activeLabel}. Feche o plantao atual para abrir o do Servico Social.`, true);
+  if (selectActiveServiceShift("SERVICO_SOCIAL")) {
+    renderSocialServiceShiftPanel();
+    setSocialServiceShiftFeedback("O plantão do Serviço Social já estava aberto e foi carregado.");
     return false;
   }
 
-  const shiftLength = normalizeShiftLength(document.getElementById("social-service-shift-length")?.value);
+  const shiftLength = getSelectedShiftLength("social-service-shift-length");
+  if (!shiftLength) {
+    setSocialServiceShiftFeedback("Selecione se o plantão será de 12H ou 24H para abrir o plantão do Serviço Social.", true);
+    return false;
+  }
   const shiftPeriod = getPsychologyAutoShiftPeriod(new Date(), shiftLength);
 
   try {
@@ -8737,6 +12111,7 @@ async function closeActiveShift(options = {}) {
     expectedServiceType = "",
     emptyMessage = "Não há plantão aberto para fechar.",
     mismatchMessage = "O plantão aberto neste acesso pertence a outra tela.",
+    keepCurrentView = false,
     feedback = setShiftFeedback
   } = options;
 
@@ -8772,50 +12147,79 @@ async function closeActiveShift(options = {}) {
     }
   }
 
-  const psychologyRows = psychologyMode ? buildPsychologyPrintRows(psychologyActivePatients) : [];
-  const socialServiceRows = socialServiceMode ? buildSocialServicePrintRows(portariaActivePatients.filter(hasServiceSocialRequest)) : [];
-  const nursingReport = String(document.getElementById("shift-nursing-report")?.value || "").trim();
+  const nirMode = normalizedExpectedServiceType === "NIR";
+  const censusSnapshot = !psychologyMode && !socialServiceMode && !nirMode ? readCensusSnapshot() : null;
+  const nursingReportInputId = nirMode ? "nir-shift-nursing-report" : "shift-nursing-report";
+  const nursingReport = String(document.getElementById(nursingReportInputId)?.value || "").trim();
+  const socialServiceReport = socialServiceMode ? {
+    pending: String(document.getElementById("social-service-report-pending")?.value || "").trim()
+  } : undefined;
   try {
     const res = await api("/api/shifts/close", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nursingReport, password })
+      body: JSON.stringify({
+        nursingReport,
+        socialServiceReport,
+        password,
+        census: censusSnapshot,
+        nirExternalRegulations: nirMode ? nirExternalRegulations : []
+      })
     });
     currentUser = res.user || currentUser;
+    if (psychologyMode || normalizedExpectedServiceType === "PSICOLOGIA") {
+      await loadPsychologyMonthlyAttendances({ silent: true });
+    }
+    if (!psychologyMode && !socialServiceMode && !nirMode && currentWardId) {
+      selectActiveWardShift(currentWardId);
+    }
     if (socialServiceMode) {
       try {
-        const refreshedQueue = await buildServiceSocialQueueFromWards(wards);
-        portariaActivePatients = refreshedQueue;
-        renderPortariaSocialList(refreshedQueue);
+        await refreshSocialServiceQueueView();
         await loadSocialServiceAttendances({ silent: true });
       } catch {}
     }
+    const serverSocialServiceRows = Array.isArray(res.report?.socialServiceRows) ? res.report.socialServiceRows : [];
+    const serverManualAttendances = Array.isArray(res.report?.socialServiceManualAttendances)
+      ? res.report.socialServiceManualAttendances
+      : [];
     lastClosedReport = res.report ? {
       ...res.report,
-      printMode: psychologyMode ? "psychology" : (socialServiceMode ? "social_service" : "default"),
-      psychologyRows,
-      socialServiceRows: (res.report?.socialServiceRows || []).length ? res.report.socialServiceRows : socialServiceRows
+      printMode: nirMode ? "nir" : (psychologyMode ? "psychology" : (socialServiceMode ? "social_service" : "default")),
+      psychologyRows: Array.isArray(res.report?.psychologyRows) ? res.report.psychologyRows : [],
+      census: censusSnapshot,
+      socialServiceRows: serverSocialServiceRows,
+      socialServiceActivePatients: res.report?.socialServiceActivePatients || [],
+      socialServiceManualAttendances: serverManualAttendances
     } : null;
-    if (!psychologyMode && !socialServiceMode) {
+    if (!psychologyMode && !socialServiceMode && !nirMode) {
       wardShiftPanelRequested = false;
     }
     renderCurrentUser();
-    feedback(
-      psychologyMode
-        ? "Plantão da Psicologia fechado. Abrindo ficha para impressão."
-        : (socialServiceMode
-            ? "Plantão do Serviço Social fechado. As observações da fila foram limpas e o histórico ficou salvo."
-            : "Plantão fechado e evoluções salvas. Abrindo ficha para impressão.")
-    );
-    if (lastClosedReport?.printMode === "psychology") {
-      printPsychologyShiftReport(lastClosedReport);
-    } else if (lastClosedReport?.printMode === "social_service") {
-      printSocialServiceShiftReport(lastClosedReport);
+    if (keepCurrentView) {
+      feedback("Plantão NIR encerrado. A ficha será aberta para impressão.");
+      syncNirShiftControl();
+      if (lastClosedReport) printShiftReport(lastClosedReport);
     } else {
-      printShiftReport(lastClosedReport);
+      feedback(
+        psychologyMode
+          ? "Plantão da Psicologia fechado. Abrindo ficha para impressão."
+          : (socialServiceMode
+              ? "Plantão do Serviço Social fechado. As observações da fila foram limpas e o histórico ficou salvo."
+              : "Plantão fechado e evoluções salvas. Abrindo ficha para impressão.")
+      );
+      if (lastClosedReport?.printMode === "psychology") {
+        printPsychologyShiftReport(lastClosedReport);
+      } else if (lastClosedReport?.printMode === "social_service") {
+        printSocialServiceShiftReport(lastClosedReport);
+      } else if (lastClosedReport?.printMode === "nir") {
+        printNirShiftReport(lastClosedReport);
+      } else {
+        printShiftReport(lastClosedReport);
+      }
+      setAppEnabled(false);
+      showOnly("view-home");
     }
-    setAppEnabled(false);
-    showOnly("view-home");
   } catch (error) {
     feedback(error.message || "Nao foi possivel fechar o plantao.", true);
   }
@@ -8861,12 +12265,16 @@ function requestShiftClosePassword() {
   });
 }
 
-async function saveShiftNursingReport() {
+async function saveShiftNursingReport(options = {}) {
+  const {
+    inputId = "shift-nursing-report",
+    feedback = setShiftFeedback
+  } = options;
   if (!currentUser?.activeShift) {
-    setShiftFeedback("Abra o plantão antes de salvar o relatório de enfermagem.", true);
+    feedback("Abra o plantão antes de salvar o relatório de enfermagem.", true);
     return;
   }
-  const nursingReport = String(document.getElementById("shift-nursing-report")?.value || "").trim();
+  const nursingReport = String(document.getElementById(inputId)?.value || "").trim();
   try {
     const res = await api("/api/shifts/nursing-report", {
       method: "PATCH",
@@ -8875,9 +12283,10 @@ async function saveShiftNursingReport() {
     });
     currentUser = res.user || currentUser;
     renderCurrentUser();
-    setShiftFeedback("Relatório de enfermagem salvo neste plantão.");
+    if (inputId === "nir-shift-nursing-report") syncNirShiftControl();
+    feedback("Relatório de enfermagem salvo neste plantão.");
   } catch (error) {
-    setShiftFeedback(error.message || "Nao foi possivel salvar o relatório de enfermagem.", true);
+    feedback(error.message || "Nao foi possivel salvar o relatório de enfermagem.", true);
   }
 }
 
@@ -8891,6 +12300,8 @@ function reprintLastShiftReport(feedback = setShiftFeedback) {
     printPsychologyShiftReport(lastClosedReport);
   } else if (lastClosedReport?.printMode === "social_service") {
     printSocialServiceShiftReport(lastClosedReport);
+  } else if (lastClosedReport?.printMode === "nir") {
+    printNirShiftReport(lastClosedReport);
   } else {
     printShiftReport(lastClosedReport);
   }
@@ -8926,9 +12337,14 @@ document.getElementById("btn-confirm-start-ward")?.addEventListener("click", asy
   const modal = document.getElementById("modal-start-ward");
   const button = event.currentTarget;
   const serviceType = document.getElementById("modal-start-service-select")?.value || "ward";
-  const shiftLength = normalizeShiftLength(document.getElementById("modal-start-shift-length")?.value);
+  const shiftLength = getSelectedShiftLength("modal-start-shift-length");
   let opened = false;
   let failureMessage = "Não foi possível abrir o plantão. Confira os dados e tente novamente.";
+
+  if (!shiftLength) {
+    setStartupShiftFeedback("Selecione se o plantão será de 12 ou 24 horas.", true);
+    return;
+  }
 
   if (serviceType === "ward") {
     const wardId = parseInt(document.getElementById("modal-start-ward-select")?.value, 10);
@@ -8936,16 +12352,10 @@ document.getElementById("btn-confirm-start-ward")?.addEventListener("click", asy
       setStartupShiftFeedback("Selecione o setor onde você vai trabalhar.", true);
       return;
     }
-    const shiftPeriod = normalizeShiftPeriod(
-      document.getElementById("modal-start-shift-period")?.value,
-      shiftLength
-    );
     const wardField = document.getElementById("shift-ward");
     const wardLength = document.getElementById("shift-length");
-    const wardPeriod = document.getElementById("shift-period");
     if (wardField) wardField.value = String(wardId);
     if (wardLength) wardLength.value = shiftLength;
-    if (wardPeriod) wardPeriod.value = shiftPeriod;
   } else if (serviceType === "PSICOLOGIA") {
     const lengthField = document.getElementById("psychology-shift-length");
     if (lengthField) lengthField.value = shiftLength;
@@ -8990,11 +12400,26 @@ document.getElementById("btn-confirm-start-ward")?.addEventListener("click", asy
 });
 
 document.getElementById("shift-length")?.addEventListener("change", syncShiftFormVisibility);
-document.getElementById("shift-period")?.addEventListener("change", syncShiftFormVisibility);
 document.getElementById("psychology-shift-length")?.addEventListener("change", syncPsychologyShiftFormVisibility);
 document.getElementById("social-service-shift-length")?.addEventListener("change", syncSocialServiceShiftFormVisibility);
 document.getElementById("btn-open-psychology-shift")?.addEventListener("click", openPsychologyShift);
 document.getElementById("btn-open-social-service-shift")?.addEventListener("click", openSocialServiceShift);
+document.getElementById("btn-save-social-service-report")?.addEventListener("click", async () => {
+  selectActiveServiceShift("SERVICO_SOCIAL");
+  await saveSocialServiceShiftReport();
+});
+for (const fieldId of [
+  "social-service-report-pending"
+]) {
+  document.getElementById(fieldId)?.addEventListener("input", event => {
+    const shift = selectActiveServiceShift("SERVICO_SOCIAL");
+    if (!shift) return;
+    if (!shift.socialServiceReport || typeof shift.socialServiceReport !== "object") {
+      shift.socialServiceReport = {};
+    }
+    shift.socialServiceReport.pending = String(event.target.value || "");
+  });
+}
 
 document.getElementById("btn-close-shift")?.addEventListener("click", async () => {
   await closeActiveShift({
@@ -9003,9 +12428,6 @@ document.getElementById("btn-close-shift")?.addEventListener("click", async () =
   });
 });
 
-document.getElementById("btn-print-last-shift")?.addEventListener("click", () => {
-  reprintLastShiftReport(setShiftFeedback);
-});
 document.getElementById("btn-print-last-psychology-shift")?.addEventListener("click", () => {
   reprintLastShiftReport(setPsychologyShiftFeedback);
 });
@@ -9016,6 +12438,7 @@ document.getElementById("btn-print-social-service-sector")?.addEventListener("cl
   printSocialServiceSectorReport(portariaActivePatients.filter(hasServiceSocialRequest));
 });
 document.getElementById("btn-close-psychology-shift")?.addEventListener("click", async () => {
+  selectActiveServiceShift("PSICOLOGIA");
   await closeActiveShift({
     psychologyMode: true,
     expectedServiceType: "PSICOLOGIA",
@@ -9025,6 +12448,7 @@ document.getElementById("btn-close-psychology-shift")?.addEventListener("click",
   });
 });
 document.getElementById("btn-close-social-service-shift")?.addEventListener("click", async () => {
+  selectActiveServiceShift("SERVICO_SOCIAL");
   await closeActiveShift({
     psychologyMode: false,
     socialServiceMode: true,

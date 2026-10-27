@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Controle de Leitos - Posto 2</title>
-  <link rel="stylesheet" href="/styles.css?v=20261008-7">
+  <link rel="stylesheet" href="/styles.css?v=20261026-09">
 </head>
 <body>
   <div class="app-shell">
@@ -16,11 +16,6 @@
         <button id="btn-sidebar-toggle" type="button" class="sidebar-toggle" aria-label="Recuar menu lateral" title="Recuar menu lateral">
           <span class="sidebar-toggle-icon" aria-hidden="true">←</span>
         </button>
-      </div>
-
-      <div class="sidebar-badge-strip">
-        <span class="sidebar-badge">Controle de Leitos</span>
-        <span class="sidebar-badge subtle">Banco central Supabase</span>
       </div>
 
       <nav class="sidebar-nav">
@@ -58,23 +53,15 @@
           <span class="sidebar-btn-short" aria-hidden="true">N</span>
           <span class="sidebar-btn-label">NIR</span>
         </button>
+        <button id="nav-my-shifts" data-work-area="general" class="nav-btn ghost sidebar-btn">
+          <span class="sidebar-btn-short" aria-hidden="true">MP</span>
+          <span class="sidebar-btn-label">Meus plantões</span>
+        </button>
         <button id="nav-gerenciar" data-work-area="admin" class="nav-btn ghost sidebar-btn">
           <span class="sidebar-btn-short" aria-hidden="true">C</span>
           <span class="sidebar-btn-label">Cadastro</span>
         </button>
       </nav>
-
-      <section class="sidebar-card">
-        <div class="sidebar-card-title">Acesso rápido</div>
-        <label>Setor
-          <select id="topbar-ward-select"></select>
-        </label>
-        <label>Enfermaria
-          <select id="topbar-enf-select">
-            <option value="">Todas</option>
-          </select>
-        </label>
-      </section>
 
       <button id="btn-logout-top" class="nav-btn danger sidebar-logout">
         <span class="sidebar-btn-short" aria-hidden="true">↗</span>
@@ -85,18 +72,48 @@
     <div class="content-shell">
       <div class="layout-grid">
         <main class="container">
-    <section id="view-login" class="panel hidden">
-      <h2>Login</h2>
-      <div class="row">
-        <label>Usuário <input id="login-username" autocomplete="username"></label>
-        <label>Senha <input id="login-password" type="password" autocomplete="current-password"></label>
-        <button id="btn-login" type="button">Entrar</button>
+    <header id="app-shift-toolbar" class="app-shift-toolbar hidden">
+      <div class="app-shift-toolbar-status">
+        <span class="app-shift-toolbar-kicker">CONTROLE DE PLANTÃO</span>
+        <strong id="global-shift-status">Plantão fechado</strong>
+        <span id="global-shift-context">Selecione sua área para abrir um plantão.</span>
       </div>
-      <div class="hint">Padrão: admin / admin</div>
+      <div id="ward-detail-toolbar" class="app-shift-toolbar-ward hidden">
+        <span class="app-shift-toolbar-kicker">SETOR</span>
+        <strong id="ward-detail-title">Setor</strong>
+      </div>
+      <button id="btn-back-to-sectors" type="button" class="ghost hidden">Voltar para setores</button>
+      <button id="btn-global-shift-menu" type="button">Abrir controle do plantão</button>
+    </header>
+    <section id="view-login" class="panel hidden">
+      <div class="login-heading">
+        <img class="login-logo" src="/logo-hma.webp" alt="Hospital Municipal de Açailândia">
+        <span class="login-eyebrow">CONTROLE DE LEITOS</span>
+        <h2>Acesse sua conta</h2>
+        <p>Entre com seus dados para continuar no sistema.</p>
+      </div>
+      <div class="row login-form">
+        <label for="login-username">Usuário
+          <input id="login-username" autocomplete="username" placeholder="Digite seu usuário">
+        </label>
+        <label for="login-password">Senha
+          <input id="login-password" type="password" autocomplete="current-password" placeholder="Digite sua senha">
+        </label>
+        <button id="btn-login" type="button">Entrar no sistema</button>
+      </div>
+      <div class="hint login-hint">Acesso inicial de novos usuários: senha 123456. O sistema solicitará a troca no primeiro acesso.</div>
       <div id="login-feedback" class="hint error-text hidden" role="alert"></div>
     </section>
 
     <section id="view-dashboard" class="panel hidden">
+      <div class="dashboard-welcome">
+        <div>
+          <span class="dashboard-welcome-eyebrow">CONTROLE HOSPITALAR</span>
+          <h1>Bem-vindo(a), <span id="dashboard-user-name">profissional</span></h1>
+          <p id="dashboard-user-role">Acompanhamento diário dos indicadores assistenciais.</p>
+        </div>
+        <div class="dashboard-welcome-mark" aria-hidden="true">HMA</div>
+      </div>
       <h2>Dashboard Hospitalar</h2>
       <div class="row">
         <label>Setor
@@ -124,11 +141,51 @@
         <div class="dashboard-card"><span>Média permanência</span><strong id="dash-permanencia">0 dias</strong></div>
         <div class="dashboard-card"><span>Taxa de ocupação</span><strong id="dash-ocupacao">0%</strong></div>
         <div class="dashboard-card"><span>Taxa de bloqueio</span><strong id="dash-bloqueio">0%</strong></div>
-        <div class="dashboard-card"><span>Altas acumuladas</span><strong id="dash-altas">0</strong></div>
-        <div class="dashboard-card"><span>Óbitos acumulados</span><strong id="dash-obitos">0</strong></div>
+        <div class="dashboard-card"><span>Altas no período</span><strong id="dash-altas">0</strong></div>
+        <div class="dashboard-card"><span>Óbitos no período</span><strong id="dash-obitos">0</strong></div>
         <div class="dashboard-card"><span>Taxa de rotatividade</span><strong id="dash-rotatividade">0%</strong></div>
         <div class="dashboard-card"><span>Taxa de evasão</span><strong id="dash-evasao">0%</strong></div>
       </div>
+      <section class="dashboard-service-section">
+        <h3>Atendimentos e produção dos serviços</h3>
+        <div class="dashboard-service-grid">
+          <article class="dashboard-service-card">
+            <h4>NIR</h4>
+            <div class="dashboard-service-metric">
+              <span>Atendimentos em acompanhamento</span>
+              <strong id="dash-nir-attendances">0</strong>
+            </div>
+            <div class="dashboard-service-production">
+              <span>Produção no período</span>
+              <div><span>Censos diários</span><strong id="dash-nir-census">0</strong></div>
+              <div><span>Pacientes aceitos</span><strong id="dash-nir-accepted">0</strong></div>
+              <div><span>Regulações externas</span><strong id="dash-nir-external">0</strong></div>
+            </div>
+          </article>
+          <article class="dashboard-service-card">
+            <h4>Serviço Social</h4>
+            <div class="dashboard-service-metric">
+              <span>Atendimentos ativos</span>
+              <strong id="dash-social-attendances">0</strong>
+            </div>
+            <div class="dashboard-service-metric is-production">
+              <span>Produção no período</span>
+              <strong id="dash-social-production">0</strong>
+            </div>
+          </article>
+          <article class="dashboard-service-card">
+            <h4>Psicologia</h4>
+            <div class="dashboard-service-metric">
+              <span>Atendimentos ativos</span>
+              <strong id="dash-psychology-attendances">0</strong>
+            </div>
+            <div class="dashboard-service-metric is-production">
+              <span>Produção no período</span>
+              <strong id="dash-psychology-production">0</strong>
+            </div>
+          </article>
+        </div>
+      </section>
       <div class="dashboard-chart-grid">
         <div class="chart-card">
           <div class="chart-title">Tipos de patologia</div>
@@ -148,8 +205,17 @@
         </div>
       </div>
     </section>
-
     <section id="view-home" class="panel hidden">
+      <section id="coordinator-shift-authorization-section" class="history-panel hidden">
+        <div class="procedimentos-title">Autorizações para abertura de plantão</div>
+        <div class="history-hint">Analise os pedidos de abertura em setores com plantão já assumido.</div>
+        <div class="row">
+          <button id="btn-refresh-shift-authorization-requests" type="button" class="ghost">Atualizar solicitações</button>
+        </div>
+        <div id="shift-authorization-queue-feedback" class="hint hidden" aria-live="polite"></div>
+        <div id="shift-authorization-queue-empty" class="hint hidden">Nenhuma solicitação pendente.</div>
+        <div id="shift-authorization-queue" class="shift-history-list"></div>
+      </section>
       <div id="workshift-start-card" class="workshift-start-card hidden">
         <div>
           <div class="procedimentos-title">Comece pelo plantão</div>
@@ -169,9 +235,28 @@
         </div>
         <div id="header-ward-tabs" class="hero-tabs home-ward-grid"></div>
       </div>
+      <div id="home-ward-management-slot"></div>
       <div class="row" style="justify-content: flex-end;">
-        <button id="btn-gerenciar" class="ghost">Gerenciar</button>
+        <button id="btn-gerenciar" class="ghost">Controle dos leitos</button>
       </div>
+    </section>
+
+    <section id="view-my-shifts" class="panel hidden">
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <div>
+          <h2 id="shift-history-title">Meus plantões</h2>
+          <div id="shift-history-hint" class="history-hint">Pesquise seus plantões por mês, consulte o resumo e reimprima uma ficha anterior.</div>
+        </div>
+        <button id="btn-refresh-my-shifts" type="button" class="ghost">Atualizar</button>
+      </div>
+      <div class="shift-history-filters">
+        <label>Mês do plantão
+          <input id="shift-history-month" type="month">
+        </label>
+        <div id="shift-history-count" class="history-hint" aria-live="polite"></div>
+      </div>
+      <div id="my-shifts-feedback" class="hint hidden" aria-live="polite"></div>
+      <div id="shift-history-list" class="shift-history-list"></div>
     </section>
 
     <section id="view-psychology" class="panel hidden">
@@ -187,7 +272,8 @@
               <input id="psychology-shift-date" type="date" readonly>
             </label>
             <label>Tipo do plantão
-              <select id="psychology-shift-length">
+              <select id="psychology-shift-length" required>
+                <option value="" selected disabled>Selecione 12H ou 24H</option>
                 <option value="12H">12H</option>
                 <option value="24H">24H</option>
               </select>
@@ -204,19 +290,42 @@
       <div class="hint">Aqui aparecem as solicitações para atendimento da Psicologia, inclusive solicitações avulsas.</div>
       <div id="psychology-feedback" class="hint hidden"></div>
       <div class="hero-tabs psychology-view-tabs">
-        <button id="btn-psychology-tab-queue" type="button" class="hero-tab active">Solicitações</button>
-        <button id="btn-psychology-tab-monthly" type="button" class="hero-tab">Atendimentos do mês</button>
+        <button id="btn-psychology-tab-queue" type="button" class="hero-tab active">Atendimentos</button>
+        <button id="btn-psychology-tab-monthly" type="button" class="hero-tab">Produção</button>
+        <button id="btn-psychology-tab-bpa" type="button" class="hero-tab">BPA-I</button>
       </div>
       <section id="psychology-tab-queue-panel" class="psychology-tab-panel">
+        <section class="social-service-manual-entry psychology-manual-entry">
+          <div>
+            <div class="procedimentos-title">Solicitação avulsa</div>
+            <div class="history-hint">Cadastre pacientes avulsos, acompanhantes, familiares ou atendimentos relacionados a óbito. Cada registro aparecerá como uma linha na planilha abaixo para acompanhamento e baixa.</div>
+          </div>
+          <div class="social-service-manual-entry-fields psychology-manual-entry-fields">
+            <label>Nome completo
+              <input id="psychology-manual-patient-name" type="text" maxlength="180" placeholder="Nome completo">
+            </label>
+            <label>Data de nascimento
+              <input id="psychology-manual-birth-date" type="date">
+            </label>
+            <label>Setor ou motivo
+              <input id="psychology-manual-sector-reason" type="text" maxlength="180" placeholder="Ex.: UTI, orientação, avaliação">
+            </label>
+            <label>Observação inicial
+              <input id="psychology-manual-notes" type="text" maxlength="1000" placeholder="Opcional">
+            </label>
+            <button id="btn-save-psychology-manual" type="button">Adicionar solicitação avulsa</button>
+          </div>
+          <div id="psychology-manual-feedback" class="hint hidden" aria-live="polite"></div>
+        </section>
         <section class="psychology-shell">
           <div class="psychology-header">
             <div>
-              <div class="procedimentos-title">Solicitações da Psicologia</div>
+              <div class="procedimentos-title">Atendimentos da Psicologia</div>
               <div class="history-hint">Pacientes solicitados na tela de leitos, com setor, leito, idade e data de admissão.</div>
             </div>
-            <div id="psychology-count" class="portaria-registry-count">0 internados</div>
+            <div id="psychology-count" class="portaria-registry-count">0 atendimentos</div>
           </div>
-          <div id="psychology-empty" class="hint hidden">Nenhuma solicitação para a Psicologia no momento.</div>
+          <div id="psychology-empty" class="hint hidden">Nenhum atendimento da Psicologia no momento.</div>
           <div class="psychology-table-wrap">
             <table class="psychology-table">
               <thead>
@@ -237,64 +346,17 @@
             </table>
           </div>
         </section>
-        <section class="psychology-shell psychology-recent-shell">
-          <div class="psychology-header">
-            <div>
-              <div class="procedimentos-title">Atendimentos registrados</div>
-              <div class="history-hint">Lista geral dos atendimentos já salvos na Psicologia, com quem atendeu em destaque.</div>
-            </div>
-            <div id="psychology-recent-count" class="portaria-registry-count">0 atendimentos</div>
-          </div>
-          <div id="psychology-recent-empty" class="hint hidden">Nenhum atendimento registrado na Psicologia ainda.</div>
-          <div class="psychology-table-wrap">
-            <table class="psychology-table psychology-monthly-table">
-              <thead>
-                <tr>
-                  <th>Profissional</th>
-                  <th>Data</th>
-                  <th>Setor</th>
-                  <th>Leito</th>
-                  <th>Paciente</th>
-                  <th>Status</th>
-                  <th>Intervenções</th>
-                  <th>Observações</th>
-                </tr>
-              </thead>
-              <tbody id="psychology-recent-list"></tbody>
-            </table>
-          </div>
-        </section>
         <section class="portaria-visitor-panel psychology-manual-panel">
           <div class="portaria-visitor-shell">
             <div class="portaria-visitor-header">
               <div>
-                <div class="procedimentos-title">Solicitações avulsas</div>
-                <div class="history-hint">Cadastre solicitações manuais da Psicologia que não vieram da tela de leitos.</div>
+                <div class="procedimentos-title">Registros recentes de solicitações avulsas</div>
+                <div class="history-hint">As solicitações avulsas mais novas aparecem primeiro.</div>
               </div>
               <div id="psychology-manual-count" class="portaria-registry-count">0 registros</div>
             </div>
-            <div class="portaria-visitor-layout">
-              <section class="portaria-visitor-form-card">
-                <div class="portaria-visitor-card-title">Nova solicitação</div>
-                <div class="portaria-visitor-form-grid psychology-manual-form-grid">
-                  <label>Nome da pessoa ou paciente <input id="psychology-manual-patient-name" placeholder="Digite o nome"></label>
-                  <label>Setor ou motivo <input id="psychology-manual-sector-reason" placeholder="Ex: UTI, enfermaria, avaliação"></label>
-                  <label class="portaria-visitor-field-wide">Observação
-                    <textarea id="psychology-manual-notes" rows="3" placeholder="Descreva a solicitação avulsa"></textarea>
-                  </label>
-                </div>
-                <div class="portaria-visitor-actions">
-                  <button id="btn-save-psychology-manual" type="button">Cadastrar solicitação</button>
-                </div>
-                <div id="psychology-manual-feedback" class="hint hidden"></div>
-              </section>
-              <section class="portaria-visitor-history-card">
-                <div class="portaria-visitor-card-title">Registros recentes</div>
-                <div class="history-hint">As solicitações avulsas mais novas aparecem primeiro.</div>
-                <div id="psychology-manual-empty" class="hint hidden">Nenhuma solicitação avulsa cadastrada.</div>
-                <div id="psychology-manual-list" class="history-list"></div>
-              </section>
-            </div>
+            <div id="psychology-manual-empty" class="hint hidden">Nenhuma solicitação avulsa cadastrada.</div>
+            <div id="psychology-manual-list" class="history-list"></div>
           </div>
         </section>
       </section>
@@ -302,8 +364,8 @@
         <section class="psychology-shell psychology-monthly-shell">
           <div class="psychology-header">
             <div>
-              <div class="procedimentos-title">Atendimentos do mês</div>
-              <div class="history-hint">Conferência mensal de todos os atendimentos registrados pela Psicologia.</div>
+              <div class="procedimentos-title">Produção</div>
+              <div class="history-hint">Atendimentos da Psicologia registrados durante os plantões e baixas realizadas.</div>
             </div>
             <div id="psychology-monthly-count" class="portaria-registry-count">0 atendimentos</div>
           </div>
@@ -314,7 +376,7 @@
             <button id="btn-refresh-psychology-monthly" type="button" class="ghost">Atualizar</button>
           </div>
           <div id="psychology-monthly-feedback" class="hint hidden"></div>
-          <div id="psychology-monthly-empty" class="hint hidden">Nenhum atendimento da Psicologia encontrado neste mês.</div>
+          <div id="psychology-monthly-empty" class="hint hidden">Nenhuma produção da Psicologia encontrada neste mês.</div>
           <div class="psychology-table-wrap">
             <table class="psychology-table psychology-monthly-table">
               <thead>
@@ -327,11 +389,63 @@
                   <th>Status</th>
                   <th>Intervenções</th>
                   <th>Observações</th>
+                  <th>Ações</th>
                 </tr>
               </thead>
               <tbody id="psychology-monthly-list"></tbody>
             </table>
           </div>
+        </section>
+      </section>
+      <section id="psychology-tab-bpa-panel" class="psychology-tab-panel hidden">
+        <section class="bpa-report-shell psychology-shell" id="psychology-bpa-panel">
+          <div class="bpa-report-header">
+            <div class="bpa-hospital-mark">HMA</div>
+            <div>
+              <h2>Boletim de Produção Ambulatorial — BPA-I</h2>
+              <div class="bpa-report-subtitle">Atendimentos psicológicos (03.01.01.004-8)</div>
+            </div>
+          </div>
+          <div class="row bpa-toolbar">
+            <label>Mês de referência
+              <input id="bpa-i-month" type="month">
+            </label>
+            <button id="btn-refresh-bpa-i" type="button" class="ghost">Atualizar relatório</button>
+            <button id="btn-print-bpa-i" type="button">Imprimir / Salvar PDF</button>
+          </div>
+          <div id="bpa-i-feedback" class="hint hidden" aria-live="polite"></div>
+          <section class="bpa-paper">
+            <div class="bpa-unit-details">
+              <div><strong>UNIDADE:</strong> HOSPITAL MUNICIPAL DE AÇAILÂNDIA — HMA</div>
+              <div><strong>ESPECIALIDADE:</strong> PSICOLOGIA</div>
+              <div><strong>CNES:</strong> 2463016</div>
+              <div><strong>MÊS/ANO:</strong> <span id="bpa-i-period">-</span></div>
+            </div>
+            <div class="bpa-table-caption">ATENDIMENTOS</div>
+            <div class="psychology-table-wrap bpa-table-wrap">
+              <table class="bpa-table">
+                <thead>
+                  <tr>
+                    <th>PROCEDIMENTOS</th>
+                    <th>CBO</th>
+                    <th>IDADE</th>
+                    <th>QUANTIDADE</th>
+                  </tr>
+                </thead>
+                <tbody id="bpa-i-rows"></tbody>
+                <tfoot>
+                  <tr>
+                    <th colspan="3">ATENDIMENTOS PSICOLÓGICOS</th>
+                    <th id="bpa-i-action-total">0</th>
+                  </tr>
+                  <tr>
+                    <th colspan="3">TOTAL</th>
+                    <th id="bpa-i-total">0</th>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </section>
         </section>
       </section>
     </section>
@@ -378,7 +492,8 @@
               <input id="social-service-shift-date" type="date" readonly>
             </label>
             <label>Tipo do plantão
-              <select id="social-service-shift-length">
+              <select id="social-service-shift-length" required>
+                <option value="" selected disabled>Selecione 12H ou 24H</option>
                 <option value="12H">12H</option>
                 <option value="24H">24H</option>
               </select>
@@ -391,27 +506,66 @@
             <button id="btn-print-social-service-sector" type="button" class="ghost">Imprimir relatório do setor</button>
           </div>
           <div id="social-service-shift-feedback" class="hint hidden"></div>
+          <section class="social-service-shift-report">
+            <h3>Relatório de Serviço Social do plantão</h3>
+            <p>Registre as pendências. Os atendimentos avulsos, a lista ativa de pacientes internados e as atualizações de fichas sociais serão incluídos no fechamento.</p>
+            <div class="social-service-shift-report-grid">
+              <label>Pendências
+                <textarea id="social-service-report-pending" rows="3" placeholder="Registre as pendências para acompanhamento."></textarea>
+              </label>
+            </div>
+            <div class="modal-actions" style="justify-content: flex-start;">
+              <button id="btn-save-social-service-report" type="button" class="ghost">Salvar relatório do Serviço Social</button>
+            </div>
+          </section>
         </div>
       </section>
       <div class="hint">Acompanhe apenas os pacientes com solicitação para o Serviço Social.</div>
       <div id="social-service-feedback" class="hint hidden"></div>
       <div class="hero-tabs psychology-view-tabs social-service-view-tabs">
-        <button id="btn-social-service-tab-queue" type="button" class="hero-tab active">Fila ativa</button>
-        <button id="btn-social-service-tab-history" type="button" class="hero-tab">Histórico de observações</button>
-        <button id="btn-social-service-tab-age" type="button" class="hero-tab">Atendimentos por idade</button>
+        <button id="btn-social-service-tab-queue" type="button" class="hero-tab active">Atendimentos</button>
+        <button id="btn-social-service-tab-history" type="button" class="hero-tab">Produção</button>
+        <button id="btn-social-service-tab-age" type="button" class="hero-tab">BPA-C</button>
       </div>
       <div id="social-service-tab-queue-panel" class="psychology-tab-panel">
+        <section class="social-service-manual-entry">
+          <div>
+            <div class="procedimentos-title">Solicitação avulsa</div>
+            <div class="history-hint">Use para atendimentos que não vieram de uma solicitação pelo leito. Pacientes solicitados pelo leito continuam aparecendo na fila abaixo.</div>
+          </div>
+          <div class="social-service-manual-entry-fields">
+            <label hidden>Tipo de atendimento
+              <select id="social-service-manual-category">
+                <option value="AVULSO" selected>Paciente avulso</option>
+              </select>
+            </label>
+            <label>Nome completo
+              <input id="social-service-manual-name" type="text" maxlength="180" placeholder="Nome completo">
+            </label>
+            <label>Data de nascimento
+              <input id="social-service-manual-birth-date" type="date">
+            </label>
+            <label>Setor ou motivo
+              <input id="social-service-manual-reason" type="text" maxlength="180" placeholder="Ex.: UTI, enfermaria ou motivo do atendimento">
+            </label>
+            <label>Observação inicial
+              <input id="social-service-manual-notes" type="text" maxlength="1000" placeholder="Opcional">
+            </label>
+            <button id="btn-save-social-service-manual" type="button">Adicionar solicitação avulsa</button>
+          </div>
+          <div id="social-service-manual-feedback" class="hint hidden" aria-live="polite"></div>
+        </section>
         <section class="portaria-social-panel">
           <div class="portaria-social-shell">
             <div class="portaria-social-header">
               <div>
-                <div class="procedimentos-title">Serviço Social</div>
-                <div class="history-hint">Lista dos pacientes internados com solicitação ativa para o Serviço Social.</div>
+                <div class="procedimentos-title">Atendimentos do Serviço Social</div>
+                <div class="history-hint">Solicitações pelo leito e solicitações avulsas ativas do Serviço Social.</div>
               </div>
-              <div id="portaria-social-count" class="portaria-registry-count">0 internados</div>
+              <div id="portaria-social-count" class="portaria-registry-count">0 atendimentos</div>
             </div>
             <div id="portaria-social-feedback" class="hint hidden"></div>
-            <div id="portaria-social-empty" class="hint hidden">Nenhuma solicitação para o Serviço Social no momento.</div>
+            <div id="portaria-social-empty" class="hint hidden">Nenhum atendimento do Serviço Social no momento.</div>
             <div class="social-service-table-wrap">
               <table class="social-service-table">
                 <thead>
@@ -421,6 +575,7 @@
                     <th>Idade</th>
                     <th>Contatos</th>
                     <th>Admissão</th>
+                    <th>Status</th>
                     <th>Ficha social</th>
                     <th>Observação</th>
                   </tr>
@@ -435,8 +590,8 @@
         <section class="psychology-shell social-service-history-shell">
           <div class="psychology-header">
             <div>
-              <div class="procedimentos-title">Histórico de observações</div>
-              <div class="history-hint">Aqui ficam as observações e baixas fechadas em plantões anteriores, inclusive de outros assistentes sociais.</div>
+              <div class="procedimentos-title">Produção</div>
+              <div class="history-hint">Aqui ficam os atendimentos registrados ao fechar o plantão e as baixas realizadas, inclusive de outros assistentes sociais.</div>
             </div>
             <div id="social-service-history-count" class="portaria-registry-count">0 registros</div>
           </div>
@@ -454,7 +609,7 @@
             <datalist id="social-service-history-patient-options"></datalist>
             <button id="btn-refresh-social-service-history" type="button" class="ghost">Atualizar</button>
           </div>
-          <div id="social-service-history-empty" class="hint hidden">Nenhuma observação do Serviço Social encontrada neste mês.</div>
+          <div id="social-service-history-empty" class="hint hidden">Nenhuma produção do Serviço Social encontrada neste mês.</div>
           <div class="psychology-table-wrap">
             <table class="psychology-table social-service-history-table">
               <thead>
@@ -477,31 +632,53 @@
         </section>
       </div>
       <div id="social-service-tab-age-panel" class="psychology-tab-panel hidden">
-        <section class="psychology-shell social-service-history-shell">
-          <div class="psychology-header">
+        <section class="bpa-report-shell psychology-shell" id="social-service-bpa-panel">
+          <div class="bpa-report-header">
+            <div class="bpa-hospital-mark">HMA</div>
             <div>
-              <div class="procedimentos-title">Atendimentos por idade</div>
-              <div class="history-hint">Conta todos os atendimentos registrados no histórico do mês por idade exata, de 0 até 105 anos.</div>
+              <h2>Boletim de Produção Ambulatorial Consolidado — BPA-C</h2>
+              <div class="bpa-report-subtitle">Atendimentos do Serviço Social</div>
             </div>
-            <div id="social-service-age-count" class="portaria-registry-count">0 atendimentos</div>
           </div>
-          <div class="row psychology-monthly-toolbar">
-            <label>Mês
+          <div class="row bpa-toolbar">
+            <label>Mês de referência
               <input id="social-service-age-filter" type="month">
             </label>
-            <button id="btn-refresh-social-service-age" type="button" class="ghost">Atualizar</button>
+            <button id="btn-refresh-social-service-age" type="button" class="ghost">Atualizar relatório</button>
+            <button id="btn-print-social-service-bpa" type="button">Imprimir / Salvar PDF</button>
           </div>
-          <div class="social-service-age-table-wrap">
-            <table class="psychology-table social-service-age-table">
-              <thead>
-                <tr>
-                  <th>Idade</th>
-                  <th>Total</th>
-                </tr>
-              </thead>
-              <tbody id="social-service-age-list"></tbody>
-            </table>
-          </div>
+          <section class="bpa-paper">
+            <div class="bpa-unit-details">
+              <div><strong>UNIDADE:</strong> HOSPITAL MUNICIPAL DE AÇAILÂNDIA — HMA</div>
+              <div><strong>ESPECIALIDADE:</strong> SERVIÇO SOCIAL</div>
+              <div><strong>CNES:</strong> 2463016</div>
+              <div><strong>MÊS/ANO:</strong> <span id="social-service-bpa-period">-</span></div>
+            </div>
+            <div class="bpa-table-caption">ATENDIMENTOS</div>
+            <div class="psychology-table-wrap bpa-table-wrap">
+              <table class="bpa-table">
+                <thead>
+                  <tr>
+                    <th>PROCEDIMENTOS</th>
+                    <th>CBO</th>
+                    <th>IDADE</th>
+                    <th>QUANTIDADE</th>
+                  </tr>
+                </thead>
+                <tbody id="social-service-bpa-rows"></tbody>
+                <tfoot>
+                  <tr>
+                    <th colspan="3">ATENDIMENTOS DO SERVIÇO SOCIAL</th>
+                    <th id="social-service-bpa-total">0</th>
+                  </tr>
+                  <tr>
+                    <th colspan="3">TOTAL</th>
+                    <th id="social-service-bpa-grand-total">0</th>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </section>
         </section>
       </div>
     </section>
@@ -602,40 +779,57 @@
     <section id="view-nir" class="panel nir-report hidden">
       <div class="nir-report-card">
         <div class="nir-report-top">
-          <div class="nir-report-brands">
-            <div class="nir-brand-chip">ACAIXLÂNDIA</div>
-            <div class="nir-brand-chip">SEMUS</div>
-            <div class="nir-brand-chip">HMA</div>
+          <div id="nir-view-title" class="nir-report-title">MAPA DE PACIENTES SINALIZADOS AO NIR</div>
+        </div>
+        <div class="nir-view-tabs" role="tablist" aria-label="Relatórios do NIR">
+          <button id="nir-tab-map" type="button" role="tab" aria-selected="true" aria-controls="nir-map-panel">Mapa de pacientes</button>
+          <button id="nir-tab-external" type="button" role="tab" aria-selected="false" aria-controls="nir-external-panel">Regulação externa</button>
+          <button id="nir-tab-census" type="button" role="tab" aria-selected="false" aria-controls="nir-census-panel">Censo mensal — todos os setores</button>
+        </div>
+        <section class="nir-shift-control">
+          <div class="plantao-control-card">
+            <div class="plantao-card-heading">
+              <div>
+                <div class="plantao-card-title">Controle do plantão — NIR</div>
+                <div class="plantao-card-subtitle">O NIR é o setor deste plantão. Abra o período para registrar as atividades e encerre para emitir a ficha.</div>
+              </div>
+              <span id="nir-shift-panel-status" class="shift-panel-status">Plantão fechado</span>
+            </div>
+            <div class="plantao-form-grid nir-shift-form-grid">
+              <label>Setor do plantão
+                <input type="text" value="NIR" readonly>
+              </label>
+              <label>Data do plantão
+                <input id="nir-shift-date" type="date" readonly>
+              </label>
+              <label>Tipo do plantão
+                <select id="nir-shift-length" required>
+                  <option value="" selected disabled>Selecione 12H ou 24H</option>
+                  <option value="12H">12H</option>
+                  <option value="24H">24H</option>
+                </select>
+              </label>
+            </div>
+            <div class="plantao-action-grid nir-shift-action-grid">
+              <button id="btn-open-nir-shift" type="button">Abrir plantão</button>
+              <button id="btn-close-nir-shift" type="button" class="shift-close-action">Encerrar plantão e emitir ficha</button>
+              <button id="btn-open-nir-team-modal" type="button" class="ghost">Equipe do plantão</button>
+            </div>
+            <label>Relatório de enfermagem do plantão NIR
+              <textarea id="nir-shift-nursing-report" rows="5" placeholder="Descreva as atividades e observações do plantão NIR."></textarea>
+            </label>
+            <div class="modal-actions" style="justify-content: flex-start;">
+              <button id="btn-save-nir-shift-report" type="button" class="ghost">Salvar relatório de enfermagem</button>
+            </div>
+            <div id="nir-shift-feedback" class="hint hidden nir-shift-feedback"></div>
           </div>
-          <div class="nir-report-title">MAPA DE PACIENTES SINALIZADOS AO NIR</div>
-        </div>
-        <div class="nir-report-meta">
-          <div id="nir-report-date">DATA: -</div>
-          <div id="nir-report-nurse">ENFERMEIRO: -</div>
-        </div>
-        <div id="nir-feedback" class="hint hidden"></div>
-        <div class="nir-table-wrap">
-          <table class="nir-table">
-            <thead>
-              <tr>
-                <th>Setor</th>
-                <th>Paciente</th>
-                <th>Leito</th>
-                <th>Data da Internação</th>
-                <th>NIR</th>
-                <th>EMAIL</th>
-                <th>SIREL</th>
-                <th>Data da Regulação</th>
-                <th>Ação</th>
-              </tr>
-            </thead>
-            <tbody id="nir-list"></tbody>
-          </table>
-        </div>
-        <div id="nir-list-empty" class="hint hidden">Nenhum paciente sinalizado ao NIR no momento.</div>
-        <div class="nir-accepted-block">
-          <div class="procedimentos-title">Pacientes aceitos</div>
-          <div class="history-hint">Aqui aparecem os pacientes aceitos e acompanhados pelo NIR entre os que foram sinalizados nos setores.</div>
+        </section>
+        <div id="nir-map-panel" role="tabpanel" aria-labelledby="nir-tab-map">
+          <div class="nir-report-meta">
+            <div id="nir-report-date">DATA: -</div>
+            <div id="nir-report-nurse">ENFERMEIRO: -</div>
+          </div>
+          <div id="nir-feedback" class="hint hidden nir-feedback-row"></div>
           <div class="nir-table-wrap">
             <table class="nir-table">
               <thead>
@@ -645,45 +839,134 @@
                   <th>Leito</th>
                   <th>Data da Internação</th>
                   <th>NIR</th>
-                  <th>EMAIL</th>
-                  <th>SIREL</th>
-                  <th>Aceito em</th>
-                  <th>Ação</th>
                 </tr>
               </thead>
-              <tbody id="nir-accepted-list"></tbody>
+              <tbody id="nir-list"></tbody>
             </table>
           </div>
-          <div id="nir-accepted-list-empty" class="hint hidden">Nenhum paciente aceito neste dia operacional.</div>
-        </div>
-        <div class="nir-notes-grid">
-          <section class="history-panel">
-            <div class="procedimentos-title">Relatório do enfermeiro</div>
-            <div class="history-hint">Digite as atualizações do seu plantão para este dia operacional.</div>
-            <textarea id="nir-current-report-input" rows="6" placeholder="Descreva as regulações, e-mails, SIREL, movimentações e observações do plantão."></textarea>
-            <div id="nir-report-feedback" class="hint hidden"></div>
-            <div class="modal-actions" style="justify-content: flex-start;">
-              <button id="btn-save-nir-report" type="button">Salvar relatório</button>
-              <button id="btn-print-nir-report" type="button" class="ghost">Emitir PDF do plantão</button>
+          <div id="nir-list-empty" class="hint hidden">Nenhum paciente sinalizado ao NIR no momento.</div>
+          <div class="nir-accepted-block">
+            <div class="procedimentos-title">Pacientes aceitos</div>
+            <div class="history-hint">Aqui aparecem os pacientes aceitos e acompanhados pelo NIR entre os que foram sinalizados nos setores.</div>
+            <div class="nir-table-wrap">
+              <table class="nir-table">
+                <thead>
+                  <tr>
+                    <th>Setor</th>
+                    <th>Paciente</th>
+                    <th>Leito</th>
+                    <th>Data da Internação</th>
+                    <th>NIR</th>
+                    <th>Especialidade</th>
+                    <th>EMAIL</th>
+                    <th>SIREL</th>
+                    <th>Regulado em</th>
+                    <th>Ação</th>
+                  </tr>
+                </thead>
+                <tbody id="nir-accepted-list"></tbody>
+              </table>
             </div>
-            <div class="nir-saved-report">
-              <div class="procedimentos-title">Relatório salvo</div>
-              <div id="nir-current-report-saved" class="patient-history-card">
-                <span>Nenhum relatório salvo para este dia operacional.</span>
+            <div id="nir-accepted-list-empty" class="hint hidden">Nenhum paciente aceito neste dia operacional.</div>
+          </div>
+          <div class="nir-notes-grid">
+            <section class="history-panel">
+              <div class="procedimentos-title">Relatórios de outros profissionais</div>
+              <div class="history-hint">Aqui aparecem os registros salvos em outros logins no mesmo dia e também do plantão anterior.</div>
+              <div id="nir-previous-reports" class="history-list"></div>
+            </section>
+            <section class="history-panel">
+              <div class="row" style="justify-content: space-between; align-items: center;">
+                <div>
+                  <div class="procedimentos-title">Fichas finalizadas do NIR</div>
+                  <div class="history-hint">Consulte as fichas de todos os plantões NIR finalizados e visualize ou salve uma cópia em PDF.</div>
+                </div>
+                <button id="btn-refresh-nir-shift-reports" type="button" class="ghost">Atualizar</button>
               </div>
-            </div>
-          </section>
-          <section class="history-panel">
-            <div class="procedimentos-title">Relatórios de outros profissionais</div>
-            <div class="history-hint">Aqui aparecem os registros salvos em outros logins no mesmo dia e também do plantão anterior.</div>
-            <div id="nir-previous-reports" class="history-list"></div>
-          </section>
+              <div id="nir-shift-reports-feedback" class="hint hidden" aria-live="polite"></div>
+              <div id="nir-shift-reports-empty" class="chart-empty hidden">Nenhuma ficha NIR finalizada encontrada.</div>
+              <div id="nir-shift-reports-list" class="history-list nir-finalized-shift-list"></div>
+            </section>
+          </div>
         </div>
+        <section id="nir-census-panel" class="nir-census-section hidden" role="tabpanel" aria-labelledby="nir-tab-census">
+          <div class="nir-census-heading">
+            <div>
+              <h2 id="nir-census-title">Censo diário — acompanhamento por setor</h2>
+              <div id="nir-census-count" class="history-hint">Cada dia representa o período das 07h às 07h. Dias sem envio aparecem como —.</div>
+            </div>
+            <label>Mês
+              <input id="nir-census-month" type="month">
+            </label>
+          </div>
+          <div class="nir-census-day-search">
+            <label>Consultar censo de um dia
+              <input id="nir-census-date" type="date">
+            </label>
+            <button id="btn-nir-census-day-search" type="button" class="ghost">Pesquisar dia</button>
+          </div>
+          <h3 class="nir-census-subtitle">Censos disponíveis para reimpressão</h3>
+          <div id="nir-census-day-results" class="nir-census-day-results"></div>
+          <h3 class="nir-census-subtitle">Registros diários por setor</h3>
+          <div class="nir-table-wrap">
+            <table class="nir-table nir-census-table" aria-label="Censo diário dos setores por dia do mês">
+              <thead>
+                <tr id="nir-census-days-header"></tr>
+              </thead>
+              <tbody id="nir-census-list"></tbody>
+            </table>
+          </div>
+          <h3 class="nir-census-subtitle">Resumo mensal por setor</h3>
+          <div class="nir-table-wrap">
+            <table class="nir-table nir-census-summary-table" aria-label="Resumo mensal de ocupação e saídas por setor">
+              <thead>
+                <tr>
+                  <th>Setor</th>
+                  <th>Paciente/Dia</th>
+                  <th>Leito/Dia</th>
+                  <th>Óbitos</th>
+                  <th>Altas</th>
+                  <th>TE</th>
+                  <th>TI</th>
+                  <th>Saídas</th>
+                  <th>Tx. ocupação (%)</th>
+                  <th>TPM (dias)</th>
+                  <th>Giro de leito</th>
+                  <th>Dias informados</th>
+                </tr>
+              </thead>
+              <tbody id="nir-census-summary"></tbody>
+            </table>
+          </div>
+        </section>
+        <section id="nir-external-panel" class="nir-census-section hidden" role="tabpanel" aria-labelledby="nir-tab-external">
+          <div class="nir-census-heading">
+            <div>
+              <h2>Controle de regulação externa/HMA</h2>
+              <div class="history-hint">Registre os encaminhamentos e resultados. Os dados salvos serão incluídos na ficha de fechamento do plantão NIR.</div>
+            </div>
+            <button id="btn-add-nir-external-regulation" type="button">Adicionar regulação</button>
+          </div>
+          <div id="nir-external-regulation-feedback" class="hint hidden" aria-live="polite"></div>
+          <div id="nir-external-regulation-empty" class="chart-empty">Nenhum registro de regulação externa neste plantão.</div>
+          <div id="nir-external-regulation-list" class="nir-external-regulation-list"></div>
+        </section>
       </div>
     </section>
 
     <section id="view-admin" class="panel hidden">
-      <h2>Cadastro de Estrutura</h2>
+      <h2>Cadastro de profissionais</h2>
+      <section id="admin-ward-management" class="panel hidden">
+      <section id="admin-shift-reopen-section" class="panel hidden">
+        <div class="procedimentos-title">Solicitações de reabertura de plantão</div>
+        <div class="history-hint">Revise o motivo e autorize ou negue pedidos enviados pelos profissionais.</div>
+        <div class="row">
+          <button id="btn-refresh-shift-reopen-requests" type="button" class="ghost">Atualizar solicitações</button>
+        </div>
+        <div id="admin-shift-reopen-feedback" class="hint hidden" aria-live="polite"></div>
+        <div id="admin-shift-reopen-empty" class="hint hidden">Nenhuma solicitação pendente.</div>
+        <div id="admin-shift-reopen-list" class="shift-history-list"></div>
+      </section>
       <div class="row">
         <label>1. Novo setor <input id="admin-ward-name" placeholder="Ex: POSTO 1"></label>
         <button id="btn-criar-ward">Criar setor</button>
@@ -750,28 +1033,31 @@
           <div id="admin-bed-list" class="history-list"></div>
         </div>
       </section>
+      </section>
 
       <section id="admin-users-section" class="panel hidden">
-        <h3>Usuários</h3>
+        <h3>Profissionais</h3>
         <div class="row">
           <label>Nome completo <input id="admin-user-name" placeholder="Nome do servidor"></label>
-          <label>Usuário <input id="admin-user-username" placeholder="Login de acesso"></label>
+          <label>Login <input id="admin-user-username" placeholder="Login de acesso" autocomplete="off"></label>
           <label>CPF <input id="admin-user-cpf" inputmode="numeric" maxlength="14" placeholder="000.000.000-00"></label>
-          <label>Data de nascimento <input id="admin-user-birthdate" type="date"></label>
-          <label>Perfil
+          <label>Função
             <select id="admin-user-role">
-              <option value="user">Usuário</option>
+              <option value="enfermeiro">Enfermeiro</option>
+              <option value="coordenador">Coordenador</option>
+              <option value="psicologo">Psicólogo</option>
+              <option value="servico_social">Serviço Social</option>
               <option value="admin">Administrador</option>
             </select>
           </label>
-          <label>Senha <input id="admin-user-password" type="password" placeholder="Digite para cadastrar ou alterar"></label>
-          <button id="btn-save-user">Salvar usuário</button>
+          <div class="hint">Senha inicial: <strong>123456</strong>. Será solicitada a troca no primeiro acesso.</div>
+          <button id="btn-save-user">Salvar profissional</button>
           <button id="btn-cancel-user-edit" class="ghost hidden">Cancelar edição</button>
         </div>
         <div id="admin-users-feedback" class="hint hidden"></div>
         <div id="admin-users-list-empty" class="hint hidden">Nenhum usuário cadastrado.</div>
         <div class="admin-users-list">
-          <div class="admin-users-title">Usuários cadastrados</div>
+          <div class="admin-users-title">Profissionais cadastrados</div>
           <div id="admin-users-list" class="admin-users-table"></div>
         </div>
       </section>
@@ -779,15 +1065,6 @@
       <div class="row" style="margin-top: 24px; justify-content: flex-end;">
         <button id="btn-voltar-home" class="ghost">Voltar para o Início</button>
       </div>
-    </section>
-
-    <section id="ward-detail-toolbar" class="ward-detail-toolbar hidden">
-      <div class="ward-detail-toolbar-copy">
-        <div class="ward-detail-kicker">Setor aberto</div>
-        <h2 id="ward-detail-title">Setor</h2>
-        <div id="ward-detail-subtitle" class="ward-detail-subtitle">Abra o plantão, feche, imprima o relatório e volte para acessar os outros setores.</div>
-      </div>
-      <button id="btn-back-to-sectors" type="button" class="ghost">Voltar para setores</button>
     </section>
 
     <section id="ward-shift-entry" class="ward-shift-entry hidden">
@@ -802,11 +1079,46 @@
       </div>
     </section>
 
+    <dialog id="modal-assume-ward-shift" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <div class="modal-title">Assumir plantão</div>
+          <button id="btn-cancel-assume-ward-shift" type="button" class="ghost" aria-label="Fechar">Fechar</button>
+        </div>
+        <div class="modal-body">
+          <div id="assume-ward-shift-context" class="hint"></div>
+          <label>Tipo do plantão
+            <select id="assume-ward-shift-length" required>
+              <option value="" selected disabled>Selecione 12H ou 24H</option>
+              <option value="12H">12H</option>
+              <option value="24H">24H</option>
+            </select>
+          </label>
+          <div id="assume-ward-shift-feedback" class="hint hidden" role="status" aria-live="polite"></div>
+          <button id="btn-request-assume-ward-shift-authorization" type="button" class="ghost hidden">Solicitar autorização ao coordenador</button>
+        </div>
+        <div class="modal-actions">
+          <button id="btn-confirm-assume-ward-shift" type="button">Abrir plantão</button>
+        </div>
+      </div>
+    </dialog>
+
     <section class="plantao">
       <div class="plantao-layout">
         <div class="plantao-main">
+          <div class="shift-notice" aria-live="polite">
+            <div id="shift-feedback" class="hint hidden"></div>
+            <div id="shift-authorization-status" class="hint hidden"></div>
+            <button id="btn-request-shift-authorization" type="button" class="ghost hidden">Solicitar autorização ao coordenador</button>
+          </div>
           <div class="plantao-control-card">
-            <div class="plantao-card-title">Abertura do plantão</div>
+            <div class="plantao-card-heading">
+              <div>
+                <div class="plantao-card-title">Controle do plantão</div>
+                <div class="plantao-card-subtitle">Abra o período de trabalho para registrar as atividades do setor. Ao encerrar, a ficha do plantão será gerada.</div>
+              </div>
+              <span id="shift-panel-status" class="shift-panel-status">Plantão fechado</span>
+            </div>
             <div class="plantao-form-grid">
               <label>Setor do plantão
                 <select id="shift-ward"></select>
@@ -815,23 +1127,16 @@
                 <input id="shift-date" type="date" readonly>
               </label>
               <label>Tipo do plantão
-                <select id="shift-length">
+                <select id="shift-length" required>
+                  <option value="" selected disabled>Selecione 12H ou 24H</option>
                   <option value="12H">12H</option>
                   <option value="24H">24H</option>
-                </select>
-              </label>
-              <label>Período
-                <select id="shift-period">
-                  <option value="DIA">Dia</option>
-                  <option value="NOITE">Noite</option>
-                  <option value="COMPLETO">Completo</option>
                 </select>
               </label>
             </div>
             <div class="plantao-action-grid">
               <button id="btn-open-shift">Abrir plantão</button>
-              <button id="btn-close-shift" class="ghost">Fechar plantão e imprimir</button>
-              <button id="btn-print-last-shift" class="ghost">Reimprimir ficha de produção</button>
+              <button id="btn-close-shift" type="button" class="shift-close-action">Encerrar plantão e emitir ficha</button>
               <button id="btn-open-team-modal" type="button" class="ghost">Equipe do plantão</button>
             </div>
             <label>Relatório de enfermagem do plantão
@@ -841,7 +1146,6 @@
               <button id="btn-save-shift-nursing-report" type="button" class="ghost">Salvar relatório de enfermagem</button>
             </div>
           </div>
-          <div id="shift-feedback" class="hint hidden"></div>
         </div>
       </div>
     </section>
@@ -855,13 +1159,51 @@
     </section>
 
     <section class="indicadores">
-      <h2>Indicadores</h2>
-      <div class="ind-grid">
-        <div class="ind-item"><span>Nº de Pacientes</span><strong id="ind-pacientes">0</strong></div>
-        <div class="ind-item"><span>Nº de Leitos</span><strong id="ind-leitos">0</strong></div>
-        <div class="ind-item"><span>Nº de Altas</span><strong id="ind-altas">0</strong></div>
-        <div class="ind-item"><span>Nº de Óbitos</span><strong id="ind-obitos">0</strong></div>
-        <div class="ind-item"><span>Nº de Leitos Bloqueados</span><strong id="ind-bloqueados">0</strong></div>
+      <div class="census-header">
+        <div>
+          <h2 id="census-title">Censo diário</h2>
+          <span id="census-ward-date" class="census-ward-date"></span>
+          <span id="census-authors" class="census-authors"></span>
+        </div>
+        <p>Os indicadores são atualizados automaticamente conforme as movimentações registradas no período de 24 horas (07h às 07h) e aparecem no relatório mensal do NIR.</p>
+      </div>
+      <div id="census-form">
+        <div class="census-tables">
+          <table class="census-table" aria-label="Indicadores automáticos do censo diário do setor">
+            <thead>
+              <tr><th scope="col">INDICADORES</th><th scope="col">QTD</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">Nº pacientes<small>Ocupação do setor no encerramento do período.</small></th><td><input data-census-field="pacientes" type="number" min="0" step="1" readonly aria-label="Quantidade de pacientes"></td></tr>
+              <tr><th scope="row">Nº leitos<small>Conforme leitos cadastrados no setor.</small></th><td><input data-census-field="leitos" type="number" min="0" step="1" readonly aria-label="Quantidade de leitos"></td></tr>
+              <tr><th scope="row">Nº altas<small>Altas registradas no período.</small></th><td><input data-census-field="altas" type="number" min="0" step="1" readonly aria-label="Quantidade de altas"></td></tr>
+              <tr><th scope="row">Nº óbitos<small>Óbitos registrados no período.</small></th><td><input data-census-field="obitos" type="number" min="0" step="1" readonly aria-label="Quantidade de óbitos"></td></tr>
+              <tr><th scope="row">Nº transferências externas<small>Transferências externas registradas no período.</small></th><td><input data-census-field="transferencias_externas" type="number" min="0" step="1" readonly aria-label="Quantidade de transferências externas"></td></tr>
+              <tr><th scope="row">Nº transferências internas<small>Transferências para outro setor no período.</small></th><td><input data-census-field="transferencias_internas" type="number" min="0" step="1" readonly aria-label="Quantidade de transferências internas"></td></tr>
+              <tr><th scope="row">Nº leitos bloqueados<small>Leitos bloqueados no encerramento do período.</small></th><td><input data-census-field="leitos_bloqueados" type="number" min="0" step="1" readonly aria-label="Quantidade de leitos bloqueados"></td></tr>
+            </tbody>
+          </table>
+          <table class="census-table" aria-label="Procedimentos e evasões do censo diário">
+            <thead>
+              <tr><th scope="col">PROCEDIMENTOS E MOVIMENTAÇÕES</th><th scope="col">QTD</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">Nº de SVD realizadas<small>Procedimentos registrados na ficha do paciente.</small></th><td><input data-census-field="svd_realizadas" type="number" min="0" step="1" readonly aria-label="Quantidade de SVD realizadas"></td></tr>
+              <tr><th scope="row">Nº de CVC realizadas<small>Procedimentos registrados na ficha do paciente.</small></th><td><input data-census-field="cvc_realizadas" type="number" min="0" step="1" readonly aria-label="Quantidade de CVC realizadas"></td></tr>
+              <tr><th scope="row">Nº de SNE realizadas<small>Procedimentos registrados na ficha do paciente.</small></th><td><input data-census-field="sne_realizadas" type="number" min="0" step="1" readonly aria-label="Quantidade de SNE realizadas"></td></tr>
+              <tr><th scope="row">Nº de intubações realizadas<small>Procedimentos registrados na ficha do paciente.</small></th><td><input data-census-field="intubacoes_realizadas" type="number" min="0" step="1" readonly aria-label="Quantidade de intubações realizadas"></td></tr>
+              <tr><th scope="row">Evasão<small>Desfechos registrados no período.</small></th><td><input data-census-field="evasoes" type="number" min="0" step="1" readonly aria-label="Quantidade de evasões"></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="census-submit-row">
+          <p id="census-submit-notice">Envie o censo diário ao NIR até as 22h.</p>
+          <div class="census-submit-actions">
+            <span id="census-submit-status" class="census-submit-status" role="status" aria-live="polite">Ainda não enviado ao NIR.</span>
+            <button id="btn-send-census" type="button">Enviar ao NIR</button>
+          </div>
+        </div>
+        <div id="census-feedback" class="hint" aria-live="polite">Atualização automática habilitada.</div>
       </div>
     </section>
 
@@ -897,18 +1239,25 @@
         <div class="modal-title">Equipe do plantão</div>
       </div>
       <div class="modal-body">
-        <div class="hint">Cadastre a equipe do dia vinculada ao seu plantão.</div>
+        <div id="shift-team-modal-hint" class="hint">Cadastre a equipe do dia vinculada ao seu plantão.</div>
         <div class="modal-grid shift-team-modal-grid">
-          <label>Médico do plantão <input id="eq-medico" list="staff-list-medicos"></label>
+          <label id="field-eq-medico">Médico do plantão <input id="eq-medico" list="staff-list-medicos"></label>
           <label id="field-eq-enf-dia">Enfermeiro(a) dia <input id="eq-enf-dia" list="staff-list-enfermeiros"></label>
           <label id="field-eq-tec-dia">Técnicos(as) dia <input id="eq-tec-dia" list="staff-list-tecnicos"></label>
           <label id="field-eq-enf-noite">Enfermeiro(a) noite <input id="eq-enf-noite" list="staff-list-enfermeiros"></label>
           <label id="field-eq-tec-noite">Técnicos(as) noite <input id="eq-tec-noite" list="staff-list-tecnicos"></label>
-          <label>Faltosos <input id="eq-faltosos"></label>
+          <label id="field-eq-faltosos">Faltosos <input id="eq-faltosos"></label>
+          <label id="field-eq-nir-nurse" class="hidden">Enfermeiro(a) responsável
+            <input id="eq-nir-nurse" readonly>
+          </label>
+          <label id="field-eq-nir-admin" class="hidden">Auxiliar administrativo
+            <input id="eq-nir-admin" list="staff-list-administrativos">
+          </label>
         </div>
         <datalist id="staff-list-medicos"></datalist>
         <datalist id="staff-list-enfermeiros"></datalist>
         <datalist id="staff-list-tecnicos"></datalist>
+        <datalist id="staff-list-administrativos"></datalist>
       </div>
       <div class="modal-actions">
         <button id="salvar-equipe" type="button" class="primary-action">Salvar equipe</button>
@@ -938,20 +1287,24 @@
   <dialog id="modal-paciente" class="modal">
     <form method="dialog" class="modal-content">
       <div class="modal-header">
-        <div class="modal-title" id="modal-title">Cadastrar paciente</div>
+        <div class="bed-modal-heading">
+          <div class="modal-title" id="modal-title">Cadastrar paciente</div>
+          <span id="bed-status-pending" class="bed-status-pending hidden">Não salvo</span>
+        </div>
+        <label class="bed-status-control" for="modal-status">
+          <span class="sr-only">Situação do leito</span>
+          <select id="modal-status">
+            <option value="OCUPADO">OCUPADO</option>
+            <option value="LIVRE">DESOCUPADO</option>
+            <option value="BLOQUEADO">BLOQUEADO</option>
+            <option value="RESERVADO">RESERVADO</option>
+            <option value="EXTRA">EXTRA</option>
+          </select>
+        </label>
       </div>
       <div class="modal-body">
         <div class="modal-grid">
           <label>Leito <input id="modal-leito" disabled></label>
-          <label>Situação
-            <select id="modal-status">
-              <option value="OCUPADO">OCUPADO</option>
-              <option value="LIVRE">DESOCUPADO</option>
-              <option value="BLOQUEADO">BLOQUEADO</option>
-              <option value="RESERVADO">RESERVADO</option>
-              <option value="EXTRA">EXTRA</option>
-            </select>
-          </label>
           <label>CPF do paciente
             <div class="inline-field-action">
               <input id="modal-nome" inputmode="numeric" maxlength="14" placeholder="000.000.000-00">
@@ -979,22 +1332,32 @@
         </div>
         <div class="procedimentos">
           <div class="procedimentos-title">Procedimentos realizados</div>
-          <div class="history-hint">Selecione o procedimento realizado e clique em Registrar para gravar a data e o usuário.</div>
+          <div class="history-hint">Registre no paciente cada procedimento realizado. Os totais de SVD, CVC, SNE e intubação são somados no censo do plantão.</div>
           <div class="procedimentos-grid">
-            <label class="proc-item"><input type="checkbox" value="SNE" class="proc-check"> SNE</label>
-            <label class="proc-item"><input type="checkbox" value="SNG" class="proc-check"> SNG</label>
-            <label class="proc-item"><input type="checkbox" value="SANGUE" class="proc-check"> SANGUE</label>
-            <label class="proc-item"><input type="checkbox" value="ASPIRAÇÃO" class="proc-check"> ASPIRAÇÃO</label>
-            <label class="proc-item"><input type="checkbox" value="DRENO DE TORAX" class="proc-check"> DRENO DE TORAX</label>
+            <label class="proc-item"><input type="checkbox" value="SVD" class="proc-check"> <span>SVD</span></label>
+            <label class="proc-item"><input type="checkbox" value="CVC" class="proc-check"> <span>CVC</span></label>
+            <label class="proc-item"><input type="checkbox" value="SNE" class="proc-check"> <span>SNE</span></label>
+            <label class="proc-item"><input type="checkbox" value="INTUBACAO" class="proc-check"> <span>INTUBAÇÃO</span></label>
+            <label class="proc-item"><input type="checkbox" value="SNG" class="proc-check"> <span>SNG</span></label>
+            <label class="proc-item"><input type="checkbox" value="SANGUE" class="proc-check"> <span>SANGUE</span></label>
+            <label class="proc-item"><input type="checkbox" value="ASPIRAÇÃO" class="proc-check"> <span>ASPIRAÇÃO</span></label>
+          </div>
+          <div id="procedure-period-hint" class="history-hint">Cada procedimento pode ser registrado uma vez por paciente a cada período de 24h (07h às 07h).</div>
+        </div>
+        <div class="history-panel">
+          <div class="procedure-history-summary">
+            <div>
+              <div class="procedimentos-title">Histórico de procedimentos</div>
+              <div id="procedure-history-count" class="history-hint">Nenhum procedimento registrado.</div>
+            </div>
+            <button id="btn-view-procedure-history" type="button" class="ghost procedure-history-button">Ver histórico</button>
           </div>
         </div>
-        <div class="history-panel">
-          <div class="procedimentos-title">Histórico de procedimentos</div>
-          <div id="modal-procedimentos-historico" class="history-list"></div>
-        </div>
-        <div class="history-panel">
-          <div class="procedimentos-title">Transferência de paciente</div>
-          <div class="history-hint">Selecione o setor e o leito de destino para transferir o paciente com todos os dados cadastrados.</div>
+        <div id="internal-transfer-panel" class="history-panel">
+          <div class="internal-transfer-heading">
+            <div class="procedimentos-title">Transferência de paciente</div>
+            <div class="history-hint">Selecione o setor e o leito de destino. Os dados cadastrados serão mantidos.</div>
+          </div>
           <div class="modal-grid">
             <label>Setor
               <select id="modal-transfer-ward"></select>
@@ -1010,10 +1373,11 @@
           <label>Observação da transferência externa
             <textarea id="modal-external-transfer-note" rows="3" placeholder="Ex: Transferido para UPA, Hospital Regional, regulação externa, motivo e horário."></textarea>
           </label>
+          <div id="modal-outcome-feedback" class="hint hidden" aria-live="polite"></div>
         </div>
       </div>
       <div class="modal-actions">
-        <button id="modal-salvar" type="button">Registrar</button>
+        <button id="modal-salvar" type="button">Salvar leito</button>
         <button id="modal-transferir" type="button" class="ghost">Transferir</button>
         <button id="modal-transferencia-externa" type="button" class="ghost">Transferência externa</button>
         <button id="modal-alta" type="button" class="ghost">Alta</button>
@@ -1023,6 +1387,16 @@
         <button value="cancelar">Cancelar</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="modal-procedimentos-historico" class="modal procedure-history-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title" id="procedure-history-title">Histórico de procedimentos</div>
+        <button id="btn-close-procedure-history" type="button" class="modal-close" aria-label="Fechar histórico">×</button>
+      </div>
+      <div id="procedure-history-list" class="history-list"></div>
+    </div>
   </dialog>
 
   <dialog id="modal-patient-registry" class="modal">
@@ -1137,6 +1511,22 @@
     </form>
   </dialog>
 
+  <dialog id="modal-psychology-patient-history" class="modal">
+    <form method="dialog" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title" id="psychology-patient-history-title">Histórico da Psicologia</div>
+      </div>
+      <div class="modal-body">
+        <div class="hint">Consulte as evoluções registradas por todos os profissionais, inclusive plantões abertos.</div>
+        <div id="psychology-patient-history-empty" class="hint">Nenhuma evolução anterior encontrada para este paciente.</div>
+        <div id="psychology-patient-history-list" class="history-list"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-close-psychology-patient-history" type="button">Fechar</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="modal-social-service-form" class="modal social-service-form-modal">
     <form method="dialog" class="modal-content social-service-form-content">
       <div class="modal-header">
@@ -1189,6 +1579,68 @@
     </form>
   </dialog>
 
+  <dialog id="modal-nir-shift-report" class="modal">
+    <form method="dialog" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title" id="nir-shift-report-view-title">Ficha finalizada do NIR</div>
+      </div>
+      <div class="modal-body">
+        <div id="nir-shift-report-view-meta" class="hint"></div>
+        <section class="history-panel">
+          <div class="procedimentos-title">Relatório do enfermeiro</div>
+          <div id="nir-shift-report-view-nursing" class="nir-shift-report-nursing"></div>
+        </section>
+        <section class="history-panel">
+          <div id="nir-shift-report-view-patients-title" class="procedimentos-title">Pacientes aceitos no fechamento</div>
+          <div class="nir-table-wrap">
+            <table class="nir-table">
+              <thead>
+                <tr><th>Setor</th><th>Paciente</th><th>Leito</th><th>Especialidade</th><th>SIREL</th><th>Regulado em</th></tr>
+              </thead>
+              <tbody id="nir-shift-report-view-patients"></tbody>
+            </table>
+          </div>
+          <div id="nir-shift-report-view-patients-empty" class="hint hidden">Nenhum paciente aceito registrado na ficha.</div>
+        </section>
+        <section class="history-panel">
+          <div id="nir-shift-report-view-external-title" class="procedimentos-title">Regulação externa/HMA no fechamento</div>
+          <div class="nir-table-wrap">
+            <table class="nir-table">
+              <thead>
+                <tr><th>Paciente</th><th>Idade</th><th>Especialidade</th><th>Origem</th><th>Profissional</th><th>Tipo de transferência</th><th>Regulador</th><th>Resultado</th><th>Início</th><th>Fim</th><th>Tempo de espera</th></tr>
+              </thead>
+              <tbody id="nir-shift-report-view-external"></tbody>
+            </table>
+          </div>
+          <div id="nir-shift-report-view-external-empty" class="hint hidden">Nenhuma regulação externa registrada neste plantão.</div>
+        </section>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-print-nir-shift-report" type="button">Baixar / Imprimir ficha</button>
+        <button value="cancelar">Fechar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="modal-nir-admin-password" class="modal">
+    <form id="nir-admin-password-form" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">Autorização do administrador</div>
+      </div>
+      <div class="modal-body">
+        <div class="hint">Digite a senha do administrador para acessar a ficha finalizada de outro profissional.</div>
+        <label>Senha do administrador
+          <input id="nir-admin-password" type="password" autocomplete="current-password" required>
+        </label>
+        <div id="nir-admin-password-feedback" class="hint error-text hidden" role="alert"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-confirm-nir-admin-password" type="button">Continuar</button>
+        <button id="btn-cancel-nir-admin-password" type="button" class="ghost">Cancelar</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="modal-admin-bed" class="modal">
     <form method="dialog" class="modal-content">
       <div class="modal-header">
@@ -1231,16 +1683,10 @@
             <select id="modal-start-ward-select"></select>
           </label>
           <label>Tipo do plantão
-            <select id="modal-start-shift-length">
+            <select id="modal-start-shift-length" required>
+              <option value="" selected disabled>Selecione 12 ou 24 horas</option>
               <option value="12H">12 horas</option>
               <option value="24H">24 horas</option>
-            </select>
-          </label>
-          <label id="modal-start-period-field">Período
-            <select id="modal-start-shift-period">
-              <option value="DIA">Dia</option>
-              <option value="NOITE">Noite</option>
-              <option value="COMPLETO">Completo</option>
             </select>
           </label>
         </div>
@@ -1252,6 +1698,73 @@
     </div>
   </dialog>
 
-  <script src="/app.js?v=20261008-7"></script>
+  <dialog id="modal-global-shift" class="modal">
+    <div class="modal-content global-shift-content">
+      <div class="modal-header">
+        <div class="modal-title">Controle do plantão</div>
+        <button id="btn-close-global-shift" type="button" class="ghost">Fechar</button>
+      </div>
+      <div class="modal-body">
+        <div class="global-shift-modal-status">
+          <span id="global-shift-modal-state">Plantão fechado</span>
+          <p id="global-shift-modal-context">Escolha o período e abra seu plantão.</p>
+        </div>
+        <label id="global-shift-length-field">Tipo do plantão
+          <select id="global-shift-length" required>
+            <option value="" selected disabled>Selecione 12H ou 24H</option>
+            <option value="12H">12 horas</option>
+            <option value="24H">24 horas</option>
+          </select>
+        </label>
+        <div id="global-shift-feedback" class="hint hidden" role="status" aria-live="polite"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-confirm-global-shift" type="button">Abrir plantão</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="modal-reopen-shift" class="modal" aria-labelledby="shift-reopen-title">
+    <form id="shift-reopen-form" class="modal-content shift-reopen-content">
+      <div class="modal-header">
+        <div class="modal-title" id="shift-reopen-title">Solicitar reabertura do plantão</div>
+      </div>
+      <div class="modal-body">
+        <p>Explique por que precisa reabrir este plantão. A justificativa será enviada para aprovação da administração.</p>
+        <label for="shift-reopen-reason">Justificativa
+          <textarea id="shift-reopen-reason" rows="5" minlength="10" maxlength="1000" required placeholder="Descreva o motivo da reabertura (mínimo de 10 caracteres)."></textarea>
+        </label>
+        <div id="shift-reopen-feedback" class="hint error-text hidden" role="alert"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-cancel-shift-reopen" type="button" class="ghost">Cancelar</button>
+        <button type="submit">Enviar justificativa</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="modal-first-password" class="modal" aria-labelledby="first-password-title">
+    <form id="first-password-form" class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title" id="first-password-title">Crie sua nova senha</div>
+      </div>
+      <div class="modal-body">
+        <p>Por segurança, altere a senha provisória antes de continuar.</p>
+        <label for="first-password-new">Nova senha
+          <input id="first-password-new" type="password" autocomplete="new-password" minlength="6" required>
+        </label>
+        <label for="first-password-confirm">Confirme a nova senha
+          <input id="first-password-confirm" type="password" autocomplete="new-password" minlength="6" required>
+        </label>
+        <div id="first-password-feedback" class="hint error-text hidden" role="alert"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="submit">Salvar nova senha</button>
+        <button id="btn-first-password-logout" type="button" class="ghost">Sair</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js?v=20261026-24"></script>
 </body>
 </html>
